@@ -1,0 +1,10 @@
+[package]
+name = "voxel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The voxel model: a dense grid, a 256-entry palette, an edit history, and the .vxm / .vox file formats."
+
+[dependencies]
+thiserror.workspace = true

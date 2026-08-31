@@ -1,0 +1,21 @@
+[package]
+name = "voxeler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A MagicaVoxel-style model editor: orbit, build, erase, paint, and save a 64x64x64 voxel model."
+
+[[bin]]
+name = "voxeler"
+path = "src/main.rs"
+
+[dependencies]
+voxel-core.workspace = true
+voxel-render.workspace = true
+
+# Presentation only. The editor rasterizes into its own framebuffer, so the
+# window layer just upscales and blits pixels -- the same reason kessel picks a
+# CPU surface over a GPU pipeline.
+winit = "0.30"
+softbuffer = "0.4"

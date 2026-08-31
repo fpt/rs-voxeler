@@ -1,0 +1,10 @@
+[package]
+name = "voxel-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A software rasterizer for voxel models: face extraction, an orbit camera, a z-buffer, and flat directional lighting."
+
+[dependencies]
+voxel-core.workspace = true

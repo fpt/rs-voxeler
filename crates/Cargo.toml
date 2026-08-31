@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "voxel-core",
+    "voxel-render",
+    "voxeler",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Furnance Contributors"]
+
+[workspace.dependencies]
+voxel-core = { path = "voxel-core" }
+voxel-render = { path = "voxel-render" }
+
+thiserror = "1.0"
