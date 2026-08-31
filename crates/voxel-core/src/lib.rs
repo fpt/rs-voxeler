@@ -25,7 +25,7 @@ pub mod model;
 pub mod palette;
 pub mod raycast;
 
-pub use edit::{Edit, EditBatch, History};
+pub use edit::{Edit, EditBatch, History, Stroke};
 pub use model::{VoxelModel, MAX_DIM};
 pub use palette::{Palette, Rgb8};
 pub use raycast::{Face, RayHit};

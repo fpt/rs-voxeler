@@ -33,6 +33,7 @@ pub mod framebuffer;
 pub mod math;
 pub mod mesh;
 pub mod overlay;
+pub mod png;
 pub mod raster;
 
 pub use camera::OrbitCamera;

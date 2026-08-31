@@ -243,9 +243,9 @@ fn clip_to_box(origin: [f32; 3], dir: [f32; 3], bounds: [f32; 3]) -> Option<(f32
 
 fn dominant_axis(dir: [f32; 3]) -> usize {
     let (mut best, mut axis) = (dir[0].abs(), 0);
-    for a in 1..3 {
-        if dir[a].abs() > best {
-            best = dir[a].abs();
+    for (a, d) in dir.iter().enumerate().skip(1) {
+        if d.abs() > best {
+            best = d.abs();
             axis = a;
         }
     }

@@ -90,12 +90,12 @@ pub fn import(bytes: &[u8]) -> Result<VoxelModel> {
             b"RGBA" => {
                 let mut b = Reader::new(body);
                 let mut colors = [Rgb8::default(); 256];
-                // Entry i of the chunk is palette index i + 1; the file's last
-                // entry has no index and is dropped.
-                for i in 1..=255usize {
+                // Entry i of the chunk is palette index i + 1, so the fill
+                // starts at 1 and the file's last entry has no index at all.
+                for slot in colors.iter_mut().skip(1) {
                     let (red, green, blue) = (b.u8()?, b.u8()?, b.u8()?);
                     let _alpha = b.u8()?;
-                    colors[i] = Rgb8::new(red, green, blue);
+                    *slot = Rgb8::new(red, green, blue);
                 }
                 palette = Some(Palette::from_colors(colors));
             }
