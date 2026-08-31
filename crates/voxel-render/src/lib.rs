@@ -39,5 +39,5 @@ pub mod raster;
 pub use camera::OrbitCamera;
 pub use framebuffer::Framebuffer;
 pub use math::{Mat4, Vec3, Vec4};
-pub use mesh::{FaceMesh, FaceQuad};
+pub use mesh::{face_corners, FaceMesh, FaceQuad};
 pub use raster::{Light, Scene};

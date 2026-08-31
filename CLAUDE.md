@@ -79,6 +79,28 @@ known to be right.
   along the face normal. A depth bias has to be tuned against the near/far ratio
   and a value that works at arm's length fails when you zoom in.
 
+### You can always build
+
+Building places a voxel *against a face*, which on an empty grid means there is
+no face and therefore nothing to do — the editor opened on empty space and no
+click did anything. Two things fix that, and both are needed:
+
+- A new model is **seeded** with one voxel at the centre of its floor
+  (`new_model`), so the first click has something obvious to aim at.
+- When the ray misses the model entirely, building falls back to the **ground
+  plane** (`Editor::ground_target`). Without it, erasing your last voxel would
+  put the model back into the unrecoverable state.
+
+The ground target is reported as the *top* face of a cell one row **below** the
+volume, so it is shaped exactly like a hit on a voxel standing on the floor: the
+highlight, the placement and the drag plane all fall out of the existing code
+with no special case. That is also why `face_corners` takes `i32` — an unsigned
+parameter wraps `y = -1` to the far end of the world.
+
+Only building falls back. Erase, paint and pick act on a voxel, and bare floor
+is not one; pick additionally refuses index 0, or it would leave the build tool
+painting air.
+
 ### Picking is a grid walk, not a hit test
 
 `voxeler` (the Python one this succeeds) hit-tested last frame's projected
@@ -116,7 +138,13 @@ not, because they do not grow the surface they are aimed at.
 - **The HUD's layout and its hit test live together.** `hud::palette_hit` is the
   exact inverse of the swatch layout, tested swatch by swatch, for the reason
   `kessel`'s `window_to_console` is: a click landing one swatch off reads as a
-  broken editor rather than as an off-by-one.
+  broken editor rather than as an off-by-one. `over_panel` is bounded in *both*
+  axes for the same reason — testing the column alone made the whole right-hand
+  strip of the window swallow clicks silently.
+- **Opening frames the volume; `F` frames the contents.** A new model is one
+  voxel, and framing that fills the window with a single cube and shows nothing
+  of the space around it. Seeing your workspace is the right thing on open;
+  zooming to your work is a thing you ask for.
 - **A missing file is not an error.** `voxeler robot.vxm` in an empty directory
   starts a model. Refusing would mean the tool could only open what some other
   tool had already made.
@@ -194,6 +222,10 @@ furnance/
 - **A `.vox` from MagicaVoxel opens mirrored.** The axis change lost its
   negation. Fix it in `format::vox` and nowhere else — that swap is meant to
   live at the format boundary only.
+- **A click does nothing.** Check `over_panel` first — a HUD rectangle that
+  claims more than it draws eats clicks with no feedback at all. After that,
+  check whether `target_at` is returning `None`: for everything but build, no
+  voxel under the cursor means no target, by design.
 - **The editor feels slow on a large display.** The renderer caps at
   `MAX_PIXELS` (1.4 M) and upscales; if that is being hit, the cost is the
   rasterizer, and greedy meshing is the lever, not the cap.

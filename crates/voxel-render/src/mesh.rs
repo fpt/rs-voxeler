@@ -34,35 +34,14 @@ impl FaceQuad {
     /// face swaps them, which reverses the winding exactly as it must. Six
     /// hand-written corner lists would each be a chance to get one backwards.
     pub fn corners(&self) -> [Vec3; 4] {
-        let a = self.face.axis();
-        let (b, c) = if self.face.is_positive() {
-            ((a + 1) % 3, (a + 2) % 3)
-        } else {
-            ((a + 2) % 3, (a + 1) % 3)
-        };
-
-        let mut base = [
-            self.voxel[0] as f32,
-            self.voxel[1] as f32,
-            self.voxel[2] as f32,
-        ];
-        if self.face.is_positive() {
-            base[a] += 1.0;
-        }
-
-        let mut unit_b = [0.0f32; 3];
-        unit_b[b] = 1.0;
-        let mut unit_c = [0.0f32; 3];
-        unit_c[c] = 1.0;
-
-        let at = |sb: f32, sc: f32| {
-            vec3(
-                base[0] + unit_b[0] * sb + unit_c[0] * sc,
-                base[1] + unit_b[1] * sb + unit_c[1] * sc,
-                base[2] + unit_b[2] * sb + unit_c[2] * sc,
-            )
-        };
-        [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)]
+        face_corners(
+            [
+                self.voxel[0] as i32,
+                self.voxel[1] as i32,
+                self.voxel[2] as i32,
+            ],
+            self.face,
+        )
     }
 
     /// The outward unit normal.
@@ -76,6 +55,41 @@ impl FaceQuad {
         let c = self.corners();
         (c[0] + c[2]) * 0.5
     }
+}
+
+/// The four corners of one face of the cell at `voxel`, in world units,
+/// counter-clockwise seen from outside.
+///
+/// Signed coordinates, because callers legitimately name cells outside the
+/// grid: the editor's ground-plane target is the top face of a row one *below*
+/// the volume, and an unsigned parameter would wrap that to the far end of the
+/// world.
+pub fn face_corners(voxel: [i32; 3], face: Face) -> [Vec3; 4] {
+    let a = face.axis();
+    let (b, c) = if face.is_positive() {
+        ((a + 1) % 3, (a + 2) % 3)
+    } else {
+        ((a + 2) % 3, (a + 1) % 3)
+    };
+
+    let mut base = [voxel[0] as f32, voxel[1] as f32, voxel[2] as f32];
+    if face.is_positive() {
+        base[a] += 1.0;
+    }
+
+    let mut unit_b = [0.0f32; 3];
+    unit_b[b] = 1.0;
+    let mut unit_c = [0.0f32; 3];
+    unit_c[c] = 1.0;
+
+    let at = |sb: f32, sc: f32| {
+        vec3(
+            base[0] + unit_b[0] * sb + unit_c[0] * sc,
+            base[1] + unit_b[1] * sb + unit_c[1] * sc,
+            base[2] + unit_b[2] * sb + unit_c[2] * sc,
+        )
+    };
+    [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)]
 }
 
 /// The extracted surface of one model.
@@ -221,6 +235,16 @@ mod tests {
                     assert!((1.0..=2.0).contains(&v), "{c:?}");
                 }
             }
+        }
+    }
+
+    /// The ground target the editor builds against lives one row below the
+    /// volume, so negative coordinates have to survive the corner maths.
+    #[test]
+    fn corners_of_a_cell_below_the_origin_stay_below_it() {
+        let c = face_corners([2, -1, 3], Face::PosY);
+        for corner in c {
+            assert_eq!(corner.y, 0.0, "the top face of y = -1 is the plane y = 0");
         }
     }
 

@@ -106,11 +106,17 @@ impl OrbitCamera {
     }
 
     /// Frame an axis-aligned box: look at its centre from far enough back that
-    /// it fits vertically, with a little margin.
+    /// it fits, with a little margin.
+    ///
+    /// The distance comes from the box's bounding *sphere*, so the box fits at
+    /// any orientation and the framing does not lurch as you orbit. That is
+    /// already conservative — a cube seen corner-on is the worst case and it is
+    /// the case an orbit camera starts in — so the margin on top of it is
+    /// small; at 1.4 a 64³ volume filled only about two-fifths of the window.
     pub fn frame(&mut self, min: Vec3, max: Vec3) {
         self.target = (min + max) * 0.5;
         let radius = ((max - min) * 0.5).length().max(1.0);
-        self.distance = (radius / (self.fov_y * 0.5).tan() * 1.4).clamp(1.0, 4000.0);
+        self.distance = (radius / (self.fov_y * 0.5).tan() * 1.1).clamp(1.0, 4000.0);
     }
 
     /// The world-space ray through a pixel centre, for picking.

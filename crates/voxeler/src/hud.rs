@@ -7,7 +7,7 @@
 //! does: a click that lands one swatch away from the one under the cursor reads
 //! as a broken editor.
 
-use voxel_render::overlay::{self, text_height, text_width};
+use voxel_render::overlay::{self, text_height, text_width, ADVANCE};
 use voxel_render::Framebuffer;
 
 use crate::editor::{Editor, Tool};
@@ -62,9 +62,42 @@ pub fn palette_hit(fb_width: u32, x: f32, y: f32) -> Option<u8> {
     (index <= 255).then_some(index as u8)
 }
 
+/// How tall the palette panel actually is.
+fn panel_height() -> u32 {
+    255u32.div_ceil(COLUMNS) * SWATCH + PAD * 2 + text_height(TEXT_SCALE) + PAD
+}
+
 /// Whether a framebuffer pixel is over the panel rather than the 3D view.
+///
+/// Bounded vertically as well as horizontally. Testing the column alone made
+/// the whole right-hand strip of the window swallow clicks — the panel only
+/// covers its top few hundred rows, and below that the viewport reaches the
+/// window edge like anywhere else.
 pub fn over_panel(fb_width: u32, x: f32, y: f32) -> bool {
-    x >= panel_x(fb_width) as f32 && y >= 0.0
+    x >= panel_x(fb_width) as f32 && (0.0..panel_height() as f32).contains(&y)
+}
+
+/// How many glyphs fit in `pixels`.
+fn fit_chars(pixels: u32) -> usize {
+    (pixels / (ADVANCE * TEXT_SCALE)) as usize
+}
+
+/// Trim `s` to `max` characters, keeping the **end**.
+///
+/// The status line is mostly file paths, and the informative half of a path is
+/// the file name. Truncating the head and marking it with `..` keeps that
+/// visible where a plain cut would leave a column of identical directory
+/// prefixes running off the edge of the bar and under the help hint.
+fn fit(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 2 {
+        return String::new();
+    }
+    let tail: String = s.chars().skip(n - (max - 2)).collect();
+    format!("..{tail}")
 }
 
 pub fn draw(fb: &mut Framebuffer, editor: &Editor) {
@@ -79,8 +112,7 @@ fn draw_palette(fb: &mut Framebuffer, editor: &Editor) {
     let width = panel_width();
     let x0 = panel_x(fb.width());
     let rows = 255u32.div_ceil(COLUMNS);
-    let height = rows * SWATCH + PAD * 2 + text_height(TEXT_SCALE) + PAD;
-    overlay::blend_rect(fb, x0, 0, width, height, PANEL_BG, 220);
+    overlay::blend_rect(fb, x0, 0, width, panel_height(), PANEL_BG, 220);
 
     let (ox, oy) = grid_origin(fb.width());
     for index in 1..=255u32 {
@@ -125,19 +157,21 @@ fn draw_status(fb: &mut Framebuffer, editor: &Editor) {
     let bar_w = fb.width().saturating_sub(panel_width());
     overlay::blend_rect(fb, 0, panel_y, bar_w, panel_h, PANEL_BG, 190);
 
-    overlay::text(fb, PAD as i32, y, &editor.summary(), TEXT, TEXT_SCALE);
+    // A permanent nudge towards the help card. Discovering the keys should not
+    // require reading the source.
+    let hint = "H FOR KEYS";
+    let hint_w = text_width(hint, TEXT_SCALE) + PAD * 2;
+    let room = fit_chars(bar_w.saturating_sub(hint_w + PAD));
+
+    overlay::text(fb, PAD as i32, y, &fit(&editor.summary(), room), TEXT, TEXT_SCALE);
     overlay::text(
         fb,
         PAD as i32,
         y + line_h as i32,
-        editor.status(),
+        &fit(editor.status(), room),
         if editor.is_dirty() { ACCENT } else { DIM },
         TEXT_SCALE,
     );
-
-    // A permanent nudge towards the help card. Discovering the keys should not
-    // require reading the source.
-    let hint = "H FOR KEYS";
     overlay::text(
         fb,
         bar_w as i32 - text_width(hint, TEXT_SCALE) as i32 - PAD as i32,
@@ -271,11 +305,29 @@ mod tests {
         );
     }
 
+    /// The panel is a box, not a column. Claiming the whole right-hand strip
+    /// left a tall dead zone where clicks in the viewport did nothing.
     #[test]
-    fn the_panel_covers_the_right_hand_strip_and_nothing_else() {
+    fn the_panel_covers_its_own_box_and_nothing_else() {
         let fb_w = 800;
         assert!(over_panel(fb_w, 799.0, 10.0));
         assert!(!over_panel(fb_w, (fb_w - panel_width()) as f32 - 1.0, 10.0));
+        assert!(
+            !over_panel(fb_w, 799.0, panel_height() as f32 + 1.0),
+            "below the panel is viewport"
+        );
+    }
+
+    #[test]
+    fn a_long_path_is_trimmed_from_the_front_so_the_name_survives() {
+        assert_eq!(fit("short", 20), "short");
+        let cut = fit("/a/very/long/path/robot.vxm", 15);
+        assert_eq!(cut, "..ath/robot.vxm");
+        assert_eq!(cut.chars().count(), 15, "the result must fill exactly the room given");
+        assert_eq!(fit("abcdef", 6), "abcdef");
+        // No room at all is empty, not a panic or a lone marker.
+        assert_eq!(fit("abcdef", 2), "");
+        assert_eq!(fit("abcdef", 0), "");
     }
 
     /// Every HUD path must survive a window smaller than the panels it wants to

@@ -42,11 +42,30 @@ impl Tool {
 }
 
 /// Where a click would land, resolved against the model.
-#[derive(Clone, Copy, Debug)]
+///
+/// A target does not have to come from hitting a voxel. Building also resolves
+/// against the ground plane, so the fields describe *a face being pointed at*
+/// rather than a ray hit: for the ground that face is the top of an imaginary
+/// row of cells just under the volume, which makes the two cases identical
+/// everywhere downstream.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Target {
-    pub hit: RayHit,
+    /// The voxel whose face is under the cursor.
+    pub voxel: [i32; 3],
+    /// Which of that voxel's faces.
+    pub face: Face,
+    /// The palette index at `voxel`, or 0 when the cursor is on the ground
+    /// plane rather than on the model.
+    pub index: u8,
     /// The cell the active tool would write to.
     pub cell: [i32; 3],
+}
+
+impl Target {
+    /// Whether this is the ground plane rather than a voxel of the model.
+    pub fn is_ground(self) -> bool {
+        self.index == 0
+    }
 }
 
 /// A drag in progress.
@@ -103,7 +122,7 @@ impl Editor {
             model,
             drag: None,
         };
-        editor.frame_model();
+        editor.frame_volume();
         editor
     }
 
@@ -169,33 +188,75 @@ impl Editor {
 
     // -- picking ---------------------------------------------------------
 
-    /// What the tool would act on for a ray through a pixel, or `None` when the
-    /// ray misses the model.
+    /// What the tool would act on for a ray through a pixel, or `None` when
+    /// there is nothing there to act on.
     pub fn target_at(&self, px: f32, py: f32, width: u32, height: u32) -> Option<Target> {
         let (origin, dir) = self.camera.ray(px, py, width, height);
         let offset = self.offset();
         // The raycaster works in the grid's own coordinates, so the ray is
         // moved into model space rather than the model into world space.
         let origin = [origin.x - offset.x, origin.y - offset.y, origin.z - offset.z];
-        let mut hit = voxel_core::raycast::cast(
-            &self.model,
-            origin,
-            [dir.x, dir.y, dir.z],
-            self.camera.far,
-        )?;
+        let dir = [dir.x, dir.y, dir.z];
+
+        let hit = voxel_core::raycast::cast(&self.model, origin, dir, self.camera.far);
         // A slice hides the layers above the cut, and a ray must not pick a
         // voxel that is not on screen. Re-cast from just under the cut instead,
         // so clicking through the opening reaches the cross-section.
-        if let Some(limit) = self.slice {
-            if hit.voxel[1] >= limit as i32 {
-                hit = self.cast_below_slice(origin, [dir.x, dir.y, dir.z], limit)?;
+        let hit = match (hit, self.slice) {
+            (Some(h), Some(limit)) if h.voxel[1] >= limit as i32 => {
+                self.cast_below_slice(origin, dir, limit)
             }
-        }
+            (h, _) => h,
+        };
+
+        let Some(hit) = hit else {
+            // Nothing under the cursor. Building falls back to the floor of the
+            // volume, which is what stops an empty model — or a model you have
+            // just erased the last voxel of — from being impossible to work on.
+            // The other tools act on a voxel, and there is not one here.
+            return (self.tool == Tool::Build).then(|| self.ground_target(origin, dir)).flatten();
+        };
+
         let cell = match self.tool {
             Tool::Build => hit.adjacent(),
             Tool::Erase | Tool::Paint | Tool::Pick => hit.voxel,
         };
-        Some(Target { hit, cell })
+        Some(Target {
+            voxel: hit.voxel,
+            face: hit.face,
+            index: hit.index,
+            cell,
+        })
+    }
+
+    /// Where a ray crosses the volume's floor, as a build target.
+    ///
+    /// Reported as the *top* face of a row of cells one below the volume, so it
+    /// is shaped exactly like a hit on a voxel sitting on the floor: the
+    /// highlight, the placement and the drag plane all fall out of the same
+    /// code with no special case for the ground.
+    fn ground_target(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Target> {
+        // Only a ray travelling downward meets the floor in front of the
+        // camera; one aimed up or along it either never arrives or arrives
+        // behind the viewer.
+        if dir[1] >= -1e-6 {
+            return None;
+        }
+        let t = -origin[1] / dir[1];
+        if t <= 0.0 || t > self.camera.far {
+            return None;
+        }
+        let x = (origin[0] + dir[0] * t).floor() as i32;
+        let z = (origin[2] + dir[2] * t).floor() as i32;
+        if !self.model.contains(x, 0, z) {
+            return None;
+        }
+        Some(Target {
+            voxel: [x, -1, z],
+            face: Face::PosY,
+            index: 0,
+            cell: [x, 0, z],
+        })
     }
 
     /// Re-cast against a copy of the model with the hidden layers removed.
@@ -226,8 +287,10 @@ impl Editor {
             Tool::Erase => "erase",
             Tool::Paint => "paint",
             Tool::Pick => {
-                self.color = target.hit.index;
-                self.status = format!("picked colour {}", self.color);
+                if target.index != 0 {
+                    self.color = target.index;
+                    self.status = format!("picked colour {}", self.color);
+                }
                 return;
             }
         };
@@ -237,7 +300,7 @@ impl Editor {
             // it is the only one that needs pinning; erase and paint follow the
             // pointer over whatever it is actually over.
             plane: (self.tool == Tool::Build)
-                .then(|| (target.hit.face.axis(), target.cell[target.hit.face.axis()])),
+                .then(|| (target.face.axis(), target.cell[target.face.axis()])),
             last_cell: None,
         });
         self.continue_stroke(target);
@@ -324,6 +387,25 @@ impl Editor {
 
     // -- view ------------------------------------------------------------
 
+    /// Frame the whole volume, whatever is in it.
+    ///
+    /// This is what opening a file does, rather than framing the contents: a
+    /// model that is one voxel — a new one, seeded so there is something to
+    /// build against — would otherwise fill the window with a single cube and
+    /// give no sense of the space around it. `F` frames the contents on demand.
+    pub fn frame_volume(&mut self) {
+        let offset = self.offset();
+        let [x, y, z] = self.model.size();
+        self.camera.frame(
+            offset,
+            Vec3 {
+                x: offset.x + x as f32,
+                y: offset.y + y as f32,
+                z: offset.z + z as f32,
+            },
+        );
+    }
+
     /// Point the camera at the model's contents, or at the whole volume when
     /// it is empty — an empty model has no bounds to frame.
     pub fn frame_model(&mut self) {
@@ -362,7 +444,7 @@ impl Editor {
             fov_y: fov,
             ..OrbitCamera::default()
         };
-        self.frame_model();
+        self.frame_volume();
     }
 
     /// Move the slice plane, clamped to the volume. `None` turns slicing off.
@@ -431,7 +513,7 @@ impl Editor {
                 self.dirty = false;
                 self.slice = None;
                 self.invalidate_mesh();
-                self.frame_model();
+                self.frame_volume();
                 self.status = format!("reloaded {}", self.path.display());
             }
             Err(e) => self.status = format!("reload failed: {e}"),
@@ -465,26 +547,39 @@ impl Editor {
     }
 }
 
-/// Load `path`, or start an empty `size`³ model if it does not exist yet.
+/// Load `path`, or start a new `size`³ model if it does not exist yet.
 ///
 /// A missing file is not an error: `voxeler robot.vxm` on a fresh directory is
 /// how you start a model, and refusing would mean the tool could only ever open
 /// something another tool had made.
 pub fn open_or_create(path: &Path, size: u16) -> Result<VoxelModel, String> {
     if !path.exists() {
-        return Ok(VoxelModel::new(size, size, size));
+        return Ok(new_model(size));
     }
     format::load(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// An empty volume with one voxel in the middle of its floor.
+///
+/// The seed is there so a new model has something to click. Building places
+/// against a face, so on a truly empty grid there is no face to place against —
+/// the ground-plane fallback in [`Editor::target_at`] covers that too, but a
+/// visible starting cube is what makes the first click obvious rather than
+/// something you have to know about.
+///
+/// On the floor rather than mid-air: a model grows upward from the ground
+/// plane, and a voxel floating at the centre of the volume has nothing under it
+/// to relate to.
+pub fn new_model(size: u16) -> VoxelModel {
+    let mut model = VoxelModel::new(size, size, size);
+    let mid = (size / 2) as i32;
+    model.set(mid, 0, mid, 1);
+    model
+}
+
 /// The face a target highlight should outline, as four world-space corners.
 pub fn face_corners(voxel: [i32; 3], face: Face, offset: Vec3) -> [Vec3; 4] {
-    let quad = voxel_render::mesh::FaceQuad {
-        voxel: [voxel[0] as u16, voxel[1] as u16, voxel[2] as u16],
-        face,
-        index: 1,
-    };
-    let c = quad.corners();
+    let c = voxel_render::face_corners(voxel, face);
     [c[0] + offset, c[1] + offset, c[2] + offset, c[3] + offset]
 }
 
@@ -512,8 +607,8 @@ mod tests {
     fn build_targets_the_cell_against_the_face() {
         let e = editor_with_floor();
         let t = e.target_at(160.0, 120.0, 320, 240).expect("should hit");
-        assert_eq!(t.hit.face, Face::PosY);
-        assert_eq!(t.cell, [t.hit.voxel[0], 1, t.hit.voxel[2]]);
+        assert_eq!(t.face, Face::PosY);
+        assert_eq!(t.cell, [t.voxel[0], 1, t.voxel[2]]);
     }
 
     #[test]
@@ -522,14 +617,88 @@ mod tests {
         for tool in [Tool::Erase, Tool::Paint, Tool::Pick] {
             e.tool = tool;
             let t = e.target_at(160.0, 120.0, 320, 240).unwrap();
-            assert_eq!(t.cell, t.hit.voxel, "{tool:?}");
+            assert_eq!(t.cell, t.voxel, "{tool:?}");
         }
     }
 
+    /// The bug this pair exists for: an empty model was impossible to work on,
+    /// because building places against a face and there was no face.
     #[test]
-    fn a_ray_into_empty_space_has_no_target() {
-        let e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
-        assert!(e.target_at(0.0, 0.0, 320, 240).is_none());
+    fn building_on_an_empty_model_falls_back_to_the_ground_plane() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 0.9;
+
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("the floor is a target");
+        assert!(t.is_ground());
+        assert_eq!(t.cell[1], 0, "a ground build lands on the floor");
+        assert!(e.model().contains(t.cell[0], t.cell[1], t.cell[2]));
+
+        e.begin_stroke(t);
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), 1);
+        assert_eq!(e.model().get(t.cell[0], 0, t.cell[2]), e.color);
+    }
+
+    /// Only building falls back. The other tools act on a voxel, and pointing
+    /// at bare floor is pointing at nothing for them.
+    #[test]
+    fn the_other_tools_have_no_target_over_empty_space() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 0.9;
+        for tool in [Tool::Erase, Tool::Paint, Tool::Pick] {
+            e.tool = tool;
+            assert!(e.target_at(160.0, 120.0, 320, 240).is_none(), "{tool:?}");
+        }
+    }
+
+    /// A ray that leaves the volume sideways, or points at the sky, meets no
+    /// floor in front of the camera and must not invent one behind it.
+    #[test]
+    fn the_ground_fallback_stops_at_the_volumes_edge() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 0.9;
+        // Far off to the side: the floor plane is met well outside the volume.
+        assert!(e.target_at(2.0, 120.0, 320, 240).is_none());
+        // Looking upward from below the floor: the plane is behind the camera.
+        e.camera.pitch = -1.2;
+        assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
+    }
+
+    /// Erasing the last voxel must not leave the model unrecoverable — the
+    /// state the ground fallback exists to rescue.
+    #[test]
+    fn a_model_emptied_by_erasing_can_still_be_built_on() {
+        let mut e = editor_with_floor();
+        e.clear();
+        assert_eq!(e.model().filled_count(), 0);
+
+        e.tool = Tool::Build;
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("the floor is still there");
+        e.begin_stroke(t);
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), 1);
+    }
+
+    #[test]
+    fn a_new_model_is_seeded_with_one_voxel_on_its_floor() {
+        let m = new_model(64);
+        assert_eq!(m.filled_count(), 1);
+        assert_eq!(m.get(32, 0, 32), 1);
+    }
+
+    /// Opening frames the volume rather than the contents: a one-voxel seed
+    /// framed to its own bounds fills the window with a single cube.
+    #[test]
+    fn opening_frames_the_volume_not_the_seed() {
+        let e = Editor::new(new_model(64), PathBuf::from("t.vxm"));
+        assert!(
+            e.camera.distance > 64.0,
+            "framed to {} — that is the seed, not the volume",
+            e.camera.distance
+        );
     }
 
     #[test]
@@ -626,6 +795,22 @@ mod tests {
         assert!(!e.is_dirty());
     }
 
+    /// Air is not a colour. A pick that resolved to index 0 would leave the
+    /// build tool painting nothing at all.
+    #[test]
+    fn pick_never_selects_air() {
+        let mut e = editor_with_floor();
+        e.color = 7;
+        e.tool = Tool::Pick;
+        e.begin_stroke(Target {
+            voxel: [0, -1, 0],
+            face: Face::PosY,
+            index: 0,
+            cell: [0, 0, 0],
+        });
+        assert_eq!(e.color, 7);
+    }
+
     /// A slice must hide layers *and* make them unclickable — picking a voxel
     /// you cannot see is the bug this guards.
     #[test]
@@ -635,17 +820,21 @@ mod tests {
             model.set(4, y, 4, 1);
         }
         let mut e = Editor::new(model, PathBuf::from("t.vxm"));
+        // Frame the contents, not the volume: the column stands on the corner
+        // of the volume's centre, so a ray aimed at the volume centre grazes
+        // it rather than going down its axis.
+        e.frame_model();
         e.camera.yaw = 0.0;
         e.camera.pitch = 1.4; // looking down the column
         e.tool = Tool::Erase;
 
         let full = e.target_at(160.0, 120.0, 320, 240).unwrap();
-        assert!(full.hit.voxel[1] >= 3, "the unsliced pick must be above the cut");
+        assert!(full.voxel[1] >= 3, "the unsliced pick must be above the cut");
 
         e.set_slice(Some(3));
         assert!(e.mesh().quads.iter().all(|q| q.voxel[1] < 3));
         let sliced = e.target_at(160.0, 120.0, 320, 240).unwrap();
-        assert_eq!(sliced.hit.voxel[1], 2, "should pick the top of the slice");
+        assert_eq!(sliced.voxel[1], 2, "should pick the top of the slice");
     }
 
     #[test]
@@ -680,13 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_file_starts_an_empty_model_of_the_requested_size() {
+    fn a_missing_file_starts_a_seeded_model_of_the_requested_size() {
         let dir = std::env::temp_dir().join("voxeler-open-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let m = open_or_create(&dir.join("new.vxm"), 32).unwrap();
         assert_eq!(m.size(), [32, 32, 32]);
-        assert_eq!(m.filled_count(), 0);
+        assert_eq!(m.filled_count(), 1, "a new model gets one voxel to click");
+        assert_eq!(m.get(16, 0, 16), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

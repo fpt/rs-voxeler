@@ -124,21 +124,10 @@ fn draw_target(
     target: Target,
     offset: Vec3,
 ) {
-    let normal = target.hit.face.normal();
-    let lift = Vec3 {
-        x: normal[0] as f32 * LIFT,
-        y: normal[1] as f32 * LIFT,
-        z: normal[2] as f32 * LIFT,
-    };
-    let face: Vec<Vec3> = face_corners(target.hit.voxel, target.hit.face, offset)
-        .iter()
-        .map(|c| *c + lift)
-        .collect();
-
     let (fill, outline) = match editor.tool {
         Tool::Build => {
             let c = editor.model().palette().get(editor.color);
-            (c.scaled(1.0).to_u32(), c.scaled(1.6).to_u32())
+            (c.to_u32(), c.scaled(1.6).to_u32())
         }
         Tool::Erase => (ERASE_MARK, ERASE_MARK),
         Tool::Paint => {
@@ -148,9 +137,20 @@ fn draw_target(
         Tool::Pick => (0x000000, 0xFFFFFF),
     };
 
-    // The face is only filled for tools that act on the *surface*; a build
-    // shows its outline in empty space instead, which is where the voxel lands.
-    if editor.tool != Tool::Build {
+    // The face is only filled for tools that act on an existing surface. Build
+    // shows an outline in the empty cell instead — that is where the voxel
+    // lands — and the ground plane has no surface to shade at all.
+    if editor.tool != Tool::Build && !target.is_ground() {
+        let normal = target.face.normal();
+        let lift = Vec3 {
+            x: normal[0] as f32 * LIFT,
+            y: normal[1] as f32 * LIFT,
+            z: normal[2] as f32 * LIFT,
+        };
+        let face: Vec<Vec3> = face_corners(target.voxel, target.face, offset)
+            .iter()
+            .map(|c| *c + lift)
+            .collect();
         raster::fill_polygon(fb, scene, &face, fill, 0.0);
     }
 
