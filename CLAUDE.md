@@ -79,25 +79,43 @@ known to be right.
   along the face normal. A depth bias has to be tuned against the near/far ratio
   and a value that works at arm's length fails when you zoom in.
 
+### Everything is centred on the origin
+
+The volume spans ±size/2 on every axis, and the **work plane** — the grid you
+see, `Editor::ground_y` — runs through the middle of it rather than along the
+bottom. A model is an object, not a scene: there is no reason for its ground to
+be at the floor of the box, and a centred plane means the model grows either way
+and `M` mirrors about a plane you can actually see. A new model's seed voxel
+sits *on* that plane at the centre, so the first thing you see and the surface
+you build on are the same thing.
+
+The grid draws a line every `GRID_STEP` (4) voxels, picked out every
+`GRID_COARSE_STEP` (16), plus the volume's own edge whether or not the step
+divides the size. A line per cell is 65 lines each way at 64³, which at any
+framing that fits the model is a grey haze rather than a grid.
+
 ### You can always build
 
 Building places a voxel *against a face*, which on an empty grid means there is
 no face and therefore nothing to do — the editor opened on empty space and no
 click did anything. Two things fix that, and both are needed:
 
-- A new model is **seeded** with one voxel at the centre of its floor
-  (`new_model`), so the first click has something obvious to aim at.
-- When the ray misses the model entirely, building falls back to the **ground
+- A new model is **seeded** with one voxel at the centre (`new_model`), so the
+  first click has something obvious to aim at.
+- When the ray misses the model entirely, building falls back to the **work
   plane** (`Editor::ground_target`). Without it, erasing your last voxel would
   put the model back into the unrecoverable state.
 
-The ground target is reported as the *top* face of a cell one row **below** the
-volume, so it is shaped exactly like a hit on a voxel standing on the floor: the
-highlight, the placement and the drag plane all fall out of the existing code
-with no special case. That is also why `face_corners` takes `i32` — an unsigned
-parameter wraps `y = -1` to the far end of the world.
+The ground target is reported as a *face of a cell adjacent to the plane*, so it
+is shaped exactly like a hit on a real voxel: the highlight, the placement and
+the drag plane all fall out of the existing code with no special case. The plane
+has two sides and both are used — from above the new voxel lands on it, from
+below it hangs under it, the same rule as placing against a face you can see.
+`face_corners` takes `i32` for the same family of reasons: a cell adjacent to
+the plane can sit outside the volume, and an unsigned parameter would wrap
+`y = -1` to the far end of the world.
 
-Only building falls back. Erase, paint and pick act on a voxel, and bare floor
+Only building falls back. Erase, paint and pick act on a voxel, and bare plane
 is not one; pick additionally refuses index 0, or it would leave the build tool
 painting air.
 
@@ -141,6 +159,10 @@ not, because they do not grow the surface they are aimed at.
   broken editor rather than as an off-by-one. `over_panel` is bounded in *both*
   axes for the same reason — testing the column alone made the whole right-hand
   strip of the window swallow clicks silently.
+- **The default volume is 32³, and `--size` only describes a model that does not
+  exist yet.** A loaded file keeps whatever size it was saved at. 64³ is
+  supported and one flag away, but at a framing that fits it a voxel is a few
+  pixels across, which is not a workspace.
 - **Opening frames the volume; `F` frames the contents.** A new model is one
   voxel, and framing that fills the window with a single cube and shows nothing
   of the space around it. Seeing your workspace is the right thing on open;

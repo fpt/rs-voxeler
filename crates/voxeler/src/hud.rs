@@ -84,9 +84,9 @@ fn fit_chars(pixels: u32) -> usize {
 
 /// Trim `s` to `max` characters, keeping the **end**.
 ///
-/// The status line is mostly file paths, and the informative half of a path is
-/// the file name. Truncating the head and marking it with `..` keeps that
-/// visible where a plain cut would leave a column of identical directory
+/// For the status line, which is mostly file paths: the informative half of a
+/// path is the file name. Truncating the head and marking it with `..` keeps
+/// that visible where a plain cut would leave a column of identical directory
 /// prefixes running off the edge of the bar and under the help hint.
 fn fit(s: &str, max: usize) -> String {
     let n = s.chars().count();
@@ -98,6 +98,22 @@ fn fit(s: &str, max: usize) -> String {
     }
     let tail: String = s.chars().skip(n - (max - 2)).collect();
     format!("..{tail}")
+}
+
+/// Trim `s` to `max` characters, keeping the **start**.
+///
+/// The summary line runs most-important-first — the size and the voxel count
+/// before the undo depth — so it loses its tail, not its head.
+fn fit_head(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 2 {
+        return String::new();
+    }
+    let head: String = s.chars().take(max - 2).collect();
+    format!("{head}..")
 }
 
 pub fn draw(fb: &mut Framebuffer, editor: &Editor) {
@@ -163,7 +179,7 @@ fn draw_status(fb: &mut Framebuffer, editor: &Editor) {
     let hint_w = text_width(hint, TEXT_SCALE) + PAD * 2;
     let room = fit_chars(bar_w.saturating_sub(hint_w + PAD));
 
-    overlay::text(fb, PAD as i32, y, &fit(&editor.summary(), room), TEXT, TEXT_SCALE);
+    overlay::text(fb, PAD as i32, y, &fit_head(&editor.summary(), room), TEXT, TEXT_SCALE);
     overlay::text(
         fb,
         PAD as i32,
@@ -328,6 +344,15 @@ mod tests {
         // No room at all is empty, not a panic or a lone marker.
         assert_eq!(fit("abcdef", 2), "");
         assert_eq!(fit("abcdef", 0), "");
+    }
+
+    /// The summary loses its tail, not its head: "32X32X32  9 VOX" is the part
+    /// worth keeping when the bar is narrow.
+    #[test]
+    fn the_summary_is_trimmed_from_the_back() {
+        assert_eq!(fit_head("32X32X32  9 VOX  BUILD", 12), "32X32X32  ..");
+        assert_eq!(fit_head("short", 20), "short");
+        assert_eq!(fit_head("abcdef", 2), "");
     }
 
     /// Every HUD path must survive a window smaller than the panels it wants to

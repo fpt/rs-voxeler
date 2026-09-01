@@ -32,7 +32,7 @@ pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) 
     let size = editor.model().size();
 
     if editor.show_grid {
-        draw_ground(fb, &scene, size, offset);
+        draw_ground(fb, &scene, editor, size, offset);
     }
 
     let palette = editor.model().palette().clone();
@@ -46,39 +46,51 @@ pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) 
     }
 }
 
-/// A grid on the floor of the volume, with every eighth line picked out so the
-/// eye can count cells without following each one.
-fn draw_ground(fb: &mut Framebuffer, scene: &Scene, size: [u16; 3], offset: Vec3) {
-    let y = offset.y - LIFT;
+/// How many voxels between grid lines, and between the brighter ones.
+///
+/// Not every voxel. A line per cell is 65 lines each way on a 64³ volume, which
+/// at any framing that fits the model is closer to a grey haze than to a grid —
+/// and a grid you cannot count is not doing its job. Every fourth line, picked
+/// out every sixteenth, gives roughly a dozen lines per axis at either size and
+/// keeps both steps powers of two, so they line up with the volume's own edges.
+const GRID_STEP: u16 = 4;
+const GRID_COARSE_STEP: u16 = 16;
+
+/// The work plane, drawn as a grid through the middle of the volume.
+///
+/// At `Editor::ground_y` rather than at the bottom of the box: the volume is
+/// centred on the world origin, and so is the plane you build against.
+fn draw_ground(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, size: [u16; 3], offset: Vec3) {
+    let y = offset.y + editor.ground_y() as f32 - LIFT;
     let (sx, sz) = (size[0] as f32, size[2] as f32);
-    for i in 0..=size[0] {
+
+    // The last line is the volume's own edge, so it is drawn whether or not the
+    // step happens to divide the size -- a 30-wide model still gets a border.
+    let lines = |n: u16| {
+        (0..=n)
+            .step_by(GRID_STEP as usize)
+            .chain(std::iter::once(n))
+            .map(move |i| (i, if i % GRID_COARSE_STEP == 0 || i == n { GRID_COARSE } else { GRID_FINE }))
+    };
+
+    for (i, color) in lines(size[0]) {
         let x = offset.x + i as f32;
-        let color = if i % 8 == 0 { GRID_COARSE } else { GRID_FINE };
         raster::draw_line(
             fb,
             scene,
             Vec3 { x, y, z: offset.z },
-            Vec3 {
-                x,
-                y,
-                z: offset.z + sz,
-            },
+            Vec3 { x, y, z: offset.z + sz },
             color,
             0.0,
         );
     }
-    for i in 0..=size[2] {
+    for (i, color) in lines(size[2]) {
         let z = offset.z + i as f32;
-        let color = if i % 8 == 0 { GRID_COARSE } else { GRID_FINE };
         raster::draw_line(
             fb,
             scene,
             Vec3 { x: offset.x, y, z },
-            Vec3 {
-                x: offset.x + sx,
-                y,
-                z,
-            },
+            Vec3 { x: offset.x + sx, y, z },
             color,
             0.0,
         );

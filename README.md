@@ -30,13 +30,17 @@ voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
 
 `FILE` defaults to `model.vxm` and does not have to exist — a missing file
-starts a 64³ volume with one voxel on its floor to build against. A `.vox`
-extension reads and writes MagicaVoxel's format; anything else is the editor's
-own `.vxm`.
+starts a **32³** volume with one voxel at its centre to build against.
+`--size 64` gives you the larger volume; a file that already exists keeps
+whatever size it was saved at, so `--size` only ever describes a new model. A
+`.vox` extension reads and writes MagicaVoxel's format; anything else is the
+editor's own `.vxm`.
 
-With the build tool you can also click bare floor: a ray that misses the model
-falls back to the ground plane, so an empty model is never a dead end. The other
-tools act on a voxel, and do nothing over empty space.
+The volume is centred on the origin, spanning ±size/2 on every axis, and the
+grid runs through the middle of it. That grid is the work plane: with the build
+tool you can click it directly — a ray that misses the model falls back to the
+plane, from either side — so an empty model is never a dead end. The other tools
+act on a voxel, and do nothing over empty space.
 
 | | |
 | --- | --- |

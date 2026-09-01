@@ -84,7 +84,8 @@ ARGS:
                 .vox is read and written as MagicaVoxel's format
 
 OPTIONS:
-    --size N            edge length for a new model (default: 64, max: 256)
+    --size N            edge length for a new model (default: 32, max: 256)
+                        ignored when FILE exists -- a saved model keeps its own
     --thumbnail OUT     render one view to OUT.png and exit, no window
     --width N           thumbnail width  (default: 512)
     --height N          thumbnail height (default: 512)
@@ -172,10 +173,18 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_a_64_cubed_model_vxm() {
+    fn defaults_to_a_32_cubed_model_vxm() {
         let a = parse(&[]).unwrap();
         assert_eq!(a.path, PathBuf::from("model.vxm"));
-        assert_eq!(a.size, 64);
+        assert_eq!(a.size, 32);
+    }
+
+    /// The larger volume is still one flag away, and a loaded file's own size
+    /// wins over both — `--size` only ever describes a model that does not
+    /// exist yet.
+    #[test]
+    fn size_64_is_still_accepted() {
+        assert_eq!(parse(&["--size", "64"]).unwrap().size, 64);
     }
 
     #[test]

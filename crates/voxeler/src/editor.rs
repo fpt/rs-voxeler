@@ -12,10 +12,15 @@ use voxel_core::{format, Face, History, RayHit, Stroke, VoxelModel};
 use voxel_render::mesh::{extract, ExtractOptions, FaceMesh};
 use voxel_render::{Mat4, OrbitCamera, Vec3};
 
-/// The default edge length for a new model. The plan's 32³ is enough for a
-/// sword; 64³ is where a character with a face on it starts to work, and the
-/// renderer handles a full 64³ shell without trouble.
-pub const DEFAULT_SIZE: u16 = 64;
+/// The default edge length for a new model.
+///
+/// 32 rather than 64 because a volume you cannot judge by eye is not a
+/// workspace: at 64³ framed to fit, one voxel is a few pixels across and the
+/// grid reads as haze. 32³ is the size the plan starts at, it is enough for a
+/// character, and `--size 64` is one flag away. A loaded file keeps whatever
+/// size it was saved at — this is only the size of a model that does not exist
+/// yet.
+pub const DEFAULT_SIZE: u16 = 32;
 
 /// What a click does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -154,6 +159,18 @@ impl Editor {
         self.history.redo_depth()
     }
 
+    /// The model-space Y of the work plane — the grid you see, and the height a
+    /// build lands at when the ray misses the model.
+    ///
+    /// The middle of the volume, so the plane passes through the world origin
+    /// and the volume is symmetric about it. A model is an object, not a scene:
+    /// there is no reason for its ground to be at the bottom of the box, and
+    /// putting it in the middle means you can grow the model either way and
+    /// `M` mirrors about a plane you can actually see.
+    pub fn ground_y(&self) -> i32 {
+        self.model.size()[1] as i32 / 2
+    }
+
     /// The world-space offset that puts the volume's centre on the origin.
     ///
     /// The grid's own coordinates start at zero, but a model that orbits about
@@ -236,26 +253,37 @@ impl Editor {
     /// highlight, the placement and the drag plane all fall out of the same
     /// code with no special case for the ground.
     fn ground_target(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<Target> {
-        // Only a ray travelling downward meets the floor in front of the
-        // camera; one aimed up or along it either never arrives or arrives
-        // behind the viewer.
-        if dir[1] >= -1e-6 {
+        // A ray running along the plane never lands on it, and one aimed away
+        // meets it only behind the viewer.
+        if dir[1].abs() < 1e-6 {
             return None;
         }
-        let t = -origin[1] / dir[1];
+        let gy = self.ground_y() as f32;
+        let t = (gy - origin[1]) / dir[1];
         if t <= 0.0 || t > self.camera.far {
             return None;
         }
         let x = (origin[0] + dir[0] * t).floor() as i32;
         let z = (origin[2] + dir[2] * t).floor() as i32;
-        if !self.model.contains(x, 0, z) {
+
+        // Place against the side of the plane you are looking at, the same way
+        // a build places against the face of a voxel it can see: from above the
+        // new voxel sits on the plane, from below it hangs under it.
+        let (voxel, face, cell) = if dir[1] < 0.0 {
+            let gy = self.ground_y();
+            ([x, gy - 1, z], Face::PosY, [x, gy, z])
+        } else {
+            let gy = self.ground_y();
+            ([x, gy, z], Face::NegY, [x, gy - 1, z])
+        };
+        if !self.model.contains(cell[0], cell[1], cell[2]) {
             return None;
         }
         Some(Target {
-            voxel: [x, -1, z],
-            face: Face::PosY,
+            voxel,
+            face,
             index: 0,
-            cell: [x, 0, z],
+            cell,
         })
     }
 
@@ -559,7 +587,7 @@ pub fn open_or_create(path: &Path, size: u16) -> Result<VoxelModel, String> {
     format::load(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// An empty volume with one voxel in the middle of its floor.
+/// An empty volume with one voxel at its centre.
 ///
 /// The seed is there so a new model has something to click. Building places
 /// against a face, so on a truly empty grid there is no face to place against —
@@ -567,13 +595,13 @@ pub fn open_or_create(path: &Path, size: u16) -> Result<VoxelModel, String> {
 /// visible starting cube is what makes the first click obvious rather than
 /// something you have to know about.
 ///
-/// On the floor rather than mid-air: a model grows upward from the ground
-/// plane, and a voxel floating at the centre of the volume has nothing under it
-/// to relate to.
+/// At the centre of the volume, which is also the world origin and the height
+/// of the work plane: the seed sits *on* the grid rather than floating over it
+/// or buried under it.
 pub fn new_model(size: u16) -> VoxelModel {
     let mut model = VoxelModel::new(size, size, size);
     let mid = (size / 2) as i32;
-    model.set(mid, 0, mid, 1);
+    model.set(mid, mid, mid, 1);
     model
 }
 
@@ -629,15 +657,29 @@ mod tests {
         e.camera.yaw = 0.0;
         e.camera.pitch = 0.9;
 
-        let t = e.target_at(160.0, 120.0, 320, 240).expect("the floor is a target");
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("the work plane is a target");
         assert!(t.is_ground());
-        assert_eq!(t.cell[1], 0, "a ground build lands on the floor");
+        assert_eq!(t.cell[1], e.ground_y(), "a ground build lands on the work plane");
         assert!(e.model().contains(t.cell[0], t.cell[1], t.cell[2]));
 
         e.begin_stroke(t);
         e.end_stroke();
         assert_eq!(e.model().filled_count(), 1);
-        assert_eq!(e.model().get(t.cell[0], 0, t.cell[2]), e.color);
+        assert_eq!(e.model().get(t.cell[0], t.cell[1], t.cell[2]), e.color);
+    }
+
+    /// The plane runs through the middle of the volume, so it has two sides.
+    /// Seen from below, a build must hang under it rather than land on top —
+    /// the same rule as placing against the face of a voxel you can see.
+    #[test]
+    fn building_from_under_the_work_plane_places_on_the_underside() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = -0.9; // orbited below the plane, looking up at it
+
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("the plane has an underside");
+        assert_eq!(t.face, Face::NegY);
+        assert_eq!(t.cell[1], e.ground_y() - 1);
     }
 
     /// Only building falls back. The other tools act on a voxel, and pointing
@@ -660,10 +702,10 @@ mod tests {
         let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
         e.camera.yaw = 0.0;
         e.camera.pitch = 0.9;
-        // Far off to the side: the floor plane is met well outside the volume.
+        // Far off to the side: the plane is met well outside the footprint.
         assert!(e.target_at(2.0, 120.0, 320, 240).is_none());
-        // Looking upward from below the floor: the plane is behind the camera.
-        e.camera.pitch = -1.2;
+        // A level camera looks *along* the plane and never lands on it.
+        e.camera.pitch = 0.0;
         assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
     }
 
@@ -683,19 +725,28 @@ mod tests {
     }
 
     #[test]
-    fn a_new_model_is_seeded_with_one_voxel_on_its_floor() {
-        let m = new_model(64);
+    fn a_new_model_is_seeded_with_one_voxel_at_its_centre() {
+        let m = new_model(32);
         assert_eq!(m.filled_count(), 1);
-        assert_eq!(m.get(32, 0, 32), 1);
+        assert_eq!(m.get(16, 16, 16), 1);
+    }
+
+    /// The seed sits on the work plane rather than over or under it, so the
+    /// first thing you see and the surface you build on are the same thing.
+    #[test]
+    fn the_seed_stands_on_the_work_plane() {
+        let e = Editor::new(new_model(32), PathBuf::from("t.vxm"));
+        assert_eq!(e.ground_y(), 16);
+        assert_eq!(e.model().get(16, e.ground_y(), 16), 1);
     }
 
     /// Opening frames the volume rather than the contents: a one-voxel seed
     /// framed to its own bounds fills the window with a single cube.
     #[test]
     fn opening_frames_the_volume_not_the_seed() {
-        let e = Editor::new(new_model(64), PathBuf::from("t.vxm"));
+        let e = Editor::new(new_model(32), PathBuf::from("t.vxm"));
         assert!(
-            e.camera.distance > 64.0,
+            e.camera.distance > 32.0,
             "framed to {} — that is the seed, not the volume",
             e.camera.distance
         );
@@ -876,7 +927,7 @@ mod tests {
         let m = open_or_create(&dir.join("new.vxm"), 32).unwrap();
         assert_eq!(m.size(), [32, 32, 32]);
         assert_eq!(m.filled_count(), 1, "a new model gets one voxel to click");
-        assert_eq!(m.get(16, 0, 16), 1);
+        assert_eq!(m.get(16, 16, 16), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
