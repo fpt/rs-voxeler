@@ -102,7 +102,22 @@ list_objects / create_object / rename_object / delete_object
 set_layer_object / reparent_object / set_object_visible / move_object
 select_layer / add_layer / set_layer_visible / trim_layer
 set_color / find_color / set_palette_color
+count_by_color / select_by_color
+replace_color / merge_colors / swap_colors / compact_palette
 ```
+
+`count_by_color` before changing a colour scheme: it is the only tool that says
+what the model is made of, and an index you assumed is usually not the index in
+the file. `select_by_color` then makes one colour a selection, so "move every
+window on this building" is two calls.
+
+`replace_color` moves voxels between palette slots; `set_palette_color` changes
+what a slot means. Reach for the first when one part should become another
+colour, the second when the colour itself is wrong everywhere.
+
+`compact_palette` renumbers every index — read the `mapping` it returns, because
+anything you were holding is stale afterwards. Leave it until the asset is
+finished.
 
 `list_objects` is how you find out what a model's parts are called before
 changing one. An object says what a thing is; a layer says how pixels combine.
