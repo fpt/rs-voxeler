@@ -90,6 +90,10 @@ struct Drag {
     /// legitimate no-op — and a no-op with no explanation reads as a broken
     /// editor, which is the whole reason this is carried.
     owner: Option<usize>,
+    /// Whether this stroke began on the work plane. Keeps the plane open for
+    /// the rest of the drag: its first placement fills the active layer, which
+    /// would otherwise close the plane out from under the remaining moves.
+    on_plane: bool,
 }
 
 pub struct Editor {
@@ -257,11 +261,12 @@ impl Editor {
         };
 
         let Some(hit) = hit else {
-            // Nothing under the cursor. Building falls back to the floor of the
-            // volume, which is what stops an empty model — or a model you have
-            // just erased the last voxel of — from being impossible to work on.
-            // The other tools act on a voxel, and there is not one here.
-            return (self.tool == Tool::Build).then(|| self.ground_target(origin, dir)).flatten();
+            // Nothing under the cursor. Building may fall back to the work
+            // plane — but only where that is the way to start, never as a
+            // standing offer. See `plane_is_open`.
+            return (self.tool == Tool::Build && self.plane_is_open())
+                .then(|| self.ground_target(origin, dir))
+                .flatten();
         };
 
         let cell = match self.tool {
@@ -274,6 +279,34 @@ impl Editor {
             index: hit.index,
             cell,
         })
+    }
+
+    /// Whether the work plane is currently something you can build on.
+    ///
+    /// It is open while the **active layer is empty**, and closed once that
+    /// layer holds anything. Three things fall out of that one rule:
+    ///
+    /// - You can always start. An empty layer — a new one, or one you have just
+    ///   erased the last voxel of — has nothing to build against, and the plane
+    ///   is what rescues it. That was the fallback's whole purpose.
+    /// - You can start a *part*. A new layer for a tree is empty, so its first
+    ///   voxel goes anywhere on the plane; after that the tree is what you
+    ///   build against.
+    /// - Empty space stops being clickable the moment there is something to
+    ///   aim at. Leaving the plane open turned the entire viewport into a build
+    ///   surface, so a click meant for the camera placed a voxel instead —
+    ///   which is the bug this rule exists to fix.
+    ///
+    /// A stroke that began on the plane keeps it open until the button comes
+    /// up, or the first placement of a drag would close the plane under the
+    /// rest of it.
+    fn plane_is_open(&self) -> bool {
+        if self.drag.as_ref().is_some_and(|d| d.on_plane) {
+            return true;
+        }
+        // `is_empty` stops at the first filled cell, so the common answer —
+        // "no, this layer has something in it" — costs one comparison.
+        self.model.layers()[self.model.active_layer()].is_empty()
     }
 
     /// Where a ray crosses the volume's floor, as a build target.
@@ -363,6 +396,7 @@ impl Editor {
             owner: self
                 .model
                 .owner_at(target.voxel[0], target.voxel[1], target.voxel[2]),
+            on_plane: target.is_ground(),
         });
         self.continue_stroke(target);
     }
@@ -1230,6 +1264,74 @@ mod tests {
         let t = e.target_at(160.0, 120.0, 320, 240).expect("the plane has an underside");
         assert_eq!(t.face, Face::NegY);
         assert_eq!(t.cell[1], e.ground_y() - 1);
+    }
+
+    /// The bug this fixes: with the plane always open, the whole viewport was a
+    /// build surface, and a click meant for the camera placed a voxel.
+    #[test]
+    fn the_work_plane_closes_once_the_active_layer_has_something_to_build_on() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 0.9;
+        assert!(
+            e.target_at(160.0, 120.0, 320, 240).is_some_and(|t| t.is_ground()),
+            "an empty layer has nothing to aim at, so the plane is how you start"
+        );
+
+        // One voxel in a far corner — nowhere near this ray, but enough to make
+        // the layer something you can build against.
+        e.model.set(0, 0, 0, 1);
+        assert!(
+            e.target_at(160.0, 120.0, 320, 240).is_none(),
+            "empty space stops being clickable once there is something to aim at"
+        );
+    }
+
+    /// And a new layer opens it again, which is how a part of a scene gets its
+    /// first voxel somewhere away from everything else.
+    #[test]
+    fn a_new_layer_opens_the_work_plane_again() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 0.9;
+        e.model.set(0, 0, 0, 1);
+        assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
+
+        e.add_layer();
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("a layer with nothing in it");
+        assert!(t.is_ground());
+        e.begin_stroke(t);
+        e.end_stroke();
+        assert_eq!(e.model().get_in(1, t.cell[0], t.cell[1], t.cell[2]), e.color);
+    }
+
+    /// A stroke that started on the plane has to finish there: its own first
+    /// placement fills the layer, which would otherwise close the plane out
+    /// from under the rest of the drag.
+    #[test]
+    fn a_drag_that_began_on_the_work_plane_keeps_it_open() {
+        let mut e = Editor::new(VoxelModel::new(16, 8, 16), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.0;
+        e.camera.pitch = 1.2;
+
+        let start = e.target_at(160.0, 120.0, 320, 240).expect("the plane");
+        assert!(start.is_ground());
+        e.begin_stroke(start);
+        for px in (100..220).step_by(4) {
+            if let Some(t) = e.target_at(px as f32, 120.0, 320, 240) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+
+        assert!(
+            e.model().filled_count() > 3,
+            "the drag stopped after its first voxel: {} placed",
+            e.model().filled_count()
+        );
+        assert_eq!(e.undo_depth(), 1, "and it is still one stroke");
+        // Once the button is up the plane is closed again.
+        assert!(e.target_at(20.0, 200.0, 320, 240).is_none());
     }
 
     /// Only building falls back. The other tools act on a voxel, and pointing
