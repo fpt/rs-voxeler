@@ -367,6 +367,33 @@ slab reported "100 added", left the slab untouched, and put a hundred-cell ghost
 on the layer above. `mcp::tools`' `fill` now reads the active layer and refuses
 a seed another layer owns, naming the layer to select instead.
 
+### Counts are maintained, not walked
+
+`VoxelModel::filled_count` and `Layer::filled_count` are O(1) fields kept in
+step with the voxels, because the answer is asked for far more often than it
+changes: every MCP tool call reports it, the status line reads it on every
+redraw, and the layer panel reads the per-layer one per row per redraw. The walk
+behind them is O(filled × layers).
+
+Measured before fixing: at 256³ a **single voxel edit cost 43 ms**. The write is
+O(1); the report that followed it walked the whole model. It is now 0 ms.
+
+Two rules keep them honest:
+
+- **`set_in` is the only path that changes one cell**, and it adjusts both
+  counts there — the composite one from `get` either side of the write (a hidden
+  layer, or one under a cover, changes nothing visible), the layer's own from the
+  value it replaced.
+- **Everything that changes many cells at once recomputes**: `clear`,
+  `set_layer_visible`, `remove_layer`, `move_layer`, `merge_down`,
+  `restore_layers`, `resize`, `subdivide`, and `Layer::reshape`. These are rare
+  and the recount is cheap against how rarely they happen.
+
+`recount()` is the definition the field is kept in step with, and
+`the_maintained_count_never_drifts_from_a_fresh_walk` runs every operation that
+can change what is visible and checks the cheap answer against the expensive one
+after each. A cached count that silently drifts is worse than a slow one.
+
 ### Dense in memory, sparse on disk
 
 A 64³ grid is 256 KiB, small enough that the simplest representation wins:
@@ -810,3 +837,8 @@ rs-voxeler/
 - **The editor feels slow on a large display.** The renderer caps at
   `MAX_PIXELS` (1.4 M) and upscales; if that is being hit, the cost is the
   rasterizer, and greedy meshing is the lever, not the cap.
+- **The editor feels slow on a large *scene*.** Different cost, and measure
+  before guessing. At 256³ the remaining ones are face extraction (~300 ms per
+  rebuild, which is chunked dirty tracking's job — see the sparse-chunk issue)
+  and the undo history, which stores an `Edit` per changed cell and so costs
+  ~170 MB for a fill of the whole scene. Neither is a lookup problem any more.

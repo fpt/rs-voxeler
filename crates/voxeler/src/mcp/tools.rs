@@ -770,9 +770,8 @@ fn dispatch(
             // takes are the solid ones of the active layer — not the box.
             edit(editor, "mcp paint", color, move |model, layer| {
                 box_cells(lo, hi)
-                    .into_iter()
                     .filter(|c| model.get_in(layer, c[0], c[1], c[2]) != 0)
-                    .collect()
+                    .collect::<Vec<_>>()
             })
         }
         "fill" => {
@@ -1183,11 +1182,11 @@ fn path_arg(args: &Value) -> Result<String, String> {
 /// closure taking the model, so a tool can select against the grid it is about
 /// to change — paint needs the solid cells, fill needs a flood — without this
 /// function knowing which.
-fn edit(
+fn edit<I: IntoIterator<Item = [i32; 3]>>(
     editor: &mut Editor,
     label: &'static str,
     color: u8,
-    cells: impl FnOnce(&VoxelModel, usize) -> Vec<[i32; 3]>,
+    cells: impl FnOnce(&VoxelModel, usize) -> I,
 ) -> Result<CallResult, String> {
     let mut report = Report::default();
     editor.apply_batch(label, color, cells, |before, after| {
@@ -1609,16 +1608,15 @@ fn u16_triple(args: &Value, name: &str) -> Result<[u16; 3], String> {
     Ok(out)
 }
 
-fn box_cells(lo: [i32; 3], hi: [i32; 3]) -> Vec<[i32; 3]> {
-    let mut out = Vec::new();
-    for z in lo[2]..=hi[2] {
-        for y in lo[1]..=hi[1] {
-            for x in lo[0]..=hi[0] {
-                out.push([x, y, z]);
-            }
-        }
-    }
-    out
+/// Every cell of a box, lazily.
+///
+/// An iterator rather than a list: a box is pure arithmetic, and a 256³ one is
+/// sixteen million cells — two hundred megabytes of coordinates that exist only
+/// to be walked once. Nothing downstream needs them all at hand.
+fn box_cells(lo: [i32; 3], hi: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
+    (lo[2]..=hi[2]).flat_map(move |z| {
+        (lo[1]..=hi[1]).flat_map(move |y| (lo[0]..=hi[0]).map(move |x| [x, y, z]))
+    })
 }
 
 fn color_arg(editor: &Editor, args: &Value) -> Result<u8, String> {
