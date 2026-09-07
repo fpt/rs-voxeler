@@ -154,6 +154,27 @@ found by driving the real binary, where `select_connected` on an arm returned al
 the result: a flood that spread through cells outside it and was trimmed at the
 end would reach parts the box was meant to keep out.
 
+### The clipboard is not the document, and neither is the selection
+
+Both live on `Editor` and neither is saved, but they differ on undo, and the
+difference is the point:
+
+- **The selection is dropped.** It names coordinates, and an undo changes what
+  is at them.
+- **The clipboard survives.** Undo puts the *model* back; a clipboard that
+  emptied itself when you undid the copy would be a surprise rather than a rule,
+  and a paste you undid is exactly the thing you want to paste again.
+
+Cells are stored relative to the copied selection's **low corner**, so
+`paste` at that corner is what was copied rather than an arithmetic guess. The
+clipboard carries no layer: a paste writes to the *active* layer, which is what
+makes copying between layers a paste instead of a separate tool.
+
+`duplicate_selection` is copy-then-paste-at-an-offset, and it exists because the
+mirrored-pair case — the commonest reason to copy anything — should not require
+naming the corner the original happens to sit at. The copy lands selected, so
+`duplicate` then `flip` is the whole of it.
+
 ### Subdividing, and what a snapshot has to hold
 
 `VoxelModel::subdivide` scales the scene so every voxel becomes `factor`³ of

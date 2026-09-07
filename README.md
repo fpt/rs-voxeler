@@ -246,6 +246,8 @@ whoever connects.
 | `describe_selection`, `clear_selection` | what is held, and let go |
 | `move_selection` | move the held voxels, one undo step |
 | `rotate_selection`, `flip_selection` | turn or mirror them about their own box |
+| `copy_selection`, `cut_selection`, `paste` | the clipboard |
+| `duplicate_selection` | copy and paste at an offset, in one step |
 | `new_model`, `open_model`, `save_model`, `list_models` | files inside the root; listing includes subdirectories |
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
@@ -292,8 +294,16 @@ own source — a short move, a rotation of a squat shape — does not eat its ow
 arrival. Voxels pushed outside the scene are lost and
 counted. The selection follows the voxels, so a move can be repeated or refined.
 
+`duplicate_selection` then `flip_selection` is the whole of a mirrored pair,
+with no coordinate arithmetic in between: the copy lands selected, so the flip
+knows what to act on. A paste writes to the **active layer** rather than the one
+the voxels came from, which is how a part gets copied onto a layer of its own,
+and the clipboard holds cells relative to the copied selection's low corner, so
+pasting at that corner puts back exactly what was copied.
+
 Undo drops the selection — it names coordinates, and an undo changes what is at
-them. The current selection is outlined in the viewport, so whoever is attached
+them. The **clipboard survives undo**: undo puts the model back, not the
+clipboard, so a paste you undid can be pasted again. The current selection is outlined in the viewport, so whoever is attached
 can see what an agent is about to move.
 
 ## Subdividing
