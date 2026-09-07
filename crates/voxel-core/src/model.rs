@@ -131,6 +131,18 @@ pub struct Layer {
     /// it on every redraw, and walking the layer for it made the panel cost the
     /// whole model.
     filled: usize,
+    /// How many filled cells lie in each plane of each axis.
+    ///
+    /// The trick that makes a tight bounding box cheap. A *count* can be
+    /// maintained by adding and subtracting one; a *box* cannot, because
+    /// erasing the cell that was furthest out has to find the next furthest,
+    /// and nothing short of a walk knows where that is.
+    ///
+    /// Counting per plane sidesteps it. A write touches three counters, and the
+    /// box is the first and last non-zero plane on each axis — a scan of a few
+    /// hundred numbers instead of sixteen million cells. Exact, not an
+    /// approximation, and it shrinks the moment the last cell of a plane goes.
+    planes: [Vec<u32>; 3],
 }
 
 impl Layer {
@@ -139,8 +151,58 @@ impl Layer {
             name: name.into(),
             visible: true,
             voxels: vec![0; bounds.cells()],
+            planes: [
+                vec![0; bounds.size[0] as usize],
+                vec![0; bounds.size[1] as usize],
+                vec![0; bounds.size[2] as usize],
+            ],
             bounds,
             filled: 0,
+        }
+    }
+
+    /// Note one cell changing, in coordinates local to this layer's box.
+    ///
+    /// The single place `filled` and `planes` move, so the two cannot drift
+    /// apart by one of them being updated and the other forgotten.
+    fn note(&mut self, local: [usize; 3], before: u8, after: u8) {
+        match (before, after) {
+            (0, 0) => {}
+            (0, _) => {
+                self.filled += 1;
+                for (axis, at) in self.planes.iter_mut().zip(local) {
+                    axis[at] += 1;
+                }
+            }
+            (_, 0) => {
+                self.filled -= 1;
+                for (axis, at) in self.planes.iter_mut().zip(local) {
+                    axis[at] -= 1;
+                }
+            }
+            // A recolour moves neither: the cell was filled and still is.
+            _ => {}
+        }
+    }
+
+    /// Rebuild both tallies from the voxels. For the paths that replace the
+    /// whole array rather than writing cells through [`note`](Self::note).
+    fn retally(&mut self) {
+        self.filled = 0;
+        for a in 0..3 {
+            self.planes[a] = vec![0; self.bounds.size[a] as usize];
+        }
+        let b = self.bounds;
+        let (sx, sy) = (b.size[0] as usize, b.size[1] as usize);
+        for (i, v) in self.voxels.iter().enumerate() {
+            if *v == 0 {
+                continue;
+            }
+            let local = [i % sx.max(1), i / sx.max(1) % sy.max(1), i / (sx * sy).max(1)];
+            self.filled += 1;
+            for (axis, at) in self.planes.iter_mut().zip(local) {
+                axis[at] += 1;
+            }
         }
     }
 
@@ -195,35 +257,61 @@ impl Layer {
             return;
         }
         let mut voxels = vec![0u8; next.cells()];
+        let mut filled = 0usize;
+        let mut planes = [
+            vec![0u32; next.size[0] as usize],
+            vec![0u32; next.size[1] as usize],
+            vec![0u32; next.size[2] as usize],
+        ];
+        // Tallied in the copy rather than by a second walk over the result. A
+        // growing box reshapes on every write that falls outside it, so this
+        // loop runs far more often than its once-per-call shape suggests, and a
+        // second pass here cost three seconds on a full 256³ fill.
         for ([x, y, z], v) in self.iter_filled() {
             let (x, y, z) = (x as i32, y as i32, z as i32);
-            if next.contains(x, y, z) {
-                voxels[next.index(x, y, z)] = v;
+            // Reshaping can drop cells outside the new box — a trim never does,
+            // a scene resize can — so the tallies count what actually landed.
+            if !next.contains(x, y, z) {
+                continue;
+            }
+            voxels[next.index(x, y, z)] = v;
+            filled += 1;
+            let local = [
+                (x - next.origin[0] as i32) as usize,
+                (y - next.origin[1] as i32) as usize,
+                (z - next.origin[2] as i32) as usize,
+            ];
+            for (axis, at) in planes.iter_mut().zip(local) {
+                axis[at] += 1;
             }
         }
-        // Reshaping can drop cells outside the new box — a trim never does, a
-        // scene resize can — so the count is taken from what actually landed.
-        self.filled = voxels.iter().filter(|v| **v != 0).count();
         self.bounds = next;
         self.voxels = voxels;
+        self.filled = filled;
+        self.planes = planes;
     }
 
     /// The smallest box holding every filled cell, or an empty one.
-    fn occupied(&self) -> Bounds {
-        let mut lo = [u16::MAX; 3];
-        let mut hi = [0u16; 3];
-        let mut any = false;
-        for (p, _) in self.iter_filled() {
-            any = true;
-            for a in 0..3 {
-                lo[a] = lo[a].min(p[a]);
-                hi[a] = hi[a].max(p[a]);
-            }
-        }
-        if !any {
+    ///
+    /// A scan of the plane tallies rather than of the cells — a few hundred
+    /// numbers against however many million the layer holds.
+    pub fn occupied(&self) -> Bounds {
+        if self.filled == 0 {
             return Bounds::default();
         }
-        Bounds::new(lo, [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1])
+        let mut origin = [0u16; 3];
+        let mut size = [0u16; 3];
+        for a in 0..3 {
+            let first = self.planes[a].iter().position(|c| *c > 0);
+            let last = self.planes[a].iter().rposition(|c| *c > 0);
+            // `filled > 0` guarantees both, on every axis.
+            let (Some(first), Some(last)) = (first, last) else {
+                return Bounds::default();
+            };
+            origin[a] = self.bounds.origin[a] + first as u16;
+            size[a] = (last - first + 1) as u16;
+        }
+        Bounds::new(origin, size)
     }
 }
 
@@ -446,7 +534,7 @@ impl VoxelModel {
     pub fn clear(&mut self) {
         for layer in &mut self.layers {
             layer.voxels.fill(0);
-            layer.filled = 0;
+            layer.retally();
         }
         self.filled = 0;
         self.dirty_all();
@@ -549,13 +637,13 @@ impl VoxelModel {
         let seen_before = self.get(x, y, z) != 0;
         let l = &mut self.layers[layer];
         let i = l.bounds.index(x, y, z);
+        let local = [
+            (x - l.bounds.origin[0] as i32) as usize,
+            (y - l.bounds.origin[1] as i32) as usize,
+            (z - l.bounds.origin[2] as i32) as usize,
+        ];
         let before = std::mem::replace(&mut l.voxels[i], value);
-        match (before, value) {
-            (0, 0) => {}
-            (0, _) => l.filled += 1,
-            (_, 0) => l.filled -= 1,
-            _ => {}
-        }
+        l.note(local, before, value);
         let seen_after = self.get(x, y, z) != 0;
         match (seen_before, seen_after) {
             (false, true) => self.filled += 1,
@@ -820,9 +908,9 @@ impl VoxelModel {
                     }
                 }
             }
-            layer.filled = voxels.iter().filter(|v| **v != 0).count();
             layer.bounds = scaled;
             layer.voxels = voxels;
+            layer.retally();
         }
         self.size = [
             self.size[0] * factor,
@@ -852,16 +940,27 @@ impl VoxelModel {
     }
 
     /// The inclusive bounding box of the visible cells, or `None` when empty.
-    /// The editor uses it to frame the camera on a scene it just loaded.
+    /// The editor uses it to frame the camera, and every screenshot frames.
+    ///
+    /// The union of the visible layers' own boxes, which is exactly right
+    /// rather than merely close: a filled cell on *any* visible layer makes
+    /// that scene cell non-air, whether or not another layer covers it, so
+    /// nothing a hidden layer holds is counted and nothing a visible one holds
+    /// is missed.
     pub fn occupied_bounds(&self) -> Option<([u16; 3], [u16; 3])> {
         let mut min = [u16::MAX; 3];
         let mut max = [0u16; 3];
         let mut any = false;
-        for (p, _) in self.iter_filled() {
+        for layer in self.layers.iter().filter(|l| l.visible) {
+            let b = layer.occupied();
+            if b.is_empty() {
+                continue;
+            }
             any = true;
+            let end = b.end();
             for a in 0..3 {
-                min[a] = min[a].min(p[a]);
-                max[a] = max[a].max(p[a]);
+                min[a] = min[a].min(b.origin[a]);
+                max[a] = max[a].max(end[a] as u16 - 1);
             }
         }
         any.then_some((min, max))
@@ -1267,7 +1366,46 @@ mod tests {
                     "step {step} ({what}): layer {n} drifted"
                 );
                 assert_eq!(l.is_empty(), l.filled_count() == 0, "step {step} ({what})");
+                // The plane tallies, checked against the box they are supposed
+                // to describe. A tally that drifts is a camera framing the
+                // wrong thing, or a trim that cuts off voxels.
+                let mut lo = [u16::MAX; 3];
+                let mut hi = [0u16; 3];
+                let mut any = false;
+                for (p, _) in m.iter_filled_in(n) {
+                    any = true;
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(p[a]);
+                        hi[a] = hi[a].max(p[a]);
+                    }
+                }
+                let want = if any {
+                    Bounds::new(lo, [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1])
+                } else {
+                    Bounds::default()
+                };
+                assert_eq!(
+                    l.occupied(),
+                    want,
+                    "step {step} ({what}): layer {n}'s occupied box drifted"
+                );
             }
+            // And the scene's, which is what frames the camera.
+            let mut lo = [u16::MAX; 3];
+            let mut hi = [0u16; 3];
+            let mut any = false;
+            for (p, _) in m.iter_filled() {
+                any = true;
+                for a in 0..3 {
+                    lo[a] = lo[a].min(p[a]);
+                    hi[a] = hi[a].max(p[a]);
+                }
+            }
+            assert_eq!(
+                m.occupied_bounds(),
+                any.then_some((lo, hi)),
+                "step {step} ({what}): the scene's occupied box drifted"
+            );
         };
 
         for x in 0..8 {
@@ -1280,6 +1418,12 @@ mod tests {
         check(&m, "erasing air again");
         m.set(1, 0, 0, 9);
         check(&m, "a recolour, which changes no count");
+        // The case a maintained *box* cannot do and plane tallies can: erasing
+        // the cell that was furthest out has to find the next furthest.
+        m.set(7, 0, 0, 0);
+        check(&m, "erasing the furthest cell, so the box must shrink");
+        m.set(0, 0, 0, 0);
+        check(&m, "and the nearest, so it must shrink from the other end");
 
         // A second layer over the first: writing where something already shows
         // must not count twice, and hiding it must give the cell back.

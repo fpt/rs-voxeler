@@ -402,32 +402,41 @@ Two things fall out of walking a chunk's cells rather than a layer's:
   to have to find nothing. It did, briefly: 19 ms became 40 ms before the check
   went in.
 
-### Counts are maintained, not walked
+### Tallies are maintained, not walked
 
-`VoxelModel::filled_count` and `Layer::filled_count` are O(1) fields kept in
-step with the voxels, because the answer is asked for far more often than it
-changes: every MCP tool call reports it, the status line reads it on every
-redraw, and the layer panel reads the per-layer one per row per redraw. The walk
-behind them is O(filled × layers).
+`VoxelModel::filled_count`, `Layer::filled_count` and `Layer::occupied` are all
+O(1)-ish because the answers are asked for far more often than they change:
+every MCP tool call reports a count, the status line reads one on every redraw,
+the layer panel reads a per-layer one per row per redraw, and **every screenshot
+frames**, which asks for the occupied box.
 
-Measured before fixing: at 256³ a **single voxel edit cost 43 ms**. The write is
-O(1); the report that followed it walked the whole model. It is now 0 ms.
+Measured before fixing, at 256³: a single voxel edit cost 43 ms, and a
+screenshot after one cost 348 ms. Both are now under 15 ms.
 
-Two rules keep them honest:
+A **count** can be maintained by adding and subtracting one. A **box** cannot —
+erasing the cell that was furthest out has to find the next furthest, and
+nothing short of a walk knows where that is. So `Layer::planes` counts filled
+cells per plane of each axis: a write touches three counters, and the tight box
+is the first and last non-zero plane on each axis, a scan of a few hundred
+numbers rather than of sixteen million cells. Exact, not an approximation, and
+it shrinks the moment the last cell of a plane goes.
 
-- **`set_in` is the only path that changes one cell**, and it adjusts both
-  counts there — the composite one from `get` either side of the write (a hidden
-  layer, or one under a cover, changes nothing visible), the layer's own from the
-  value it replaced.
-- **Everything that changes many cells at once recomputes**: `clear`,
-  `set_layer_visible`, `remove_layer`, `move_layer`, `merge_down`,
-  `restore_layers`, `resize`, `subdivide`, and `Layer::reshape`. These are rare
-  and the recount is cheap against how rarely they happen.
+`VoxelModel::occupied_bounds` is then the union of the *visible* layers' boxes,
+which is exactly right rather than merely close: a filled cell on any visible
+layer makes that scene cell non-air whether or not another layer covers it.
 
-`recount()` is the definition the field is kept in step with, and
-`the_maintained_count_never_drifts_from_a_fresh_walk` runs every operation that
-can change what is visible and checks the cheap answer against the expensive one
-after each. A cached count that silently drifts is worse than a slow one.
+Three rules keep them honest:
+
+- **`Layer::note` is the only place a single cell moves a tally**, so `filled`
+  and `planes` cannot drift apart by one being updated and the other forgotten.
+- **Paths that replace the whole array tally as they build it**, never by a
+  second walk over the result. `reshape` is called on every write that falls
+  outside a growing box, so a second pass there cost three seconds on a full
+  256³ fill — it was measured, not guessed.
+- **`the_maintained_count_never_drifts_from_a_fresh_walk`** runs every operation
+  that can change what is visible and checks every cheap answer against the
+  expensive one, including erasing the furthest cell on each side so the box has
+  to shrink from both ends.
 
 ### Dense in memory, sparse on disk
 
@@ -873,8 +882,8 @@ rs-voxeler/
   `MAX_PIXELS` (1.4 M) and upscales; if that is being hit, the cost is the
   rasterizer, and greedy meshing is the lever, not the cap.
 - **The editor feels slow on a large *scene*.** Different cost, and measure
-  before guessing. At 256³ what is left is `occupied_bounds` — an O(filled) walk
-  that `frame_model` calls, and every `screenshot` frames — and the undo history,
-  which stores an `Edit` per changed cell and so costs ~170 MB for a fill of the
-  whole scene. Extraction is no longer among them unless something called
-  `dirty_all`.
+  before guessing. At 256³ what is left is a bulk *fill* — dominated by a layer's
+  box growing one cell at a time, which reshapes and copies on every write that
+  falls outside it — and the undo history, which stores an `Edit` per changed
+  cell and so costs ~170 MB for a fill of the whole scene. Neither lookups nor
+  extraction are among them any more.
