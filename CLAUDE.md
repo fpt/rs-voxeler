@@ -204,6 +204,11 @@ Two rules on the check itself, and both are load-bearing:
   puts the rest back, because `save_model` names a file that does not exist yet.
   A prefix test on the name alone would be satisfied by a symlink inside a root
   pointing anywhere at all.
+- **A symlink anywhere below a root is refused outright**, on top of both. It
+  would survive the canonical test when it points inside, and it can be
+  repointed outside between the check and the write. Nothing about a voxel model
+  needs to be reached through a link, so the cheapest sound rule is to decline
+  them — and `list_models` skips them when it recurses for the same reason.
 
 Under `--mcp` the roots are empty and the file tools reach nothing: you opened
 that document yourself, and an agent there has no business opening another.
@@ -473,6 +478,25 @@ neighbourhood on the far side produce an edit of a completely different size
 from the one that was asked for.
 
 ## Key patterns
+
+- **Procedural edits validate before writing.** `mcp/tools/modeling.rs` expands
+  voxel, rect, ellipsoid and capsule operations under a candidate-cell budget.
+  Only once every argument is valid does `Editor::apply_writes` commit the ordered
+  writes through one `History::edit`. Layer/color defaults can be overridden per
+  operation; selection is unchanged. Reports count attempts, including overlaps.
+- **Palette history stores colours, not grids.** `Change::Palette` records one
+  index's old/new RGB. An unchanged RGB adds no undo step. Palette changes dirty
+  the document and are included in the existing native/VOX serializers.
+- **Preview options are separate from editor overlays.** Interactive `render`
+  keeps bounds and editor lighting. `render_with_options` serves thumbnails and
+  MCP screenshots with bounds off and softer lighting by default. Screenshot
+  arguments are validated before moving the camera; camera/grid are restored
+  before file I/O, including failure paths. Presets view from +Z (front) or +X
+  (right), and explicit angles override the preset.
+- **Recursive discovery does not follow links.** `list_models` defaults to a
+  recursive walk, accepts a root-relative directory and sorts the results.
+  `Root::resolve` rejects symlink components as well as absolute/parent paths;
+  PNG exports use that same confinement and require a `.png` extension.
 
 - **Out of bounds reads as air.** `VoxelModel::get` returns 0 outside the grid,
   and takes `i32` rather than `u16`, because every caller arrives from

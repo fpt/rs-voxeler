@@ -131,11 +131,8 @@ fn serve_mcp(args: &[String]) -> Result<(), String> {
         dirs.push(cwd);
     }
     let root = mcp::Roots::new(dirs);
+    let primary = root.primary().expect("at least one directory").to_path_buf();
 
-    let primary = root
-        .primary()
-        .expect("at least one directory")
-        .to_path_buf();
     let editor = editor::Editor::new(editor::new_model(DEFAULT_SIZE), primary.join("untitled.vxm"));
     let shared = mcp::stdio::Shared::new(editor);
 
@@ -144,7 +141,10 @@ fn serve_mcp(args: &[String]) -> Result<(), String> {
     // convenience, and an agent's session must not die because a port was busy.
     let _attach = match attach::server::start(shared.clone(), &primary) {
         Ok(server) => {
-            eprintln!("voxeler mcp: attach with `voxeler attach {}`", primary.display());
+            eprintln!(
+                "voxeler mcp: attach with `voxeler attach {}`",
+                primary.display()
+            );
             Some(server)
         }
         Err(e) => {
@@ -204,8 +204,9 @@ fn thumbnail(
     // No pointer, so no hover highlight -- a thumbnail should show the model,
     // not the editor's gizmos.
     editor.show_grid = false;
+    editor.frame_model();
     let mut fb = voxel_render::Framebuffer::new(width.max(1), height.max(1));
-    view::render(&mut fb, &mut editor, None);
+    view::render_with_options(&mut fb, &mut editor, None, view::RenderOptions::default());
     voxel_render::png::write(out, fb.width(), fb.height(), fb.color())
         .map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!("voxeler: wrote {} ({}x{})", out.display(), fb.width(), fb.height());
@@ -232,8 +233,9 @@ OPTIONS:
 
 `voxeler mcp` takes the directories its file tools may read and write. Name them
 when a desktop MCP client starts the server for you, or its working directory --
-and so where a bare file name lands -- is anyone's guess. Paths given to the tools may
-be absolute inside those directories, or relative to the first.
+and so where a bare file name lands -- is anyone's guess. Paths given to the
+tools may be absolute inside those directories, or relative to the first.
+
     --thumbnail OUT     render one view to OUT.png and exit, no window
     --width N           thumbnail width  (default: 512)
     --height N          thumbnail height (default: 512)
