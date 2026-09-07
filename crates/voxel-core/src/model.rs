@@ -256,6 +256,9 @@ impl Layer {
         if next == self.bounds {
             return;
         }
+        if self.grow_into(next) {
+            return;
+        }
         let mut voxels = vec![0u8; next.cells()];
         let mut filled = 0usize;
         let mut planes = [
@@ -289,6 +292,61 @@ impl Layer {
         self.voxels = voxels;
         self.filled = filled;
         self.planes = planes;
+    }
+
+    /// The fast half of [`reshape`](Self::reshape): a box that only *grew*.
+    ///
+    /// Growing is what nearly every reshape is — `set_in` calls one on every
+    /// write that lands outside the box — and it is also the one case that needs
+    /// no arithmetic per cell. Nothing moves relative to anything else, so a row
+    /// of x is contiguous in both the old array and the new one and copies whole,
+    /// and the tallies do not change at all: the same cells are filled, only at
+    /// new local indices, so `filled` stands and each axis' plane counts are the
+    /// old ones shifted by however far that axis' origin moved.
+    ///
+    /// The general path walks every cell of the box computing a division and two
+    /// remainders for each. Filling a 256³ scene grows the box about 768 times
+    /// and so ran that walk over 2.1 billion cells — five seconds, and the whole
+    /// of why a bulk fill was slow.
+    ///
+    /// Returns whether it applied. An empty old box has nothing to carry and a
+    /// box that lost ground on any axis can drop cells, and both belong to the
+    /// general path.
+    fn grow_into(&mut self, next: Bounds) -> bool {
+        let cur = self.bounds;
+        if cur.is_empty() {
+            return false;
+        }
+        let (end, next_end) = (cur.end(), next.end());
+        if (0..3).any(|a| next.origin[a] > cur.origin[a] || next_end[a] < end[a]) {
+            return false;
+        }
+        // Only now can this not go negative: the box holds the old one, so each
+        // origin moved down or stayed.
+        let shift: [usize; 3] =
+            std::array::from_fn(|a| (cur.origin[a] - next.origin[a]) as usize);
+
+        let mut voxels = vec![0u8; next.cells()];
+        let (sx, sy) = (cur.size[0] as usize, cur.size[1] as usize);
+        let (nx, ny) = (next.size[0] as usize, next.size[1] as usize);
+        for z in 0..cur.size[2] as usize {
+            for y in 0..sy {
+                let from = (z * sy + y) * sx;
+                let to = (z + shift[2]) * nx * ny + (y + shift[1]) * nx + shift[0];
+                voxels[to..to + sx].copy_from_slice(&self.voxels[from..from + sx]);
+            }
+        }
+
+        let planes = std::array::from_fn(|a| {
+            let mut p = vec![0u32; next.size[a] as usize];
+            p[shift[a]..shift[a] + self.planes[a].len()].copy_from_slice(&self.planes[a]);
+            p
+        });
+
+        self.bounds = next;
+        self.voxels = voxels;
+        self.planes = planes;
+        true
     }
 
     /// The smallest box holding every filled cell, or an empty one.
@@ -1384,6 +1442,52 @@ mod tests {
         }
         assert_eq!(m.layer_count(), MAX_LAYERS);
         assert!(m.add_layer(0, "one too many").is_none());
+    }
+
+    /// A growing box takes the copy-only path, which moves every cell's local
+    /// index without recomputing any of them. Growing on the **low** side is
+    /// where that goes wrong if the shift is missed or applied to the wrong
+    /// axis, so the growth here is downward on every axis and upward on two,
+    /// and each voxel is checked at the *scene* coordinate it was written to.
+    #[test]
+    fn growing_a_box_carries_every_cell_and_both_tallies() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        // A deliberately non-cubic seed: with equal extents a swapped stride
+        // still lands on a valid cell.
+        let seed = [
+            ([20, 30, 40], 1u8),
+            ([22, 31, 40], 2),
+            ([20, 33, 42], 3),
+            ([23, 30, 43], 4),
+        ];
+        for ([x, y, z], v) in seed {
+            m.set_in(0, x, y, z, v);
+        }
+        let before = m.layer_bounds(0);
+        assert_eq!(m.layers()[0].filled_count(), 4);
+
+        // Down on all three axes, and out past the far end on x and z.
+        for ([x, y, z], v) in [([5, 6, 7], 9u8), ([50, 31, 55], 8)] {
+            m.set_in(0, x, y, z, v);
+        }
+        let after = m.layer_bounds(0);
+        assert!(
+            after.origin[0] < before.origin[0]
+                && after.origin[1] < before.origin[1]
+                && after.origin[2] < before.origin[2],
+            "the box grew downward on every axis: {before:?} -> {after:?}"
+        );
+
+        for ([x, y, z], v) in seed {
+            assert_eq!(m.get_in(0, x, y, z), v, "cell {x},{y},{z} moved");
+        }
+        assert_eq!(m.get_in(0, 5, 6, 7), 9);
+        assert_eq!(m.get_in(0, 50, 31, 55), 8);
+        assert_eq!(m.layers()[0].filled_count(), 6);
+        // `occupied` reads the plane tallies, so a shifted plane vector that
+        // landed at the wrong offset shows up here and nowhere else.
+        assert_eq!(m.layers()[0].occupied(), Bounds::new([5, 6, 7], [46, 28, 49]));
+        assert_eq!(m.filled_count(), 6);
     }
 
     /// The count is maintained rather than walked, so the one thing that can go
