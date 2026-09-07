@@ -215,13 +215,23 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
             overlay::stroke_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT);
         }
 
-        // Filled for shown, hollow for hidden: two states that read at a
-        // glance without a glyph the 5x7 font does not have.
+        // Three states, because a layer can be off for two different reasons
+        // and only one of them is undone by pressing V on it:
+        //
+        //   filled          on screen
+        //   hollow + pip    switched on, but an object above it is hidden
+        //   hollow          switched off here
+        //
+        // Drawing the middle case as filled would be a straight lie about what
+        // is on screen; drawing it as plain hollow would make V look broken.
         let box_y = y + (ROW as i32 - EYE as i32) / 2;
-        if layer.visible {
+        if layer.shown() {
             overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { TEXT });
         } else {
             overlay::stroke_rect(fb, ox, box_y, EYE, EYE, DIM);
+            if layer.visible {
+                overlay::fill_rect(fb, ox + 2, box_y + 2, EYE - 4, EYE - 4, DIM);
+            }
         }
 
         // The count is right-aligned, so the name gets whatever is left over

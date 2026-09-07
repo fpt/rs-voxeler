@@ -206,7 +206,7 @@ fn rebuild(
 /// nothing.
 fn touches_a_layer(model: &VoxelModel, origin: [i32; 3], chunk: i32) -> bool {
     model.layers().iter().any(|l| {
-        if !l.visible || l.bounds().is_empty() || l.is_empty() {
+        if !l.shown() || l.bounds().is_empty() || l.is_empty() {
             return false;
         }
         let b = l.bounds();

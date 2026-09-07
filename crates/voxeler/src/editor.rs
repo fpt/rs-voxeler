@@ -1280,6 +1280,128 @@ impl Editor {
         }
     }
 
+    // -- objects ----------------------------------------------------------
+
+    /// Add an object under `parent`. Structural, so it is one undo step.
+    pub fn add_object(&mut self, parent: usize, name: &str) -> bool {
+        let name = name.to_string();
+        let changed = self.history.restructure(&mut self.model, "add object", |model| {
+            model.add_object(parent, name);
+        });
+        if changed {
+            self.after_structural();
+            self.status = format!("added {}", self.object_name(self.model.object_count() - 1));
+        } else {
+            self.status = format!("at the {}-object limit", voxel_core::MAX_OBJECTS);
+        }
+        changed
+    }
+
+    /// Remove an object, leaving its children and layers with its parent.
+    pub fn remove_object(&mut self, i: usize) -> bool {
+        let name = self.object_name(i);
+        let changed = self.history.restructure(&mut self.model, "delete object", |model| {
+            model.remove_object(i);
+        });
+        if changed {
+            self.after_structural();
+            self.status = format!("removed {name} — its layers moved up, ctrl+Z brings it back");
+        } else {
+            self.status = "the scene root cannot be removed".into();
+        }
+        changed
+    }
+
+    pub fn rename_object(&mut self, i: usize, name: &str) -> bool {
+        if i >= self.model.object_count() {
+            return false;
+        }
+        let name = name.to_string();
+        self.history.restructure(&mut self.model, "rename object", |model| {
+            model.rename_object(i, name);
+        });
+        self.after_structural();
+        true
+    }
+
+    /// Show or hide an object, and with it every layer inside it.
+    ///
+    /// Deliberately outside the history, for the reason layer visibility is: it
+    /// is toggled constantly while working, and undo would spend its first few
+    /// presses turning things back on instead of undoing the edit you wanted
+    /// back. It still dirties the document, because what you had hidden is part
+    /// of the model.
+    pub fn set_object_visible(&mut self, i: usize, visible: bool) -> bool {
+        if i >= self.model.object_count() {
+            return false;
+        }
+        self.model.set_object_visible(i, visible);
+        self.dirty = true;
+        self.invalidate_mesh();
+        self.status = format!(
+            "{} {}",
+            self.object_name(i),
+            if visible { "shown" } else { "hidden" }
+        );
+        true
+    }
+
+    pub fn reparent_object(&mut self, i: usize, parent: usize) -> bool {
+        let mut ok = false;
+        self.history.restructure(&mut self.model, "reparent object", |model| {
+            ok = model.reparent_object(i, parent);
+        });
+        if ok {
+            self.after_structural();
+            self.status = format!("{} is now part of {}", self.object_name(i), self.object_name(parent));
+        } else {
+            self.status = "an object cannot be part of itself".into();
+        }
+        ok
+    }
+
+    pub fn set_layer_object(&mut self, layer: usize, object: usize) -> bool {
+        let mut ok = false;
+        self.history.restructure(&mut self.model, "move layer to object", |model| {
+            ok = model.set_layer_object(layer, object);
+        });
+        if ok {
+            self.after_structural();
+            self.status = format!("{} is now part of {}", self.layer_name(layer), self.object_name(object));
+        }
+        ok
+    }
+
+    /// Move an object and everything under it. One undo step for the lot.
+    pub fn move_object(&mut self, i: usize, delta: [i32; 3]) -> Result<usize, String> {
+        let mut result = Err("nothing happened".to_string());
+        self.history.restructure(&mut self.model, "move object", |model| {
+            result = model.move_object(i, delta);
+        });
+        match &result {
+            Ok(n) => {
+                self.after_structural();
+                self.status = format!(
+                    "moved {} by [{}, {}, {}] — {n} layer{}",
+                    self.object_name(i),
+                    delta[0],
+                    delta[1],
+                    delta[2],
+                    if *n == 1 { "" } else { "s" }
+                );
+            }
+            Err(why) => self.status = why.clone(),
+        }
+        result
+    }
+
+    pub fn object_name(&self, i: usize) -> String {
+        self.model
+            .objects()
+            .get(i)
+            .map_or_else(|| format!("object {i}"), |o| o.name.clone())
+    }
+
     /// Show or hide a layer by index. Ignores an index that is not there — a
     /// caller naming a layer that does not exist has already been told so.
     pub fn set_layer_visible(&mut self, i: usize, visible: bool) {

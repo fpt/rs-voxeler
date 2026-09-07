@@ -1,12 +1,19 @@
 //! `.vxm` — the editor's own format.
 //!
 //! ```text
-//! "VXM3"                       magic
+//! "VXM4"                       magic
 //! u16 u16 u16                  scene range x, y, z
+//! u8                           object count, 1..=MAX_OBJECTS; index 0 is root
+//! objects * {
+//!   u8                         flags; bit 0 is "visible"
+//!   u8                         parent index + 1, or 0 for the root
+//!   u8 + bytes                 name length, then UTF-8
+//! }
 //! u8                           layer count, 1..=MAX_LAYERS
 //! u8                           the layer that was being edited
 //! layers * {
 //!   u8                         flags; bit 0 is "visible"
+//!   u8                         the object this layer is part of
 //!   u8 + bytes                 name length, then UTF-8
 //!   u16 u16 u16                the layer's origin in the scene
 //!   u16 u16 u16                the layer's own size
@@ -33,21 +40,37 @@
 //! ride along, and so does the active layer: reopening puts you back where you
 //! left off.
 //!
-//! # `VXM2` and `VXM1`
+//! # The object tree
 //!
-//! `VXM2` had layers but no boxes — every layer was the size of the scene.
-//! `VXM1` had no layers at all. Both still load, and both are **trimmed** on the
-//! way in, so an old file gains the smaller shape simply by being opened. A
-//! format nobody else implements is one we are free to extend; a file already on
-//! disk is not free to rewrite itself.
+//! An object says what a thing *is*; a layer says how pixels combine. The tree
+//! is written as a flat table in arena order with a parent index, because that
+//! is how it is held in memory and a nested encoding would be a second shape to
+//! keep in agreement with the first. `parent + 1` rather than `parent`, so the
+//! root's "no parent" is a zero rather than a sentinel that could be mistaken
+//! for object 0.
+//!
+//! A **cycle is refused on the way in**. `reparent_object` cannot make one, but
+//! a file is not a caller, and a chain that loops would make the visibility walk
+//! and every tree draw run forever.
+//!
+//! # `VXM3`, `VXM2` and `VXM1`
+//!
+//! `VXM3` had layers with boxes but no objects. `VXM2` had layers but no boxes —
+//! every layer was the size of the scene. `VXM1` had no layers at all. All three
+//! still load: an older file arrives as a single unnamed root object holding
+//! every layer, and the two oldest are additionally **trimmed** on the way in, so
+//! they gain the smaller shape simply by being opened. A format nobody else
+//! implements is one we are free to extend; a file already on disk is not free
+//! to rewrite itself. That rule has now held four times.
 
-use crate::model::{Bounds, MAX_LAYERS};
+use crate::model::{Bounds, Object, MAX_LAYERS, MAX_OBJECTS};
 use crate::palette::{Palette, Rgb8};
 use crate::{Result, VoxelError, VoxelModel};
 
 use super::Reader;
 
-const MAGIC: &[u8; 4] = b"VXM3";
+const MAGIC: &[u8; 4] = b"VXM4";
+const MAGIC_V3: &[u8; 4] = b"VXM3";
 const MAGIC_V2: &[u8; 4] = b"VXM2";
 const MAGIC_V1: &[u8; 4] = b"VXM1";
 
@@ -55,27 +78,41 @@ const MAGIC_V1: &[u8; 4] = b"VXM1";
 /// long, and a layer label nobody can read in the panel is not a name.
 const MAX_NAME: usize = 64;
 
+/// A name cut to [`MAX_NAME`] on a **character** boundary, not a byte one: half
+/// a multi-byte character would make the file's own name field invalid UTF-8.
+fn clip(name: &str) -> String {
+    name.chars()
+        .scan(0usize, |used, c| {
+            *used += c.len_utf8();
+            (*used <= MAX_NAME).then_some(c)
+        })
+        .collect()
+}
+
 pub fn encode(model: &VoxelModel) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     out.extend_from_slice(MAGIC);
     for d in model.size() {
         out.extend_from_slice(&d.to_le_bytes());
     }
+    out.push(model.object_count() as u8);
+    for object in model.objects() {
+        out.push(u8::from(object.visible));
+        // Plus one, so the root's "no parent" is a zero and not an index that
+        // happens to point at the root itself.
+        out.push(object.parent.map_or(0, |p| p as u8 + 1));
+        let name = clip(&object.name);
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+    }
+
     out.push(model.layer_count() as u8);
     out.push(model.active_layer() as u8);
 
     for (n, layer) in model.layers().iter().enumerate() {
         out.push(u8::from(layer.visible));
-        // Truncated on a character boundary, not a byte one: half a multi-byte
-        // character would make the file's own name field invalid UTF-8.
-        let name: String = layer
-            .name
-            .chars()
-            .scan(0usize, |used, c| {
-                *used += c.len_utf8();
-                (*used <= MAX_NAME).then_some(c)
-            })
-            .collect();
+        out.push(layer.object as u8);
+        let name = clip(&layer.name);
         out.push(name.len() as u8);
         out.extend_from_slice(name.as_bytes());
 
@@ -108,7 +145,8 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
     let mut r = Reader::new(bytes);
     let magic = r.take(4)?;
     let version = match magic {
-        m if m == MAGIC => 3,
+        m if m == MAGIC => 4,
+        m if m == MAGIC_V3 => 3,
         m if m == MAGIC_V2 => 2,
         m if m == MAGIC_V1 => 1,
         _ => {
@@ -119,6 +157,36 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
     };
     let size = read_size(&mut r)?;
     let mut model = VoxelModel::new(size[0], size[1], size[2]);
+
+    if version >= 4 {
+        let count = r.u8()? as usize;
+        if count == 0 || count > MAX_OBJECTS {
+            return Err(VoxelError::Format(format!(
+                "a scene needs 1..={MAX_OBJECTS} objects, the file claims {count}"
+            )));
+        }
+        let mut objects = Vec::with_capacity(count);
+        for _ in 0..count {
+            let flags = r.u8()?;
+            let parent = r.u8()?;
+            let name_len = r.u8()? as usize;
+            let name = String::from_utf8_lossy(r.take(name_len)?).into_owned();
+            objects.push(Object {
+                name,
+                visible: flags & 1 != 0,
+                parent: (parent > 0).then(|| parent as usize - 1),
+            });
+        }
+        // Refused rather than repaired: a tree whose parents do not resolve, or
+        // whose chain loops, is a file this build cannot mean anything by.
+        if !model.set_objects(objects) {
+            return Err(VoxelError::Format(
+                "the file's object tree does not resolve — a parent is missing, \
+                 or a chain of them loops"
+                    .into(),
+            ));
+        }
+    }
 
     if version == 1 {
         read_voxels(&mut r, &mut model, 0, [0; 3])?;
@@ -135,6 +203,8 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
             // rest are added as they are read, so the stack ends up in file
             // order with no separate allocation pass.
             let flags = r.u8()?;
+            // Before v4 there were no objects, so every layer is at the root.
+            let object = if version >= 4 { r.u8()? as usize } else { 0 };
             let name_len = r.u8()? as usize;
             let name = String::from_utf8_lossy(r.take(name_len)?).into_owned();
             // Before v3 a layer had no box of its own — it was the scene's size
@@ -154,6 +224,9 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
                 model.set_layer_bounds(0, bounds);
             }
             model.rename_layer(n, name);
+            // An object index past the end of the tree puts the layer at the
+            // root, which loses a label rather than the work under it.
+            model.set_layer_object(n, object.min(model.object_count() - 1));
             read_voxels(&mut r, &mut model, n, bounds.origin)?;
             // Set after the voxels: a hidden layer still has to be written to,
             // and visibility has no bearing on that.
@@ -341,6 +414,121 @@ mod tests {
         assert_eq!(back.allocated_cells(), 0);
     }
 
+    /// The tree is what v4 is for: names, visibility, parents and which object
+    /// each layer belongs to all have to come back the same.
+    #[test]
+    fn round_trips_the_object_tree() {
+        let mut m = VoxelModel::new(32, 32, 32);
+        let robot = m.add_object(0, "ROBOT").unwrap();
+        let arm = m.add_object(robot, "LEFT ARM").unwrap();
+        let sword = m.add_object(0, "SWORD").unwrap();
+        m.set_object_visible(sword, false);
+
+        m.rename_layer(0, "BODY");
+        m.set_layer_object(0, robot);
+        m.set(4, 4, 4, 1);
+        let skin = m.add_layer(0, "SKIN").unwrap();
+        m.set_layer_object(skin, arm);
+        m.set_in(skin, 6, 4, 4, 2);
+        let blade = m.add_layer(skin, "BLADE").unwrap();
+        m.set_layer_object(blade, sword);
+        m.set_in(blade, 9, 4, 4, 3);
+
+        let back = decode(&encode(&m)).unwrap();
+        assert_eq!(back, m, "the whole document, tree included");
+        assert_eq!(back.object_count(), 4);
+        assert_eq!(back.objects()[arm].name, "LEFT ARM");
+        assert_eq!(back.objects()[arm].parent, Some(robot), "two levels deep");
+        assert_eq!(back.objects()[0].parent, None, "and the root has none");
+        assert!(!back.objects()[sword].visible);
+        assert_eq!(back.layers()[blade].object, sword);
+        assert!(
+            !back.layers()[blade].shown(),
+            "a layer in a hidden object comes back hidden"
+        );
+        assert_eq!(back.get(9, 4, 4), 0, "so the composite agrees");
+        assert_eq!(back.get_in(blade, 9, 4, 4), 3, "and the voxel is still there");
+    }
+
+    /// A tree read off a disk is not a tree a caller built. A parent that does
+    /// not resolve, or a chain that loops, has to be refused on the way in —
+    /// surviving it would mean every walk over the tree needed a depth guard.
+    #[test]
+    fn an_object_tree_that_loops_or_dangles_is_refused() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        m.add_object(0, "A").unwrap();
+        m.add_object(1, "B").unwrap();
+        let good = encode(&m);
+        assert!(decode(&good).is_ok());
+
+        // The parent byte of object `i`, one past its flags. Walked rather than
+        // counted, because the records carry variable-length names.
+        let parent_at = |bytes: &[u8], want: usize| {
+            let mut at = 4 + 6 + 1;
+            for i in 0..want {
+                at += 3 + bytes[at + 2] as usize;
+                debug_assert!(i < bytes[10] as usize);
+            }
+            at + 1
+        };
+
+        // A's parent becomes B, and B's parent is already A.
+        let mut looped = good.clone();
+        looped[parent_at(&good, 1)] = 2 + 1;
+        assert!(decode(&looped).is_err(), "a two-object cycle");
+
+        let mut dangling = good.clone();
+        dangling[parent_at(&good, 1)] = 200;
+        assert!(decode(&dangling).is_err(), "a parent that does not exist");
+
+        // The root claiming a parent is the same fault by another name.
+        let mut rooted = good.clone();
+        rooted[parent_at(&good, 0)] = 2;
+        assert!(decode(&rooted).is_err(), "a root with a parent");
+
+        // An object that is its own parent is the shortest cycle there is.
+        let mut itself = good.clone();
+        itself[parent_at(&good, 1)] = 1 + 1;
+        assert!(decode(&itself).is_err(), "an object parented to itself");
+    }
+
+    /// The version before objects. It still loads, and everything in it arrives
+    /// at the root — one unnamed object holding the whole stack.
+    #[test]
+    fn a_vxm3_file_loads_with_every_layer_at_the_root() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"VXM3");
+        for d in [16u16, 16, 16] {
+            bytes.extend_from_slice(&d.to_le_bytes());
+        }
+        bytes.push(2); // layers
+        bytes.push(1); // active
+        for (name, origin, size, voxel) in [
+            ("GROUND", [0u16, 0, 0], [16u16, 2, 16], [3u8, 1, 3, 4]),
+            ("TREE", [4, 2, 4], [8, 8, 8], [1, 1, 1, 7]),
+        ] {
+            bytes.push(1); // visible; v3 had no object byte
+            bytes.push(name.len() as u8);
+            bytes.extend_from_slice(name.as_bytes());
+            for d in origin.iter().chain(size.iter()) {
+                bytes.extend_from_slice(&d.to_le_bytes());
+            }
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&voxel);
+        }
+
+        let m = decode(&bytes).unwrap();
+        assert_eq!(m.object_count(), 1, "one root object and nothing else");
+        assert_eq!(m.objects()[0].parent, None);
+        assert_eq!(m.layer_count(), 2);
+        assert!(m.layers().iter().all(|l| l.object == 0));
+        assert_eq!(m.layers()[1].name, "TREE");
+        assert_eq!(m.layer_bounds(1), Bounds::new([4, 2, 4], [8, 8, 8]));
+        assert_eq!(m.get(3, 1, 3), 4, "the ground voxel");
+        assert_eq!(m.get(5, 3, 5), 7, "and the tree's, in scene coordinates");
+        assert_eq!(m.active_layer(), 1);
+    }
+
     /// The version before boxes: every layer was the scene's size. Opening one
     /// trims it, so an old file gains the smaller shape by being read.
     #[test]
@@ -424,25 +612,50 @@ mod tests {
         assert!(err.contains(".vxm"), "{err}");
     }
 
+    /// Where the layer count sits: past the magic, the scene size and the
+    /// variable-length object table. Re-derived rather than hard-coded, because
+    /// an offset written as a number is a test that breaks every time the
+    /// header grows and says nothing about why.
+    fn layer_count_at(bytes: &[u8]) -> usize {
+        let mut at = 4 + 6;
+        let objects = bytes[at] as usize;
+        at += 1;
+        for _ in 0..objects {
+            at += 3 + bytes[at + 2] as usize; // flags, parent, name length, name
+        }
+        at
+    }
+
     /// A count field that outruns the file must be an error, not an attempt to
     /// reserve four gigabytes.
     #[test]
     fn an_absurd_count_is_an_error_not_an_allocation() {
         let mut m = sample();
-        m.rename_layer(0, ""); // so the count sits at a fixed offset
+        m.rename_layer(0, "");
         let mut bytes = encode(&m);
-        // Past the magic, the scene size, the two layer bytes, and the first
-        // layer's flags, zero name length and twelve bytes of box: the count.
-        bytes[26..30].copy_from_slice(&u32::MAX.to_le_bytes());
+        // Past the layer count and active layer, then the first layer's flags,
+        // object, zero name length and twelve bytes of box: the voxel count.
+        let at = layer_count_at(&bytes) + 2 + 3 + 12;
+        bytes[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode(&bytes).is_err());
     }
 
     #[test]
     fn a_layer_count_of_zero_or_too_many_is_an_error() {
         let mut bytes = encode(&sample());
+        let at = layer_count_at(&bytes);
+        bytes[at] = 0;
+        assert!(decode(&bytes).is_err());
+        bytes[at] = MAX_LAYERS as u8 + 1;
+        assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn an_object_count_of_zero_or_too_many_is_an_error() {
+        let mut bytes = encode(&sample());
         bytes[10] = 0;
         assert!(decode(&bytes).is_err());
-        bytes[10] = MAX_LAYERS as u8 + 1;
+        bytes[10] = MAX_OBJECTS as u8 + 1;
         assert!(decode(&bytes).is_err());
     }
 
