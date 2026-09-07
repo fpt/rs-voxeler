@@ -24,11 +24,13 @@ pub mod format;
 pub mod model;
 pub mod palette;
 pub mod raycast;
+pub mod region;
 
 pub use edit::{Edit, EditBatch, History, Stroke};
 pub use model::{VoxelModel, MAX_DIM};
 pub use palette::{Palette, Rgb8};
 pub use raycast::{Face, RayHit};
+pub use region::{Brush, BrushShape, Reach, Span};
 
 /// Anything that can go wrong loading or saving a model.
 #[derive(Debug, thiserror::Error)]

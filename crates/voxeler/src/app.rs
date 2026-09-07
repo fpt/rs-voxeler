@@ -9,6 +9,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use voxel_core::Span;
 use voxel_render::Framebuffer;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -248,12 +249,21 @@ impl App {
             KeyCode::BracketRight => self.editor.nudge_color(1),
             KeyCode::Minus => self.editor.nudge_color(-16),
             KeyCode::Equal => self.editor.nudge_color(16),
-            KeyCode::KeyM => {
-                self.editor.mirror_x = !self.editor.mirror_x;
-                let on = self.editor.mirror_x;
-                self.editor
-                    .set_status(if on { "mirror on" } else { "mirror off" });
-            }
+            // Span: the four keys run left to right in order of reach, so the
+            // row on screen and the row on the keyboard are the same order.
+            KeyCode::Digit1 => self.editor.set_span(Span::Voxel),
+            KeyCode::Digit2 => self.editor.set_span(Span::Axis),
+            KeyCode::Digit3 => self.editor.set_span(Span::Plane),
+            KeyCode::Digit4 => self.editor.set_span(Span::Volume),
+            KeyCode::Digit9 => self.editor.nudge_brush(-1),
+            KeyCode::Digit0 => self.editor.nudge_brush(1),
+            KeyCode::KeyC => self.editor.toggle_brush_shape(),
+            // Each mirror plane on its own key, and `M` for the X one because
+            // that is the axis a character is symmetric about and the binding
+            // this editor already had.
+            KeyCode::KeyX | KeyCode::KeyM => self.editor.toggle_mirror(0),
+            KeyCode::KeyY => self.editor.toggle_mirror(1),
+            KeyCode::KeyZ => self.editor.toggle_mirror(2),
             KeyCode::KeyG => self.editor.show_grid = !self.editor.show_grid,
             KeyCode::KeyH => self.editor.show_help = !self.editor.show_help,
             KeyCode::KeyF => self.editor.frame_model(),

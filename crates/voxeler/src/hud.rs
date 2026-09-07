@@ -11,6 +11,7 @@ use voxel_render::overlay::{self, text_height, text_width, ADVANCE};
 use voxel_render::Framebuffer;
 
 use crate::editor::{Editor, Tool};
+use voxel_core::Span;
 
 /// Swatch edge, in framebuffer pixels.
 const SWATCH: u32 = 12;
@@ -198,8 +199,31 @@ fn draw_status(fb: &mut Framebuffer, editor: &Editor) {
     );
 }
 
-/// The tool row along the top-left, so the active tool is visible without
-/// reading the status line.
+/// One labelled chip of the tool rows. Returns the width it used.
+fn chip(fb: &mut Framebuffer, x: i32, y: i32, label: &str, active: bool) -> u32 {
+    let w = text_width(label, TEXT_SCALE) + 12;
+    let h = text_height(TEXT_SCALE) + 8;
+    overlay::blend_rect(fb, x, y, w, h, PANEL_BG, if active { 235 } else { 170 });
+    if active {
+        overlay::stroke_rect(fb, x, y, w, h, ACCENT);
+    }
+    overlay::text(
+        fb,
+        x + 6,
+        y + 4,
+        label,
+        if active { ACCENT } else { DIM },
+        TEXT_SCALE,
+    );
+    w
+}
+
+/// The two rows along the top-left: what the tool does, and how far it reaches.
+///
+/// Two rows rather than one long one because they are two independent choices —
+/// every tool can be had at every span, and a single row of eleven chips would
+/// read as eleven tools and hide that. The row on screen runs in the same order
+/// as the keys `1`–`4`, so finding the key from the label needs no lookup.
 pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
     let tools = [
         (Tool::Build, "B BUILD"),
@@ -207,24 +231,25 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         (Tool::Paint, "P PAINT"),
         (Tool::Pick, "I PICK"),
     ];
-    let mut x = PAD as i32;
     let h = text_height(TEXT_SCALE) + 8;
+    let mut x = PAD as i32;
     for (tool, label) in tools {
-        let w = text_width(label, TEXT_SCALE) + 12;
-        let active = editor.tool == tool;
-        overlay::blend_rect(fb, x, PAD as i32, w, h, PANEL_BG, if active { 235 } else { 170 });
-        if active {
-            overlay::stroke_rect(fb, x, PAD as i32, w, h, ACCENT);
-        }
-        overlay::text(
-            fb,
-            x + 6,
-            PAD as i32 + 4,
-            label,
-            if active { ACCENT } else { DIM },
-            TEXT_SCALE,
-        );
-        x += w as i32 + 6;
+        x += chip(fb, x, PAD as i32, label, editor.tool == tool) as i32 + 6;
+    }
+
+    let y = PAD as i32 + h as i32 + 6;
+    let mut x = PAD as i32;
+    for (i, span) in Span::ALL.iter().enumerate() {
+        let label = format!("{} {}", i + 1, span.name());
+        x += chip(fb, x, y, &label, editor.span == *span) as i32 + 6;
+    }
+    // The brush is the voxel span's shape, so it sits at the end of that row
+    // rather than in one of its own — and only once it is bigger than the one
+    // cell every other span is measured from.
+    if editor.brush.radius > 0 {
+        let e = editor.brush.edge();
+        let label = format!("{} {e}x{e}x{e}", editor.brush.shape.name());
+        chip(fb, x, y, &label, editor.span == Span::Voxel);
     }
 }
 
@@ -236,9 +261,14 @@ const HELP: &[&str] = &[
     "ALT+LMB      ORBIT      WHEEL     ZOOM",
     "",
     "B E P I      BUILD ERASE PAINT PICK",
+    "1 2 3 4      VOXEL AXIS PLANE VOLUME",
+    "9 0          BRUSH SMALLER / BIGGER",
+    "C            BRUSH CUBE / BALL",
+    "",
     "[ ]          COLOUR -1 / +1",
     "- =          COLOUR -16 / +16",
-    "M            MIRROR X       G  GRID",
+    "X Y Z        MIRROR THE EDIT (M = X)",
+    "G            GRID",
     ", .          SLICE DOWN / UP",
     "\\            SLICE OFF",
     "F            FRAME MODEL    R  RESET VIEW",

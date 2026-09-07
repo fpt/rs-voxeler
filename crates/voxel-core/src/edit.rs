@@ -72,6 +72,13 @@ impl Stroke {
         self.edits.is_empty()
     }
 
+    /// How many cells have changed. The number a fill reports back: a span can
+    /// reach a thousand cells and change none of them, and only this tells the
+    /// two apart.
+    pub fn len(&self) -> usize {
+        self.edits.len()
+    }
+
     pub fn into_batch(self) -> EditBatch {
         EditBatch {
             label: self.label,
