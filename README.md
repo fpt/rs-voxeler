@@ -19,9 +19,9 @@ cd crates && cargo build --release
 
 | crate | what it is |
 | --- | --- |
-| `voxel-core` | the model: a dense grid, a 256-colour palette, undo/redo, `.vxm` and MagicaVoxel `.vox` |
+| `voxel-core` | the model: a stack of dense grids, a 256-colour palette, undo/redo, `.vxm` and MagicaVoxel `.vox` |
 | `voxel-render` | a software rasterizer: face extraction, orbit camera, z-buffer, flat shading, PNG output |
-| `voxeler` | the editor: a window, four tools across four reaches, and a palette you can click |
+| `voxeler` | the editor: a window, four tools across four reaches, layers, and a palette you can click |
 
 ## Using the editor
 
@@ -54,6 +54,10 @@ act on a voxel, and do nothing over empty space.
 | `9` `0` `C` | brush smaller, bigger, cube/ball |
 | `[` `]` / `-` `=` | colour ∓1 / ∓16 |
 | `X` `Y` `Z` | mirror the edit across each axis (`M` = `X`) |
+| `L` `shift+L` | next / previous layer |
+| `A` `D` | add / delete a layer |
+| `V` `N` | show-hide / rename the active layer |
+| `K` `J` `U` | move the layer up / down, merge it down |
 | `G` | ground grid |
 | `,` `.` `\` | slice down, slice up, slice off |
 | `F` `R` | frame the model, reset the view |
@@ -83,6 +87,38 @@ click rather than a drag — it happens once, and undoes in one step.
 The **brush** is the voxel span's shape: `9` and `0` size it, `C` switches
 between a cube and a ball, and the outline in the viewport shows its extent.
 Radius 0 is the single voxel everything else is measured from.
+
+## Layers
+
+A layer is a grid of its own, and the stack composites top down: what you see at
+a cell is the topmost visible layer holding something there. So an armour layer
+sits *over* the body it covers rather than consuming it — hide the armour and
+the body is still underneath, whole.
+
+```text
+  ARMOUR   · █ █ ·        hide ARMOUR →   █ █ █ █
+  BODY     █ █ █ █                        (the body, intact)
+```
+
+The panel under the palette lists the stack, top first, with each layer's own
+voxel count. Click a row to select it, click its box to show or hide it.
+
+Tools write to the **active layer** and only to it. That is what makes layers
+worth having, and it has one consequence worth knowing: clicking a voxel some
+other layer owns does nothing, and the status line says which layer holds it.
+Building is the mirror image — a voxel a *higher* layer is showing never blocks
+a build underneath it, because working under something is what a lower layer is
+for. A fill selects on what you can see and writes what you own.
+
+`ctrl+Z` undoes layers being added, deleted, moved and merged, along with the
+edits made on them. Showing and hiding is not undoable — it is a thing you do
+constantly, and undo would spend its first few presses turning layers back on —
+but it *is* saved, because which layers you had hidden is part of the model.
+
+`.vxm` stores every layer's own grid, its name, whether it was shown, and which
+one you were editing, so hiding a layer and saving never throws it away. `.vox`
+has nowhere to put a stack, so `ctrl+E` writes the composite as one model and
+says so.
 
 **Mirroring** reflects the *edit*, not the model. `X` `Y` `Z` each add a plane
 through the middle of that axis, so two give four copies of every stroke and

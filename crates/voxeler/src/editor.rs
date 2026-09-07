@@ -85,6 +85,11 @@ struct Drag {
     stroke: Stroke,
     plane: Option<(usize, i32)>,
     last_cell: Option<[i32; 3]>,
+    /// Which layer owned the voxel the stroke started on, if any. A tool writes
+    /// to the active layer, so aiming at a voxel another layer holds is a
+    /// legitimate no-op — and a no-op with no explanation reads as a broken
+    /// editor, which is the whole reason this is carried.
+    owner: Option<usize>,
 }
 
 pub struct Editor {
@@ -116,6 +121,11 @@ pub struct Editor {
     dirty: bool,
     status: String,
     drag: Option<Drag>,
+    /// The name being typed, while a rename is open. `Some` is a modal state:
+    /// the window layer sends keystrokes here instead of to the tools, because
+    /// a rename that fired `B` for "build" while you typed "BODY" would be
+    /// unusable.
+    rename: Option<String>,
 }
 
 impl Editor {
@@ -138,6 +148,7 @@ impl Editor {
             path,
             model,
             drag: None,
+            rename: None,
         };
         editor.frame_volume();
         editor
@@ -342,6 +353,9 @@ impl Editor {
             plane: (self.tool == Tool::Build)
                 .then(|| (target.face.axis(), target.cell[target.face.axis()])),
             last_cell: None,
+            owner: self
+                .model
+                .owner_at(target.voxel[0], target.voxel[1], target.voxel[2]),
         });
         self.continue_stroke(target);
     }
@@ -378,11 +392,17 @@ impl Editor {
         // construction, but a brush covers cells the ray never touched and a
         // reflection lands wherever the model happens to be, so it has to be
         // stated rather than assumed.
+        //
+        // Asked of the *active layer*, not of what is on screen: that is the
+        // grid being written, and testing the composite would refuse to build
+        // under a voxel a higher layer is showing — which is exactly the thing
+        // a lower layer is for.
         let wants_solid = self.tool != Tool::Build;
+        let layer = self.model.active_layer();
         let Some(drag) = &mut self.drag else { return };
         drag.last_cell = Some(target.cell);
         for [x, y, z] in cells {
-            if self.model.is_solid(x, y, z) != wants_solid {
+            if (self.model.get_in(layer, x, y, z) != 0) != wants_solid {
                 continue;
             }
             drag.stroke.set(&mut self.model, x, y, z, value);
@@ -404,6 +424,10 @@ impl Editor {
             // An edit must not reach a layer the slice has taken off screen.
             y_limit: self.slice.unwrap_or(u16::MAX),
         };
+        // The region is grown over the *composite*: you point at what you can
+        // see, so that is what a fill selects. What it writes is then narrowed
+        // to the active layer by the rule above. With one layer, or while
+        // working on the layer you are looking at, the two are the same set.
         let cells = region::cells(&self.model, self.span, reach);
         if self.mirror == [false; 3] {
             return cells;
@@ -448,17 +472,31 @@ impl Editor {
         // only feedback there is: a span is not previewed before the click, so
         // the count is what tells a fill of nine from a fill of nine hundred.
         let changed = drag.stroke.len();
+        let owner = drag.owner;
         let label = if self.history.push(drag.stroke) {
             self.dirty = true;
             Some(self.tool.name())
         } else {
             None
         };
-        if let Some(label) = label {
-            self.status = format!(
-                "{label} {changed} cells, {} voxels",
-                self.model.filled_count()
-            );
+        match label {
+            Some(label) => {
+                self.status = format!(
+                    "{label} {changed} cells, {} voxels",
+                    self.model.filled_count()
+                );
+            }
+            // Nothing changed. If the voxel that was clicked belongs to some
+            // other layer, that is why, and saying so is the difference between
+            // a rule the user can learn and an editor that ignores them.
+            None => {
+                if let Some(owner) = owner.filter(|o| *o != self.model.active_layer()) {
+                    self.status = format!(
+                        "{} holds that voxel — select it to edit",
+                        self.model.layers()[owner].name
+                    );
+                }
+            }
         }
     }
 
@@ -485,11 +523,19 @@ impl Editor {
     }
 
     /// Empty the model as one undoable step.
+    ///
+    /// Every layer, not the visible cells of the active one: `ctrl+N` is "start
+    /// this model again", and leaving the hidden layers full would make the
+    /// next save carry work the user believes they threw away.
     pub fn clear(&mut self) {
-        let filled: Vec<_> = self.model.iter_filled().map(|(p, _)| p).collect();
+        let filled: Vec<Vec<_>> = (0..self.model.layer_count())
+            .map(|n| self.model.iter_filled_in(n).map(|(p, _)| p).collect())
+            .collect();
         let changed = self.history.edit(&mut self.model, "clear", |model, stroke| {
-            for [x, y, z] in filled {
-                stroke.set(model, x as i32, y as i32, z as i32, 0);
+            for (n, cells) in filled.into_iter().enumerate() {
+                for [x, y, z] in cells {
+                    stroke.set_in(model, n, x as i32, y as i32, z as i32, 0);
+                }
             }
         });
         if changed {
@@ -497,6 +543,173 @@ impl Editor {
             self.invalidate_mesh();
         }
         self.status = "cleared".into();
+    }
+
+    // -- layers ----------------------------------------------------------
+
+    pub fn active_layer(&self) -> usize {
+        self.model.active_layer()
+    }
+
+    fn layer_name(&self, i: usize) -> String {
+        self.model.layers()[i].name.clone()
+    }
+
+    fn report_layer(&mut self) {
+        let i = self.model.active_layer();
+        self.status = format!("layer {}/{}: {}", i + 1, self.model.layer_count(), self.layer_name(i));
+    }
+
+    /// Select a layer outright — what a click on the panel does.
+    pub fn select_layer(&mut self, i: usize) {
+        self.model.set_active_layer(i);
+        self.report_layer();
+    }
+
+    /// Step the active layer, clamped rather than wrapped.
+    ///
+    /// Wrapping would put the top of the stack one key away from the bottom,
+    /// and a stack is a thing with ends — running off one and finding yourself
+    /// at the other is how an edit lands on the wrong layer.
+    pub fn cycle_layer(&mut self, delta: i32) {
+        let n = self.model.layer_count() as i32;
+        let next = (self.model.active_layer() as i32 + delta).clamp(0, n - 1);
+        self.model.set_active_layer(next as usize);
+        self.report_layer();
+    }
+
+    /// Add an empty layer above the active one and select it.
+    pub fn add_layer(&mut self) {
+        // Named for its position at the moment it is made. Two layers can end
+        // up sharing a name after a reorder, which is untidy but honest — the
+        // alternative is renaming layers behind the user's back.
+        let name = format!("LAYER {}", self.model.layer_count() + 1);
+        let mut added = None;
+        let changed = self.history.restructure(&mut self.model, "add layer", |model| {
+            added = model.add_layer(model.active_layer(), name);
+            if let Some(i) = added {
+                model.set_active_layer(i);
+            }
+        });
+        if changed {
+            self.after_structural();
+            self.report_layer();
+        } else {
+            self.status = format!("at the {}-layer limit", voxel_core::MAX_LAYERS);
+        }
+    }
+
+    pub fn delete_layer(&mut self) {
+        let name = self.layer_name(self.model.active_layer());
+        let changed = self.history.restructure(&mut self.model, "delete layer", |model| {
+            model.remove_layer(model.active_layer());
+        });
+        if changed {
+            self.after_structural();
+            self.status = format!("deleted {name} — ctrl+Z brings it back");
+        } else {
+            self.status = "a model needs one layer".into();
+        }
+    }
+
+    /// Move the active layer up or down the stack, changing what covers what.
+    pub fn move_layer(&mut self, up: bool) {
+        let changed = self.history.restructure(&mut self.model, "move layer", |model| {
+            model.move_layer(model.active_layer(), up);
+        });
+        if changed {
+            self.after_structural();
+            self.report_layer();
+        } else {
+            self.status = if up { "already on top" } else { "already at the bottom" }.into();
+        }
+    }
+
+    pub fn merge_layer_down(&mut self) {
+        let name = self.layer_name(self.model.active_layer());
+        let changed = self.history.restructure(&mut self.model, "merge layer", |model| {
+            model.merge_down(model.active_layer());
+        });
+        if changed {
+            self.after_structural();
+            self.status = format!("merged {name} down");
+        } else {
+            self.status = "the bottom layer has nothing to merge into".into();
+        }
+    }
+
+    /// Show or hide the active layer.
+    ///
+    /// Not an undo step, though it does dirty the document: visibility is a
+    /// thing you toggle constantly while working, and putting it on the undo
+    /// stack would mean `ctrl+Z` spent its first few presses turning layers
+    /// back on instead of undoing the edit you wanted back. It is still saved,
+    /// because which layers you had hidden is part of the model.
+    pub fn toggle_layer_visible(&mut self) {
+        let i = self.model.active_layer();
+        let visible = !self.model.layers()[i].visible;
+        self.model.set_layer_visible(i, visible);
+        self.dirty = true;
+        self.invalidate_mesh();
+        self.status = format!(
+            "{} {}",
+            self.layer_name(i),
+            if visible { "shown" } else { "hidden" }
+        );
+    }
+
+    fn after_structural(&mut self) {
+        self.dirty = true;
+        self.invalidate_mesh();
+    }
+
+    // -- renaming --------------------------------------------------------
+
+    /// The name being typed, if a rename is open. While this is `Some` the
+    /// window layer must route keystrokes here and nowhere else.
+    pub fn renaming(&self) -> Option<&str> {
+        self.rename.as_deref()
+    }
+
+    pub fn begin_rename(&mut self) {
+        self.rename = Some(self.layer_name(self.model.active_layer()));
+    }
+
+    /// Take one typed character. Control characters are dropped here rather
+    /// than at the window layer, so every platform's idea of what arrives with
+    /// a key press meets the same filter.
+    pub fn rename_push(&mut self, c: char) {
+        if c.is_control() {
+            return;
+        }
+        if let Some(buf) = &mut self.rename {
+            if buf.chars().count() < 32 {
+                buf.push(c);
+            }
+        }
+    }
+
+    pub fn rename_backspace(&mut self) {
+        if let Some(buf) = &mut self.rename {
+            buf.pop();
+        }
+    }
+
+    pub fn commit_rename(&mut self) {
+        let Some(name) = self.rename.take() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.status = "a layer needs a name".into();
+            return;
+        }
+        let i = self.model.active_layer();
+        self.model.rename_layer(i, name);
+        self.dirty = true;
+        self.report_layer();
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.rename = None;
     }
 
     // -- view ------------------------------------------------------------
@@ -666,9 +879,17 @@ impl Editor {
     }
 
     /// Export beside the working file, as `.vox`.
+    ///
+    /// `.vox` has nowhere to put a layer stack, so an export writes what is on
+    /// screen as one model. Saying so is the point: losing layers quietly is
+    /// how someone ends up treating the export as their save.
     pub fn export_vox(&mut self) {
         let path = self.path.with_extension("vox");
         self.save_as(&path);
+        let layers = self.model.layer_count();
+        if layers > 1 && self.status.starts_with("saved") {
+            self.status = format!("{} — {layers} layers flattened into one", self.status);
+        }
     }
 
     /// Reload from disk, discarding unsaved work and the history with it — the
@@ -711,6 +932,13 @@ impl Editor {
         }
         if let Some(axes) = self.mirror_axes() {
             s.push_str(&format!("  MIRROR {axes}"));
+        }
+        if self.model.layer_count() > 1 {
+            s.push_str(&format!(
+                "  L{}/{}",
+                self.model.active_layer() + 1,
+                self.model.layer_count()
+            ));
         }
         if let Some(cut) = self.slice {
             s.push_str(&format!("  SLICE {cut}"));
@@ -1313,6 +1541,264 @@ mod tests {
         let s = e.summary();
         assert!(s.contains("BUILD/PLANE"), "{s}");
         assert!(s.contains("MIRROR XZ"), "{s}");
+    }
+
+    // -- layers ----------------------------------------------------------
+
+    /// The point of a layer being a grid of its own, seen from the editor: you
+    /// can work over another layer without consuming it.
+    #[test]
+    fn building_on_a_new_layer_leaves_the_one_below_intact() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        assert_eq!(e.active_layer(), 1);
+        e.color = 6;
+        e.begin_stroke(hit([3, 0, 3], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().get(3, 0, 3), 6, "the new layer is what shows");
+        assert_eq!(e.model().get_in(0, 3, 0, 3), 4, "the floor is untouched");
+        assert_eq!(e.model().filled_count(), 64, "still one voxel per cell");
+
+        // And erasing on the upper layer gives the floor back rather than
+        // leaving a hole.
+        e.tool = Tool::Erase;
+        e.begin_stroke(hit([3, 0, 3], 6));
+        e.end_stroke();
+        assert_eq!(e.model().get(3, 0, 3), 4);
+    }
+
+    /// A tool writes to the active layer, so pointing at a voxel some other
+    /// layer holds does nothing — and has to say why, or it reads as a broken
+    /// editor.
+    #[test]
+    fn a_click_on_another_layers_voxel_does_nothing_and_says_so() {
+        let mut e = editor_with_floor();
+        e.model.rename_layer(0, "FLOOR");
+        e.add_layer();
+        e.tool = Tool::Erase;
+        // Adding the layer was itself one step; the click must add none.
+        let before = e.undo_depth();
+
+        e.begin_stroke(hit([3, 0, 3], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().get(3, 0, 3), 4, "the floor is on another layer");
+        assert_eq!(e.undo_depth(), before);
+        assert!(e.status().contains("FLOOR"), "{}", e.status());
+    }
+
+    /// A build must not be blocked by a voxel a *higher* layer is showing —
+    /// working underneath something is what a lower layer is for.
+    #[test]
+    fn a_build_under_a_covering_layer_still_lands() {
+        let mut e = editor_with_floor();
+        e.add_layer(); // layer 1, the cover
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        assert_eq!(e.model().get(3, 1, 3), 6);
+
+        // Back down to the floor layer and build in the same cell.
+        e.select_layer(0);
+        e.color = 7;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        assert_eq!(e.model().get_in(0, 3, 1, 3), 7, "written under the cover");
+        assert_eq!(e.model().get(3, 1, 3), 6, "which still covers it");
+    }
+
+    /// Deleting a layer is the one destructive layer command, so it has to come
+    /// back — including the edits made on it before it went.
+    #[test]
+    fn deleting_a_layer_is_undoable_with_its_contents() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), 65);
+
+        e.delete_layer();
+        assert_eq!(e.model().layer_count(), 1);
+        assert_eq!(e.model().filled_count(), 64);
+
+        e.undo();
+        assert_eq!(e.model().layer_count(), 2);
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 6);
+        e.undo();
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 0, "and the edit before it");
+    }
+
+    #[test]
+    fn the_last_layer_survives_a_delete() {
+        let mut e = editor_with_floor();
+        e.delete_layer();
+        assert_eq!(e.model().layer_count(), 1);
+        assert_eq!(e.undo_depth(), 0);
+        assert!(e.status().contains("one layer"), "{}", e.status());
+    }
+
+    #[test]
+    fn hiding_a_layer_takes_it_out_of_the_mesh_and_off_the_pick() {
+        let mut e = editor_with_floor();
+        e.toggle_layer_visible();
+        assert!(e.mesh().quads.is_empty(), "a hidden layer draws nothing");
+        e.tool = Tool::Erase;
+        assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
+        assert!(e.is_dirty(), "which layers are hidden is part of the model");
+        assert_eq!(e.undo_depth(), 0, "but not an undo step");
+    }
+
+    /// Moving a layer changes what covers what, and is undoable.
+    #[test]
+    fn moving_a_layer_changes_what_shows_and_undoes() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.color = 6;
+        e.begin_stroke(hit([3, 0, 3], 4));
+        e.end_stroke();
+        assert_eq!(e.model().get(3, 0, 3), 6);
+
+        e.move_layer(false);
+        assert_eq!(e.active_layer(), 0);
+        assert_eq!(e.model().get(3, 0, 3), 4, "the floor is on top now");
+        e.undo();
+        assert_eq!(e.model().get(3, 0, 3), 6);
+    }
+
+    #[test]
+    fn merging_down_folds_the_layer_and_undoes() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+
+        e.merge_layer_down();
+        assert_eq!(e.model().layer_count(), 1);
+        assert_eq!(e.model().get_in(0, 3, 1, 3), 6);
+        assert_eq!(e.model().get_in(0, 3, 0, 3), 4);
+
+        e.undo();
+        assert_eq!(e.model().layer_count(), 2);
+        assert_eq!(e.model().get_in(0, 3, 1, 3), 0);
+    }
+
+    /// `ctrl+N` means "start this model again". A hidden layer left full would
+    /// make the next save carry work the user believes they threw away.
+    #[test]
+    fn clearing_empties_the_hidden_layers_too() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        e.toggle_layer_visible();
+
+        e.clear();
+        assert_eq!(e.model().get_in(0, 3, 0, 3), 0);
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 0, "the hidden layer as well");
+        e.undo();
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 6, "and it all comes back");
+    }
+
+    /// A fill selects what you can see and writes what you own.
+    #[test]
+    fn a_fill_is_found_on_the_composite_and_written_to_the_active_layer() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.span = Span::Plane;
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().filled_count(), 128, "the whole floor, seen from above");
+        assert_eq!(e.model().layers()[1].filled_count(), 64, "all of it on the new layer");
+        assert_eq!(e.model().layers()[0].filled_count(), 64, "and none of it on the old");
+    }
+
+    #[test]
+    fn cycling_the_layer_clamps_at_both_ends() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.add_layer();
+        assert_eq!(e.active_layer(), 2);
+        e.cycle_layer(1);
+        assert_eq!(e.active_layer(), 2, "the top of the stack is the top");
+        e.cycle_layer(-5);
+        assert_eq!(e.active_layer(), 0);
+    }
+
+    #[test]
+    fn a_rename_takes_text_and_can_be_cancelled() {
+        let mut e = editor_with_floor();
+        e.begin_rename();
+        assert_eq!(e.renaming(), Some("LAYER 1"));
+        for _ in 0..7 {
+            e.rename_backspace();
+        }
+        for c in "body
+".chars() {
+            e.rename_push(c);
+        }
+        assert_eq!(e.renaming(), Some("body"), "a control character is not a name");
+        e.commit_rename();
+        assert_eq!(e.model().layers()[0].name, "body");
+        assert!(e.is_dirty());
+
+        e.begin_rename();
+        e.rename_push('x');
+        e.cancel_rename();
+        assert_eq!(e.model().layers()[0].name, "body");
+        assert_eq!(e.renaming(), None);
+    }
+
+    #[test]
+    fn a_rename_refuses_to_leave_a_layer_nameless() {
+        let mut e = editor_with_floor();
+        e.begin_rename();
+        for _ in 0..10 {
+            e.rename_backspace();
+        }
+        e.rename_push(' ');
+        e.commit_rename();
+        assert_eq!(e.model().layers()[0].name, "LAYER 1", "the old name stands");
+    }
+
+    /// The stack has to reach the file and come back, or layers are a thing
+    /// that only exists while the editor is open.
+    #[test]
+    fn layers_survive_a_save_and_a_reload() {
+        let dir = std::env::temp_dir().join("voxeler-layer-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut e = editor_with_floor();
+        e.path = dir.join("m.vxm");
+        e.add_layer();
+        e.begin_rename();
+        for _ in 0..7 {
+            e.rename_backspace();
+        }
+        for c in "ARMOUR".chars() {
+            e.rename_push(c);
+        }
+        e.commit_rename();
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        e.toggle_layer_visible();
+        e.save();
+        assert!(!e.is_dirty());
+
+        e.reload();
+        assert_eq!(e.model().layer_count(), 2);
+        assert_eq!(e.model().layers()[1].name, "ARMOUR");
+        assert!(!e.model().layers()[1].visible, "hidden, and still holding its work");
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 6);
+        assert_eq!(e.active_layer(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
