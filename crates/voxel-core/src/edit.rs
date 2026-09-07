@@ -16,6 +16,7 @@
 //! and structural steps happen a handful of times in a session.
 
 use crate::model::{Layer, VoxelModel};
+use crate::Rgb8;
 
 /// One cell's change, on one layer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,6 +47,11 @@ pub struct LayerState {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
     Cells(EditBatch),
+    Palette {
+        index: u8,
+        before: Rgb8,
+        after: Rgb8,
+    },
     Layers {
         label: &'static str,
         before: LayerState,
@@ -57,6 +63,7 @@ impl Change {
     pub fn label(&self) -> &'static str {
         match self {
             Change::Cells(b) => b.label,
+            Change::Palette { .. } => "palette",
             Change::Layers { label, .. } => label,
         }
     }
@@ -147,6 +154,22 @@ impl Stroke {
 }
 
 impl History {
+    /// Change one palette entry without copying the voxel grids.
+    pub fn set_palette_color(&mut self, model: &mut VoxelModel, index: u8, after: Rgb8) -> bool {
+        let before = model.palette().get(index);
+        if before == after {
+            return false;
+        }
+        model.palette_mut().set(index, after);
+        self.undo.push(Change::Palette {
+            index,
+            before,
+            after,
+        });
+        self.redo.clear();
+        true
+    }
+
     /// Run `f` against the model and push whatever it changed as one undo step.
     /// The one-shot form of [`Stroke`], for an edit that is over by the time it
     /// returns. Returns whether anything changed.
@@ -212,6 +235,7 @@ impl History {
                 }
             }
             Change::Layers { before, .. } => restore(model, before),
+            Change::Palette { index, before, .. } => model.palette_mut().set(*index, *before),
         }
         let label = change.label();
         self.redo.push(change);
@@ -229,6 +253,7 @@ impl History {
                 }
             }
             Change::Layers { after, .. } => restore(model, after),
+            Change::Palette { index, after, .. } => model.palette_mut().set(*index, *after),
         }
         let label = change.label();
         self.undo.push(change);

@@ -23,6 +23,13 @@ use voxel_render::{Mat4, OrbitCamera, Vec3};
 /// yet.
 pub const DEFAULT_SIZE: u16 = 32;
 
+/// A validated, explicitly addressed write; batches may span several layers.
+pub struct CellWrite {
+    pub layer: usize,
+    pub pos: [i32; 3],
+    pub color: u8,
+}
+
 /// What a click does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -800,13 +807,34 @@ impl Editor {
         label: &'static str,
         color: u8,
         cells: impl FnOnce(&VoxelModel, usize) -> Vec<[i32; 3]>,
-        mut observe: impl FnMut(u8, u8),
+        observe: impl FnMut(u8, u8),
     ) {
         let layer = self.model.active_layer();
         let picked = cells(&self.model, layer);
+        self.apply_writes(
+            label,
+            picked
+                .into_iter()
+                .map(|pos| CellWrite { layer, pos, color }),
+            observe,
+        );
+    }
+
+    /// Apply ordered writes as one undo step without changing the selection.
+    pub fn apply_writes(
+        &mut self,
+        label: &'static str,
+        writes: impl IntoIterator<Item = CellWrite>,
+        mut observe: impl FnMut(u8, u8),
+    ) {
         let changed = self.history.edit(&mut self.model, label, |model, stroke| {
-            for [x, y, z] in picked {
-                if !model.contains(x, y, z) {
+            for CellWrite {
+                layer,
+                pos: [x, y, z],
+                color,
+            } in writes
+            {
+                if layer >= model.layer_count() || !model.contains(x, y, z) {
                     continue;
                 }
                 // Read before the write, and report even when nothing moved:
@@ -821,6 +849,17 @@ impl Editor {
             self.dirty = true;
         }
         self.invalidate_mesh();
+    }
+
+    pub fn set_palette_color(&mut self, index: u8, color: voxel_core::Rgb8) -> bool {
+        let changed = self
+            .history
+            .set_palette_color(&mut self.model, index, color);
+        if changed {
+            self.dirty = true;
+            self.invalidate_mesh();
+        }
+        changed
     }
 
     /// Show or hide the active layer.

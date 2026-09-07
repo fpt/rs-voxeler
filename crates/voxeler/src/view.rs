@@ -25,12 +25,49 @@ const ERASE_MARK: u32 = 0xFF5A4A;
 const LIFT: f32 = 0.01;
 
 pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) {
+    render_with_options(
+        fb,
+        editor,
+        hover,
+        RenderOptions {
+            show_bounds: true,
+            light: Light::default(),
+        },
+    );
+}
+
+/// Preview styling is independent of the interactive editor's overlays.
+#[derive(Clone, Copy)]
+pub struct RenderOptions {
+    pub show_bounds: bool,
+    pub light: Light,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            show_bounds: false,
+            light: Light {
+                ambient: 0.7,
+                diffuse: 0.3,
+                ..Light::default()
+            },
+        }
+    }
+}
+
+pub fn render_with_options(
+    fb: &mut Framebuffer,
+    editor: &mut Editor,
+    hover: Option<Target>,
+    options: RenderOptions,
+) {
     fb.clear_gradient(SKY_TOP, SKY_BOTTOM);
 
     let scene = Scene {
         view_proj: editor.view_projection(fb.width(), fb.height()),
         eye: editor.camera.eye(),
-        light: Light::default(),
+        light: options.light,
     };
     let offset = editor.offset();
     let size = editor.model().size();
@@ -43,7 +80,9 @@ pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) 
     let mesh = editor.mesh().clone();
     raster::draw_mesh(fb, &scene, &mesh, &palette, offset);
 
-    draw_volume_box(fb, &scene, editor, size, offset);
+    if options.show_bounds {
+        draw_volume_box(fb, &scene, editor, size, offset);
+    }
 
     if let Some(target) = hover {
         draw_target(fb, &scene, editor, target, offset);

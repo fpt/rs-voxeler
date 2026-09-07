@@ -27,7 +27,7 @@ cd crates && cargo build --release
 
 ```bash
 voxeler [FILE] [--size N] [--mcp [PORT]]
-voxeler mcp [DIR...]              serve an agent over stdio, headless
+voxeler mcp [DIR]                 serve an agent over stdio, headless
 voxeler attach [DIR]              open a window onto a running `voxeler mcp`
 voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
@@ -143,7 +143,7 @@ by being opened.
 The panel under the palette lists the stack, top first, with each layer's own
 voxel count. Click a row to select it, click its box to show or hide it.
 
-Tools write to the **active layer** and only to it. That is what makes layers
+Interactive tools write to the **active layer** and only to it. That is what makes layers
 worth having, and it has one consequence worth knowing: clicking a voxel some
 other layer owns does nothing, and the status line says which layer holds it.
 Building is the mirror image — a voxel a *higher* layer is showing never blocks
@@ -173,26 +173,21 @@ symmetrically.
 
 ## Driving it from an agent
 
+The repository includes a reusable modeling skill at
+[`skills/voxeler-modeling/SKILL.md`](skills/voxeler-modeling/SKILL.md), covering
+reference-based modeling, layered batch edits and verified previews. Ask your
+agent to read it for an asset task, or install the `voxeler-modeling` directory
+in your agent's skill directory for discovery.
+
 Two transports, because they answer different questions.
 
 **`voxeler mcp` — stdio, headless.** The agent starts it, so "is the server
-running?" never comes up. Name the directories its `open`/`save` tools may
-reach; they are the only part of the filesystem it can see:
+running?" never comes up. It is rooted at a directory, and that is the only part
+of the filesystem its `open`/`save` tools can reach:
 
 ```json
-{ "mcpServers": { "voxeler": { "command": "voxeler",
-                               "args": ["mcp", "~/models", "~/Documents/voxels"] } } }
+{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp", "/path/to/models"] } } }
 ```
-
-**Name them.** A desktop MCP client spawns its servers with whatever working
-directory the *app* happened to have, so without an argument neither you nor the
-agent can say where a bare file name lands. (If that working directory turns out
-to be the filesystem root, the server refuses to start rather than quietly
-handing an agent every file on the machine.)
-
-The directories are reported back in the server's `initialize` instructions, so
-the agent is told where it may write before it tries. Paths given to the tools
-may be **absolute inside any of them**, or relative to the first.
 
 **`voxeler attach` — a window onto that session.** The stdio server is headless,
 so this is how a person joins and watches the model being built:
@@ -222,13 +217,16 @@ whoever connects.
 | `describe_model` | size, voxel count, bounds, the layer stack, active layer, colour |
 | `put_voxel` | one voxel; colour 0 erases |
 | `put_rect` | a solid axis-aligned box, corners inclusive |
+| `apply_edits` | ordered voxel/box/ellipsoid/line edits across layers, one undo step |
+| `put_ellipsoid`, `put_line` | ellipsoid or rounded thick line, optionally on a named layer |
 | `paint` | recolour the voxels in a box, creating none |
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
+| `set_palette_color` | change an index's RGB across all layers, with undo/redo |
 | `add_layer`, `select_layer`, `set_layer_visible`, `trim_layer` | the layer stack and its boxes |
-| `screenshot` | render the model to a PNG and return it as an image |
+| `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
-| `new_model`, `open_model`, `save_model`, `list_models` | files, inside the root |
+| `new_model`, `open_model`, `save_model`, `list_models` | files inside the root; listing includes subdirectories |
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
 tell you the arm is on backwards. It takes `yaw` and `pitch` in degrees and
@@ -238,12 +236,10 @@ and it puts the camera back where it found it.
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
 
-The file tools resolve paths **inside those directories and refuse to leave
-them**. `..` is rejected lexically, before anything touches the disk; an
-absolute path is checked against the directories, and against the *canonical*
-form of it, so a symlink pointing out of one does not get through. Under
-`--mcp`, where you opened the document yourself, they reach nothing at all and
-are refused outright — you opened it, you save it.
+The file tools resolve paths **inside the root and refuse to leave it** — no
+`..`, no absolute paths, checked before anything touches the disk. Under
+`--mcp`, where you opened the document yourself, the root reaches nothing at
+all and they are refused outright.
 
 Coordinates are model space — `0..size` on each axis, +Y up, the same
 coordinates the file stores.
@@ -262,12 +258,80 @@ a measurement rather than a reassurance: ask for a 5×5×5 box and read
 
 The agent and you share one editor, one undo history and one file. A whole tool
 call is **one** undo step, so a box an agent filled costs you one `ctrl+Z`.
-Tools write to the active layer and only to it — `fill` refuses a cell another
+Basic MCP tools write to the active layer and only to it — `fill` refuses a cell another
 layer owns rather than copying that layer's shape onto this one, and says which
-layer to select instead.
+layer to select instead. Batch and curved modeling tools also accept an explicit
+layer; palette RGB edits affect every use of that index across the model.
 
-Not exposed: deleting or merging layers, undo, and the camera. The view is
-yours in both modes.
+Not exposed: deleting or merging layers and changing the user's camera.
+Screenshot settings affect the returned image only; the editor's view is restored.
+
+### Batch and curved modeling
+
+`apply_edits` takes an `edits` array. Each operation has `op` set to `voxel`,
+`rect`, `ellipsoid` or `line`. Top-level `layer` and `color` set defaults;
+individual operations may override them. An omitted layer uses the active
+layer, but explicit layer arguments never change the selection.
+
+```json
+{
+  "layer": "BODY",
+  "color": 1,
+  "edits": [
+    {"op": "ellipsoid", "center": [63.5, 40, 64], "radii": [20, 27, 16]},
+    {"op": "line", "from": [45, 50, 64], "to": [33, 32, 64], "radius": 4},
+    {"op": "rect", "from": [50, 5, 55], "to": [59, 12, 70]},
+    {"op": "voxel", "x": 63, "y": 40, "z": 80, "color": 65}
+  ]
+}
+```
+
+Every operation is validated before any voxel is written. Later writes win on
+overlaps, and the entire call is one undo step, even across layers. Reports count
+write attempts: a cell touched twice contributes twice to `targeted`. A request
+can contain up to 262,144 operations and 2,097,152 candidate cells; shape bounding
+boxes count toward that budget before filtering. Split larger requests into
+separate calls (the SSE transport also has an 8 MiB message limit).
+
+`put_ellipsoid` uses the same `center`, `radii`, `color` and `layer` arguments.
+`put_line` uses `from`, `to` and `radius`; rounded ends make it a capsule, or a
+sphere when the endpoints coincide. Integer coordinates denote voxel centers;
+fractional centers such as `63.5` allow exact symmetry in an even-sized scene.
+Radii must be greater than zero and at most 256. Centers/endpoints must be inside
+`0..=size-1`; curved surfaces are clipped at the scene boundary. Boxes and single
+voxels reject out-of-range coordinates. Colour 0 erases the addressed layer.
+
+`set_palette_color` accepts `{"index":65,"r":200,"g":25,"b":36}`. It changes
+every voxel using index 65, including those in hidden layers, and is undoable.
+It does not select that colour; use `set_color` for selection. RGB changes are
+preserved in both `.vxm` and `.vox` files.
+
+### Preview and file discovery
+
+`screenshot` hides scene/layer bounds by default and uses softer lighting than
+the editor. `show_bounds: true` includes those editing guides. `ambient` and
+`diffuse` each range from 0 to 1 (defaults 0.7 and 0.3).
+
+```json
+{"view":"front","width":768,"height":768,"ambient":0.8,"diffuse":0.2,"path":"models/front.png"}
+```
+
+`view` accepts `front`, `back`, `left`, `right`, `top` and `three_quarter`.
+Front views from +Z toward -Z; right views from +X. Explicit `yaw` or `pitch`
+overrides that angle of the preset. Without a preset or explicit angles, the
+editor camera's angles are used. Neither successful nor failed PNG output changes
+the user's camera, grid setting, undo history or model save state.
+
+An optional `path` writes the same PNG returned in the image block. Its parent
+directory must exist, its extension must be `.png`, and it is confined to the
+server root. PNG file output is unavailable in the windowed SSE server, just like
+model file output; returning an image still works. `--thumbnail` also frames the
+model's contents, hides bounds and uses the softer preview lighting.
+
+`list_models` searches recursively by default and sorts paths. For one directory
+only, use `{"directory":"models","recursive":false}`. Directory names are
+relative to the server root. File tools reject symlink paths, and recursive
+listing skips symlink files and directories.
 
 ## Where this is going
 

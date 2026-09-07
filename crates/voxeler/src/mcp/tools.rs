@@ -16,7 +16,7 @@
 //! An agent cannot see the screen, so a tool that says "ok" has told it
 //! nothing. Each edit returns a [`Report`]: how many cells it looked at, how
 //! many were added, removed, repainted, and left alone, and what the layer and
-//! the model hold afterwards. Those five numbers sum to `targeted`, which is
+//! the model hold afterwards. Those four outcomes sum to `targeted`, which is
 //! what makes them checkable rather than merely reassuring.
 
 use std::path::{Component, Path, PathBuf};
@@ -28,32 +28,22 @@ use voxel_core::{Bounds, Face, VoxelModel};
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
 
-/// The directories an agent's file tools may reach.
+mod modeling;
+
+/// The directory an agent's file tools are confined to.
 ///
 /// An MCP server is driven by a model reading content nobody vetted, so `open`
-/// and `save` resolve inside a set of directories and refuse to leave them.
-///
-/// # Absolute paths are how you say where you mean
-///
-/// A relative path is resolved against the first root, which is fine when you
-/// started the server yourself in the directory you meant. A desktop MCP client
-/// spawns it with whatever working directory the *app* happened to have, and
-/// then nobody — user or agent — can say where "robot.vxm" is going. So an
-/// absolute path is accepted too, checked against the roots rather than
-/// refused, and the roots are named in the server's `initialize` instructions
-/// so the agent is told where it may write before it tries.
-#[derive(Clone, Debug, Default)]
-pub struct Roots(Vec<PathBuf>);
+/// and `save` resolve inside one directory and refuse to leave it. The check is
+/// on the *lexical* path — `..` components and absolute paths are rejected
+/// before anything touches the filesystem — because a check made by
+/// canonicalising the result has already followed whatever symlink was there.
+#[derive(Clone, Debug)]
+pub struct Root(Option<PathBuf>);
 
-impl Roots {
-    /// Every directory the file tools may reach. The first is where a relative
-    /// path lands.
-    pub fn new(dirs: impl IntoIterator<Item = PathBuf>) -> Self {
-        Self(
-            dirs.into_iter()
-                .map(|d| d.canonicalize().unwrap_or(d))
-                .collect(),
-        )
+impl Root {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        Self(Some(dir.canonicalize().unwrap_or(dir)))
     }
 
     /// No filesystem at all — what the SSE transport uses.
@@ -63,78 +53,48 @@ impl Roots {
     /// worked, and one that could open would replace what they were looking at.
     /// Both are the user's to do.
     pub fn none() -> Self {
-        Self(Vec::new())
+        Self(None)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn dirs(&self) -> &[PathBuf] {
-        &self.0
-    }
-
-    /// Where a relative path lands, and where a new server's model is named.
-    pub fn primary(&self) -> Option<&Path> {
-        self.0.first().map(PathBuf::as_path)
+    fn dir(&self) -> Result<&Path, String> {
+        self.0.as_deref().ok_or_else(|| {
+            "this server edits the document the user already has open, and cannot reach \
+             the filesystem. The user saves it."
+                .to_string()
+        })
     }
 
     pub fn display(&self) -> String {
-        if self.0.is_empty() {
-            return "(none)".into();
+        match &self.0 {
+            Some(d) => d.display().to_string(),
+            None => "(none)".into(),
         }
-        self.0
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
-    /// What an agent is told at `initialize`, so it knows where it may write
-    /// without having to guess at the server's working directory.
-    pub fn instructions(&self) -> String {
-        if self.0.is_empty() {
-            return "This server edits the document the user already has open. It has no \
-                    access to the filesystem: the user opens and saves."
-                .into();
-        }
-        format!(
-            "Voxel models are read and written under these directories:\n{}\n\nPaths may be \
-             absolute inside one of them, or relative to the first. Call list_models to see \
-             what is there, describe_model for the model being edited.",
-            self.0
-                .iter()
-                .map(|d| format!("  {}", d.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+    /// The directory itself. Only a caller that made a real root asks.
+    pub fn path(&self) -> &Path {
+        self.0.as_deref().unwrap_or(Path::new(""))
     }
 
-    /// Resolve a path the agent gave, or say why not.
-    ///
-    /// The check is on the *lexical* path — `..` components are rejected before
-    /// anything touches the filesystem — and then, for an absolute path, on the
-    /// canonical form of the deepest part of it that exists. A prefix test on
-    /// the name alone would be satisfied by a symlink inside a root pointing
-    /// anywhere at all.
+    /// Resolve a relative path inside the root, or say why not.
     pub fn resolve(&self, given: &str) -> Result<PathBuf, String> {
-        if self.0.is_empty() {
-            return Err("this server edits the document the user already has open, and cannot \
-                        reach the filesystem. The user saves it."
-                .into());
-        }
+        let dir = self.dir()?;
         let path = Path::new(given);
+        if path.is_absolute() {
+            return Err(format!(
+                "{given:?} is an absolute path; name a file inside {} instead",
+                dir.display()
+            ));
+        }
         for part in path.components() {
             match part {
-                Component::Normal(_) | Component::CurDir | Component::RootDir => {}
-                Component::Prefix(_) if path.is_absolute() => {}
+                Component::Normal(_) | Component::CurDir => {}
                 // `..` is refused outright rather than resolved and re-checked:
                 // "a/../b" is harmless and "../b" is not, and telling them apart
                 // after the fact is exactly the reasoning that goes wrong.
                 _ => {
                     return Err(format!(
-                        "{given:?} contains `..`; name a path without one, under {}",
-                        self.display()
+                        "{given:?} leaves the root; paths may not contain `..` or start at /"
                     ))
                 }
             }
@@ -142,66 +102,28 @@ impl Roots {
         if path.components().next().is_none() {
             return Err("a file name is required".into());
         }
-
-        let full = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            // Unwrapped safely: the empty case returned above.
-            self.0[0].join(path)
-        };
-        if self.contains(&full) {
-            Ok(full)
-        } else {
-            Err(format!(
-                "{given:?} is outside the directories this server may use: {}",
-                self.display()
-            ))
-        }
-    }
-
-    /// Whether a path is inside one of the roots, following symlinks as far as
-    /// the filesystem can.
-    fn contains(&self, path: &Path) -> bool {
-        let real = canonical_enough(path);
-        self.0.iter().any(|root| real.starts_with(root))
-    }
-
-    /// A path back in the shortest form that still names it: relative to a root
-    /// when it is under one, and absolute otherwise.
-    fn label(&self, path: &Path) -> String {
-        for root in &self.0 {
-            if let Ok(rest) = path.strip_prefix(root) {
-                return rest.display().to_string();
-            }
-        }
-        path.display().to_string()
-    }
-}
-
-/// The canonical form of a path that may not exist yet: canonicalize the
-/// deepest ancestor that does, and put the rest back on the end.
-///
-/// `save_model` names a file that is about to be created, so plain
-/// `canonicalize` fails on exactly the case that matters most.
-fn canonical_enough(path: &Path) -> PathBuf {
-    let mut rest = Vec::new();
-    let mut here = path.to_path_buf();
-    loop {
-        if let Ok(real) = here.canonicalize() {
-            let mut out = real;
-            for part in rest.iter().rev() {
-                out.push(part);
-            }
-            return out;
-        }
-        match here.file_name() {
-            Some(name) => {
-                rest.push(name.to_os_string());
-                if !here.pop() {
-                    return path.to_path_buf();
+        let mut resolved = dir.to_path_buf();
+        for part in path.components() {
+            resolved.push(part);
+            match std::fs::symlink_metadata(&resolved) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(format!(
+                        "{given:?} contains a symlink; file tools do not follow links"
+                    ));
                 }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("cannot inspect {given:?}: {e}")),
             }
-            None => return path.to_path_buf(),
+        }
+        Ok(resolved)
+    }
+
+    /// A path back in the form the agent gave it, for reporting.
+    fn relative(&self, path: &Path) -> String {
+        match &self.0 {
+            Some(dir) => path.strip_prefix(dir).unwrap_or(path).display().to_string(),
+            None => path.display().to_string(),
         }
     }
 }
@@ -256,7 +178,7 @@ pub fn list() -> Vec<ToolInfo> {
         "type": ["integer", "string"]
     });
 
-    vec![
+    let mut tools = vec![
         ToolInfo {
             name: "describe_model",
             description:
@@ -335,12 +257,17 @@ pub fn list() -> Vec<ToolInfo> {
                 "type": "object",
                 "properties": {
                     "yaw": {"type": "number", "description":
-                        "Degrees around the vertical axis. 0 looks along +Z; 90 is a quarter \
-                         turn. Omit to keep the angle from the last screenshot."},
+                        "Degrees around +Y. 0 views from +Z toward -Z; 90 views from +X. \
+                         Overrides view. Omit both to use the editor camera."},
                     "pitch": {"type": "number", "minimum": -89, "maximum": 89,
                         "description": "Degrees above the horizon; 30 is a three-quarter view."},
                     "width": {"type": "integer", "minimum": 64, "maximum": 1024},
                     "height": {"type": "integer", "minimum": 64, "maximum": 1024},
+                    "view": {"type": "string", "enum": ["front", "back", "left", "right", "top", "three_quarter"]},
+                    "show_bounds": {"type": "boolean", "default": false},
+                    "ambient": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7},
+                    "diffuse": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.3},
+                    "path": {"type": "string", "description": "Optional PNG output path relative to the server root. Still returns the image. Does not save or dirty the model."},
                 },
             }),
         },
@@ -366,9 +293,12 @@ pub fn list() -> Vec<ToolInfo> {
         ToolInfo {
             name: "list_models",
             description:
-                "The model files in the server's root directory, with their sizes. Where open \
-                 and save can reach; nothing outside it is visible.",
-            input_schema: json!({"type": "object", "properties": {}}),
+                "List model files beneath the server root, sorted by relative path. Searches \
+                 subdirectories by default; symlinks are never followed.",
+            input_schema: json!({"type": "object", "properties": {
+                "directory": {"type": "string", "default": "."},
+                "recursive": {"type": "boolean", "default": true}
+            }}),
         },
         ToolInfo {
             name: "open_model",
@@ -428,7 +358,7 @@ pub fn list() -> Vec<ToolInfo> {
             name: "find_color",
             description:
                 "The palette index closest to an RGB value, with the colour actually at that \
-                 index. The palette is fixed at 255 entries, so an exact match is not guaranteed \
+                 index. The palette has 255 editable entries, so an exact match is not guaranteed \
                  — the reported distance says how close it came.",
             input_schema: json!({
                 "type": "object",
@@ -476,8 +406,8 @@ pub fn list() -> Vec<ToolInfo> {
         ToolInfo {
             name: "select_layer",
             description:
-                "Choose the layer that edits are written to. Every editing tool writes to this \
-                 layer and no other.",
+                "Choose the default layer for edits. Basic tools write here; apply_edits, \
+                 put_ellipsoid and put_line can explicitly address another layer.",
             input_schema: json!({
                 "type": "object",
                 "properties": {"layer": layer},
@@ -495,7 +425,9 @@ pub fn list() -> Vec<ToolInfo> {
                 "required": ["layer", "visible"],
             }),
         },
-    ]
+    ];
+    tools.extend(modeling::schemas());
+    tools
 }
 
 /// Run one tool against the editor.
@@ -504,11 +436,11 @@ pub fn list() -> Vec<ToolInfo> {
 /// a bad coordinate is something the agent should read and correct, not a
 /// protocol fault that tears down its session.
 pub fn call(editor: &mut Editor, name: &str, args: &Value) -> CallResult {
-    call_in(editor, &Roots::none(), name, args)
+    call_in(editor, &Root::none(), name, args)
 }
 
 /// The same, with a root the file tools may reach into.
-pub fn call_in(editor: &mut Editor, root: &Roots, name: &str, args: &Value) -> CallResult {
+pub fn call_in(editor: &mut Editor, root: &Root, name: &str, args: &Value) -> CallResult {
     match dispatch(editor, root, name, args) {
         Ok(result) => result,
         Err(message) => CallResult::failure(message),
@@ -517,12 +449,31 @@ pub fn call_in(editor: &mut Editor, root: &Roots, name: &str, args: &Value) -> C
 
 fn dispatch(
     editor: &mut Editor,
-    root: &Roots,
+    root: &Root,
     name: &str,
     args: &Value,
 ) -> Result<CallResult, String> {
     match name {
-        "describe_model" => Ok(CallResult::text(describe(editor, root))),
+        "describe_model" => Ok(CallResult::text(describe(editor))),
+        "apply_edits" | "put_ellipsoid" | "put_line" => modeling::apply(editor, name, args),
+        "set_palette_color" => {
+            let index = channel(args, "index")?;
+            if index == 0 {
+                return Err("palette index 0 is air; use 1..=255".into());
+            }
+            let rgb = voxel_core::Rgb8::new(
+                channel(args, "r")?,
+                channel(args, "g")?,
+                channel(args, "b")?,
+            );
+            let changed = editor.set_palette_color(index, rgb);
+            Ok(CallResult::text(format!(
+                "palette colour {index}\n{}",
+                json!({
+                    "index": index, "rgb": [rgb.r, rgb.g, rgb.b], "changed": changed
+                })
+            )))
+        }
         "put_voxel" => {
             let p = point_in(args, editor.model())?;
             let color = color_arg(editor, args)?;
@@ -683,7 +634,7 @@ fn dispatch(
                 layers_json(editor)
             )))
         }
-        "screenshot" => screenshot(editor, args),
+        "screenshot" => screenshot(editor, root, args),
         "undo" | "redo" => {
             let steps = match args.get("steps") {
                 None | Some(Value::Null) => 1,
@@ -723,35 +674,41 @@ fn dispatch(
         }
         "list_models" => {
             let mut rows: Vec<Value> = Vec::new();
-            if root.is_empty() {
-                return Err(root.resolve("x").unwrap_err());
-            }
-            for dir in root.dirs() {
-                let Ok(entries) = std::fs::read_dir(dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
+            let directory = match args.get("directory") {
+                None => ".",
+                Some(v) => v.as_str().ok_or("`directory` must be a string")?,
+            };
+            let recursive = bool_arg(args, "recursive", true)?;
+            let mut pending = vec![root.resolve(directory)?];
+            while let Some(dir) = pending.pop() {
+                for entry in std::fs::read_dir(&dir)
+                    .map_err(|e| format!("cannot read {}: {e}", root.relative(&dir)))?
+                {
+                    let entry = entry.map_err(|e| format!("cannot read directory entry: {e}"))?;
+                    let kind = entry.file_type().map_err(|e| e.to_string())?;
+                    if kind.is_dir() && recursive {
+                        pending.push(entry.path());
+                    }
+                    if !kind.is_file() {
+                        continue;
+                    }
                     let path = entry.path();
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if !ext.eq_ignore_ascii_case("vxm") && !ext.eq_ignore_ascii_case("vox") {
                         continue;
                     }
                     rows.push(json!({
-                        // Both forms: the short one to read, and the absolute
-                        // one to hand back without having to know which root a
-                        // relative path is measured from.
-                        "path": root.label(&path),
-                        "absolute": path.display().to_string(),
-                        "bytes": entry.metadata().map(|m| m.len()).unwrap_or(0),
+                        "path": root.relative(&path),
+                        "bytes": entry.metadata().map_err(|e| e.to_string())?.len(),
                     }));
                 }
             }
+            rows.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
             Ok(CallResult::text(format!(
-                "{} model files under {}\n{}",
+                "{} model files in {}\n{}",
                 rows.len(),
                 root.display(),
-                json!({"roots": root.dirs().iter().map(|d| d.display().to_string())
-                            .collect::<Vec<_>>(), "models": rows})
+                json!({"root": root.display().to_string(), "models": rows})
             )))
         }
         "open_model" => {
@@ -762,7 +719,7 @@ fn dispatch(
             }
             let model = voxel_core::format::load(&path).map_err(|e| format!("{given}: {e}"))?;
             editor.open(model, path);
-            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor, root))))
+            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor))))
         }
         "new_model" => {
             let given = path_arg(args)?;
@@ -780,7 +737,7 @@ fn dispatch(
             editor.open(crate::editor::new_model(size), path);
             Ok(CallResult::text(format!(
                 "started {given}, {size}x{size}x{size} — not written until save_model\n{}",
-                describe(editor, root)
+                describe(editor)
             )))
         }
         "save_model" => {
@@ -791,16 +748,12 @@ fn dispatch(
                 // saving over it while they work is not an agent's call to
                 // make. With one, the path came through `resolve` already.
                 None => {
-                    // Still gated on there being a root: without one the
-                    // editor's path is the *user's* file.
-                    if root.is_empty() {
-                        return Err(root.resolve("x").unwrap_err());
-                    }
+                    root.dir()?;
                     editor.path().to_path_buf()
                 }
             };
             voxel_core::format::save(&path, editor.model())
-                .map_err(|e| format!("{}: {e}", root.label(&path)))?;
+                .map_err(|e| format!("{}: {e}", root.relative(&path)))?;
             let flattened = path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("vox"))
@@ -808,14 +761,14 @@ fn dispatch(
             editor.mark_saved(&path);
             Ok(CallResult::text(format!(
                 "saved {}{}\n{}",
-                root.label(&path),
+                root.relative(&path),
                 if flattened {
                     format!(" — {} layers flattened into one", editor.model().layer_count())
                 } else {
                     String::new()
                 },
                 json!({
-                    "path": root.label(&path),
+                    "path": root.relative(&path),
                     "voxels": editor.model().filled_count(),
                     "layers": editor.model().layer_count(),
                     "flattened": flattened,
@@ -848,7 +801,9 @@ fn edit(
     cells: impl FnOnce(&VoxelModel, usize) -> Vec<[i32; 3]>,
 ) -> Result<CallResult, String> {
     let mut report = Report::default();
-    editor.apply_batch(label, color, cells, |before, after| report.record(before, after));
+    editor.apply_batch(label, color, cells, |before, after| {
+        report.record(before, after)
+    });
     Ok(CallResult::text(format!(
         "{}\n{}",
         summary(&report),
@@ -870,7 +825,7 @@ fn edit(
 /// The camera is moved, used and put back: under the SSE transport this editor
 /// is the one the user is looking at, and a screenshot that left their view
 /// somewhere else would be an agent reaching through the screen.
-fn screenshot(editor: &mut Editor, args: &Value) -> Result<CallResult, String> {
+fn screenshot(editor: &mut Editor, root: &Root, args: &Value) -> Result<CallResult, String> {
     let size = |name: &str| -> Result<u32, String> {
         match args.get(name) {
             None | Some(Value::Null) => Ok(512),
@@ -887,14 +842,55 @@ fn screenshot(editor: &mut Editor, args: &Value) -> Result<CallResult, String> {
             None | Some(Value::Null) => Ok(None),
             Some(v) => v
                 .as_f64()
+                .filter(|d| d.is_finite() && d.abs() <= 360_000.)
                 .map(|d| Some(d.to_radians() as f32))
                 .ok_or_else(|| format!("`{name}` must be a number of degrees")),
         }
     };
-    let yaw = angle("yaw")?;
+    let preset = match args.get("view") {
+        None => None,
+        Some(v) => Some(match v.as_str().ok_or("`view` must be a string")? {
+            "front" => (0_f32, 0_f32),
+            "back" => (180., 0.),
+            "left" => (-90., 0.),
+            "right" => (90., 0.),
+            "top" => (0., 89.),
+            "three_quarter" => (45., 30.),
+            other => return Err(format!("unknown view {other:?}")),
+        }),
+    };
+    let yaw = angle("yaw")?.or(preset.map(|p| p.0.to_radians()));
     // Straight down the poles is a camera with no up vector; the editor clamps
     // its own orbit for the same reason.
-    let pitch = angle("pitch")?.map(|p| p.clamp(-1.55, 1.55));
+    let pitch = angle("pitch")?
+        .or(preset.map(|p| p.1.to_radians()))
+        .map(|p| p.clamp(-1.55, 1.55));
+    let path = match args.get("path") {
+        None => None,
+        Some(_) => {
+            let p = root.resolve(&path_arg(args)?)?;
+            if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+                return Err("screenshot output path must end in .png".into());
+            }
+            Some(p)
+        }
+    };
+    let mut options = crate::view::RenderOptions {
+        show_bounds: bool_arg(args, "show_bounds", false)?,
+        ..Default::default()
+    };
+    let intensity = |name: &str, default: f32| -> Result<f32, String> {
+        match args.get(name) {
+            None => Ok(default),
+            Some(v) => v
+                .as_f64()
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .map(|v| v as f32)
+                .ok_or_else(|| format!("`{name}` must be a number in 0..=1")),
+        }
+    };
+    options.light.ambient = intensity("ambient", options.light.ambient)?;
+    options.light.diffuse = intensity("diffuse", options.light.diffuse)?;
 
     let saved = editor.camera;
     let grid = editor.show_grid;
@@ -910,21 +906,28 @@ fn screenshot(editor: &mut Editor, args: &Value) -> Result<CallResult, String> {
     editor.frame_model();
 
     let mut fb = voxel_render::Framebuffer::new(width, height);
-    crate::view::render(&mut fb, editor, None);
+    crate::view::render_with_options(&mut fb, editor, None, options);
     let png = voxel_render::png::encode(fb.width(), fb.height(), fb.color());
 
     editor.camera = saved;
     editor.show_grid = grid;
+
+    if let Some(path) = &path {
+        std::fs::write(path, &png)
+            .map_err(|e| format!("cannot write {}: {e}", root.relative(path)))?;
+    }
 
     let [sx, sy, sz] = editor.model().size();
     Ok(CallResult {
         content: vec![
             Content::Text {
                 text: format!(
-                    "{width}x{height} view of {sx}x{sy}x{sz}, {} voxels, yaw {:.0} pitch {:.0}",
+                    "{width}x{height} view of {sx}x{sy}x{sz}, {} voxels, yaw {:.0} pitch {:.0}\n{}",
                     editor.model().filled_count(),
                     yaw.unwrap_or(saved.yaw).to_degrees(),
                     pitch.unwrap_or(saved.pitch).to_degrees(),
+                    json!({"width":width,"height":height,"path":path.as_ref().map(|p|root.relative(p)),
+                        "show_bounds":options.show_bounds,"ambient":options.light.ambient,"diffuse":options.light.diffuse}),
                 ),
             },
             Content::Image {
@@ -946,7 +949,7 @@ fn summary(r: &Report) -> String {
     )
 }
 
-fn describe(editor: &Editor, root: &Roots) -> String {
+fn describe(editor: &Editor) -> String {
     let model = editor.model();
     let [sx, sy, sz] = model.size();
     let bounds = model
@@ -968,14 +971,19 @@ fn describe(editor: &Editor, root: &Roots) -> String {
             "color_rgb": rgb_of(editor, editor.color),
             "active_layer": editor.active_layer(),
             "layers": layer_rows(editor),
-            // Absolute, so an agent that cannot see the server's working
-            // directory still knows exactly which file it is editing.
-            "path": editor.path().display().to_string(),
-            "roots": root.dirs().iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+            "path": model_path(editor),
             "unsaved": editor.is_dirty(),
-            "note": "every editing tool writes to the active layer only",
+            "note": "basic edits write to the active layer; apply_edits, put_ellipsoid and put_line accept explicit layers; palette edits affect all uses of an index",
         })
     )
+}
+
+fn model_path(editor: &Editor) -> String {
+    editor
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn layer_rows(editor: &Editor) -> Vec<Value> {
@@ -1031,6 +1039,15 @@ fn nearest_color(model: &VoxelModel, want: [u8; 3]) -> (u8, u32) {
 }
 
 // -- argument parsing ----------------------------------------------------
+
+fn bool_arg(args: &Value, name: &str, default: bool) -> Result<bool, String> {
+    match args.get(name) {
+        None => Ok(default),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| format!("`{name}` must be a boolean")),
+    }
+}
 
 fn channel(args: &Value, name: &str) -> Result<u8, String> {
     let v = args
@@ -1536,15 +1553,16 @@ mod tests {
         dir
     }
 
-    fn run_in(e: &mut Editor, root: &Roots, name: &str, args: Value) -> CallResult {
+    fn run_in(e: &mut Editor, root: &Root, name: &str, args: Value) -> CallResult {
         call_in(e, root, name, &args)
     }
 
-    /// The boundary an agent must not cross.
+    /// The boundary an agent must not cross. Every one of these is a path that
+    /// resolves outside the root, and the check is lexical so none of them
+    /// reaches the filesystem to find out.
     #[test]
     fn a_path_that_leaves_the_root_is_refused() {
-        let dir = temp_root("escape");
-        let root = Roots::new([dir.clone()]);
+        let root = Root::new(temp_root("escape"));
         for bad in [
             "../outside.vxm",
             "a/../../outside.vxm",
@@ -1561,76 +1579,12 @@ mod tests {
         assert!(root.resolve("./robot.vxm").is_ok());
     }
 
-    /// The reason this exists: a desktop client spawns the server with a
-    /// working directory nobody can see, so a full path has to be sayable.
-    #[test]
-    fn an_absolute_path_inside_a_root_is_accepted() {
-        let dir = temp_root("absolute");
-        let root = Roots::new([dir.clone()]);
-        let real = dir.canonicalize().unwrap();
-
-        let inside = real.join("robot.vxm");
-        assert_eq!(root.resolve(inside.to_str().unwrap()).unwrap(), inside);
-        // Including one that does not exist yet, which is every save.
-        let deep = real.join("parts").join("arm.vxm");
-        assert_eq!(root.resolve(deep.to_str().unwrap()).unwrap(), deep);
-
-        // A sibling directory is still outside, absolute or not.
-        let outside = temp_root("absolute-elsewhere").canonicalize().unwrap();
-        assert!(root.resolve(outside.join("x.vxm").to_str().unwrap()).is_err());
-    }
-
-    /// More than one root, because a desktop config names the places models
-    /// live rather than one working directory.
-    #[test]
-    fn a_path_may_be_absolute_inside_any_root() {
-        let a = temp_root("many-a");
-        let b = temp_root("many-b");
-        let root = Roots::new([a.clone(), b.clone()]);
-
-        assert!(root.resolve(a.canonicalize().unwrap().join("x.vxm").to_str().unwrap()).is_ok());
-        assert!(root.resolve(b.canonicalize().unwrap().join("y.vxm").to_str().unwrap()).is_ok());
-        // A relative path lands in the first, which is what the instructions say.
-        assert_eq!(
-            root.resolve("z.vxm").unwrap(),
-            a.canonicalize().unwrap().join("z.vxm")
-        );
-    }
-
-    /// A prefix test on the name alone would be satisfied by a symlink inside
-    /// a root pointing anywhere at all.
-    #[cfg(unix)]
-    #[test]
-    fn a_symlink_out_of_a_root_does_not_get_through() {
-        let dir = temp_root("symlink");
-        let outside = temp_root("symlink-outside");
-        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
-        let root = Roots::new([dir.clone()]);
-
-        assert!(root.resolve("escape/stolen.vxm").is_err(), "through the link by name");
-        let via = dir.canonicalize().unwrap().join("escape").join("stolen.vxm");
-        assert!(root.resolve(via.to_str().unwrap()).is_err(), "and absolutely");
-    }
-
-    /// What the agent is told at `initialize`, since it cannot see the
-    /// server's working directory.
-    #[test]
-    fn the_instructions_name_the_directories() {
-        let dir = temp_root("instructions");
-        let text = Roots::new([dir.clone()]).instructions();
-        assert!(text.contains(&dir.canonicalize().unwrap().display().to_string()), "{text}");
-        assert!(text.contains("absolute"), "{text}");
-
-        let none = Roots::none().instructions();
-        assert!(none.contains("no access") || none.contains("The user"), "{none}");
-    }
-
     /// `a/../b` stays inside and would survive a resolve-then-check, but the
     /// rule refuses every `..` rather than reasoning about which ones are safe
     /// — that reasoning is exactly what goes wrong.
     #[test]
     fn even_a_harmless_dotdot_is_refused() {
-        let root = Roots::new([temp_root("dotdot")]);
+        let root = Root::new(temp_root("dotdot"));
         assert!(root.resolve("a/../b.vxm").is_err());
     }
 
@@ -1649,7 +1603,7 @@ mod tests {
     #[test]
     fn a_model_can_be_started_saved_listed_and_opened_again() {
         let dir = temp_root("lifecycle");
-        let root = Roots::new([dir.clone()]);
+        let root = Root::new(&dir);
         let mut e = editor();
 
         run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 16}));
@@ -1680,7 +1634,7 @@ mod tests {
     #[test]
     fn saving_as_vox_reports_the_layers_it_flattened() {
         let dir = temp_root("flatten");
-        let root = Roots::new([dir.clone()]);
+        let root = Root::new(&dir);
         let mut e = editor();
         run_in(&mut e, &root, "new_model", json!({"path": "m.vxm", "size": 8}));
         run_in(&mut e, &root, "add_layer", json!({"name": "TOP"}));
@@ -1697,7 +1651,7 @@ mod tests {
 
     #[test]
     fn opening_a_file_that_is_not_there_says_how_to_make_one() {
-        let root = Roots::new([temp_root("missing")]);
+        let root = Root::new(temp_root("missing"));
         let mut e = editor();
         let r = run_in(&mut e, &root, "open_model", json!({"path": "nope.vxm"}));
         assert_eq!(r.is_error, Some(true));
@@ -1708,20 +1662,13 @@ mod tests {
     #[test]
     fn describe_model_names_the_file_and_whether_it_is_unsaved() {
         let dir = temp_root("describe");
-        let root = Roots::new([dir.clone()]);
+        let root = Root::new(&dir);
         let mut e = editor();
         run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 8}));
         run_in(&mut e, &root, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 3}));
 
         let j = json_of(&run_in(&mut e, &root, "describe_model", json!({})));
-        // Absolute: an agent that cannot see the server's working directory
-        // still knows exactly which file it is editing.
-        assert!(
-            j["path"].as_str().unwrap().ends_with("/robot.vxm"),
-            "{}", j["path"]
-        );
-        assert!(Path::new(j["path"].as_str().unwrap()).is_absolute());
-        assert_eq!(j["roots"].as_array().unwrap().len(), 1);
+        assert_eq!(j["path"], "robot.vxm");
         assert_eq!(j["unsaved"], true);
 
         run_in(&mut e, &root, "save_model", json!({}));
@@ -1824,5 +1771,346 @@ mod tests {
         assert_eq!(r.is_error, Some(true));
         let text = text_of(&r);
         assert!(text.contains("put_sphere"), "{text}");
+    }
+
+    #[test]
+    fn batch_edits_span_layers_and_unwind_overlapping_writes_in_one_step() {
+        let mut e = editor();
+        run(&mut e, "add_layer", json!({"name":"TOP"}));
+        let depth = e.undo_depth();
+        let r = run(
+            &mut e,
+            "apply_edits",
+            json!({"layer":0,"color":3,"edits":[
+                {"op":"rect","from":[1,1,1],"to":[2,1,1]},
+                {"op":"voxel","x":1,"y":1,"z":1,"color":4},
+                {"op":"voxel","x":1,"y":1,"z":1,"layer":"TOP","color":5},
+                {"op":"voxel","x":2,"y":1,"z":1,"color":0}
+            ]}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        let j = json_of(&r);
+        assert_eq!(j["targeted"], 5);
+        assert_eq!(j["added"], 3);
+        assert_eq!(j["repainted"], 1);
+        assert_eq!(j["removed"], 1);
+        assert_eq!(e.active_layer(), 1);
+        assert_eq!(e.model().get_in(0, 1, 1, 1), 4);
+        assert_eq!(e.model().get(1, 1, 1), 5);
+        assert_eq!(e.undo_depth(), depth + 1);
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().filled_count(), 0);
+        run(&mut e, "redo", json!({}));
+        assert_eq!(e.model().get_in(0, 1, 1, 1), 4);
+        assert_eq!(e.model().get(1, 1, 1), 5);
+        assert_eq!(e.model().get(2, 1, 1), 0);
+    }
+
+    #[test]
+    fn invalid_batch_is_atomic_and_preserves_redo() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x":0,"y":0,"z":0}));
+        e.undo();
+        for invalid in [
+            json!({"op":"voxel","x":8,"y":0,"z":0}),
+            json!({"op":"voxel","x":0,"y":0,"z":0,"layer":99}),
+            json!({"op":"voxel","x":0,"y":0,"z":0,"color":256}),
+            json!({"op":"ellipsoid","center":[3,3,3],"radii":[2,0,2]}),
+            json!({"op":"unknown"}),
+        ] {
+            let before = voxel_core::format::native::encode(e.model());
+            let r = run(
+                &mut e,
+                "apply_edits",
+                json!({"edits":[
+                    {"op":"voxel","x":1,"y":1,"z":1},invalid
+                ]}),
+            );
+            assert_eq!(r.is_error, Some(true));
+            assert_eq!(voxel_core::format::native::encode(e.model()), before);
+            assert_eq!(e.undo_depth(), 0);
+            assert_eq!(e.redo_depth(), 1);
+        }
+    }
+
+    #[test]
+    fn oversized_batch_is_rejected_before_writing() {
+        let mut e = Editor::new(VoxelModel::new(256, 256, 256), PathBuf::from("t.vxm"));
+        let r = run(
+            &mut e,
+            "apply_edits",
+            json!({"edits":[
+                {"op":"voxel","x":1,"y":1,"z":1},
+                {"op":"rect","from":[0,0,0],"to":[255,255,255]}
+            ]}),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(e.model().filled_count(), 0);
+        assert_eq!(e.undo_depth(), 0);
+        assert!(!e.is_dirty());
+    }
+
+    #[test]
+    fn ellipsoid_supports_fractional_symmetry_and_erases_only_its_layer() {
+        let mut e = editor();
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from":[0,0,0],"to":[7,7,7],"color":3}),
+        );
+        run(&mut e, "add_layer", json!({"name":"ROUND"}));
+        let shape = json!({"center":[3.5,3.5,3.5],"radii":[3.,2.,1.],"color":4});
+        let r = run(&mut e, "put_ellipsoid", shape.clone());
+        assert_eq!(r.is_error, None);
+        assert!(e.model().layers()[1].filled_count() > 0);
+        for ([x, y, z], _) in e.model().iter_filled_in(1) {
+            assert_eq!(e.model().get_in(1, 7 - x as i32, y as i32, z as i32), 4);
+            assert_eq!(e.model().get_in(1, x as i32, 7 - y as i32, z as i32), 4);
+            assert_eq!(e.model().get_in(1, x as i32, y as i32, 7 - z as i32), 4);
+        }
+        let mut erase = shape;
+        erase["color"] = json!(0);
+        run(&mut e, "put_ellipsoid", erase);
+        assert_eq!(e.model().layers()[1].filled_count(), 0);
+        assert_eq!(e.model().layers()[0].filled_count(), 512);
+        e.undo();
+        assert!(e.model().layers()[1].filled_count() > 0);
+    }
+
+    #[test]
+    fn rounded_line_has_caps_is_reversible_and_clips_to_the_scene() {
+        let mut e = editor();
+        let r = run(
+            &mut e,
+            "put_line",
+            json!({"from":[2,3,3],"to":[5,3,3],"radius":1,"color":7}),
+        );
+        assert_eq!(r.is_error, None);
+        for x in 1..=6 {
+            assert_eq!(e.model().get(x, 3, 3), 7);
+        }
+        assert_eq!(e.model().get(2, 4, 3), 7);
+        assert_eq!(e.model().get(1, 4, 3), 0, "rounded, not square end");
+        let before: Vec<_> = e.model().iter_filled().collect();
+        e.undo();
+        run(
+            &mut e,
+            "put_line",
+            json!({"from":[5,3,3],"to":[2,3,3],"radius":1,"color":7}),
+        );
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
+        e.undo();
+        run(
+            &mut e,
+            "put_line",
+            json!({"from":[0,0,0],"to":[0,0,0],"radius":1,"color":7}),
+        );
+        assert_eq!(e.model().filled_count(), 4, "sphere clipped to a corner");
+        assert_eq!(e.model().get(1, 0, 0), 7);
+        assert_eq!(e.model().get(1, 1, 0), 0);
+    }
+
+    #[test]
+    fn invalid_shape_parameters_do_not_edit() {
+        let mut e = editor();
+        for args in [
+            json!({"center":[3,3,3],"radii":[-1,2,3]}),
+            json!({"center":[3,3,3],"radii":[257,2,3]}),
+            json!({"center":[8,3,3],"radii":[1,2,3]}),
+            json!({"center":[3,3],"radii":[1,2,3]}),
+            json!({"center":[3,3,3],"radii":["1",2,3]}),
+        ] {
+            assert_eq!(run(&mut e, "put_ellipsoid", args).is_error, Some(true));
+        }
+        assert_eq!(e.undo_depth(), 0);
+        assert_eq!(e.model().filled_count(), 0);
+    }
+
+    #[test]
+    fn palette_changes_undo_redo_and_round_trip_without_changing_geometry() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x":2,"y":2,"z":2,"color":65}));
+        let before = rgb_of(&e, 65);
+        let depth = e.undo_depth();
+        let args = json!({"index":65,"r":200,"g":25,"b":36});
+        let r = run(&mut e, "set_palette_color", args.clone());
+        assert_eq!(r.is_error, None);
+        assert_eq!(rgb_of(&e, 65), [200, 25, 36]);
+        assert_eq!(e.color, 1, "does not select a different colour");
+        assert_eq!(e.model().get(2, 2, 2), 65);
+        assert!(e.is_dirty());
+        run(&mut e, "set_palette_color", args);
+        assert_eq!(e.undo_depth(), depth + 1, "same RGB is a no-op");
+        e.undo();
+        assert_eq!(rgb_of(&e, 65), before);
+        e.redo();
+        let loaded =
+            voxel_core::format::native::decode(&voxel_core::format::native::encode(e.model()))
+                .unwrap();
+        assert_eq!(loaded.palette().get(65), voxel_core::Rgb8::new(200, 25, 36));
+        assert_eq!(loaded.get(2, 2, 2), 65);
+        assert_eq!(
+            run(
+                &mut e,
+                "set_palette_color",
+                json!({"index":0,"r":0,"g":0,"b":0})
+            )
+            .is_error,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn model_listing_finds_subdirectories_and_can_be_restricted() {
+        let dir = temp_root("recursive-list");
+        std::fs::create_dir_all(dir.join("models/deep")).unwrap();
+        for name in [
+            "z.vxm",
+            "models/b.vox",
+            "models/deep/a.vxm",
+            "models/not.txt",
+        ] {
+            std::fs::write(dir.join(name), b"fixture").unwrap();
+        }
+        std::fs::create_dir(dir.join("directory.vxm")).unwrap();
+        let root = Root::new(&dir);
+        let mut e = editor();
+        let j = json_of(&run_in(&mut e, &root, "list_models", json!({})));
+        let paths: Vec<_> = j["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["models/b.vox", "models/deep/a.vxm", "z.vxm"]);
+        let j = json_of(&run_in(
+            &mut e,
+            &root,
+            "list_models",
+            json!({"directory":"models","recursive":false}),
+        ));
+        assert_eq!(j["models"].as_array().unwrap().len(), 1);
+        assert_eq!(j["models"][0]["path"], "models/b.vox");
+        assert_eq!(
+            run_in(&mut e, &root, "list_models", json!({"directory":"../"})).is_error,
+            Some(true)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_tools_refuse_symlinks_and_recursive_listing_skips_them() {
+        let dir = temp_root("symlinks");
+        let outside = temp_root("symlinks-outside");
+        std::fs::write(outside.join("hidden.vxm"), b"fixture").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("linked")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+        std::os::unix::fs::symlink(outside.join("hidden.vxm"), dir.join("linked.vxm")).unwrap();
+        let root = Root::new(&dir);
+        let mut e = editor();
+        let j = json_of(&run_in(&mut e, &root, "list_models", json!({})));
+        assert_eq!(j["models"], json!([]));
+        for p in ["linked/hidden.vxm", "linked/new.png", "linked.vxm"] {
+            assert!(root.resolve(p).is_err());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn screenshot_exports_the_same_image_and_restores_state_even_on_io_failure() {
+        let dir = temp_root("preview");
+        let root = Root::new(&dir);
+        let mut e = editor();
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from":[1,1,1],"to":[6,3,4],"color":1}),
+        );
+        let camera = e.camera;
+        let dirty = e.is_dirty();
+        let depth = e.undo_depth();
+        let args = json!({"view":"front","width":64,"height":64,"path":"front.png","ambient":0.8,"diffuse":0.2});
+        let r = run_in(&mut e, &root, "screenshot", args.clone());
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(
+            base64(&std::fs::read(dir.join("front.png")).unwrap()),
+            image_of(&r)
+        );
+        assert_eq!(json_of(&r)["show_bounds"], false);
+        assert_eq!(e.is_dirty(), dirty);
+        assert_eq!(e.undo_depth(), depth);
+        let mut fail = args.clone();
+        fail["path"] = json!("missing/front.png");
+        assert_eq!(
+            run_in(&mut e, &root, "screenshot", fail).is_error,
+            Some(true)
+        );
+        assert_eq!(format!("{:?}", e.camera), format!("{camera:?}"));
+        assert!(e.show_grid);
+        let mut bounds = args.clone();
+        bounds["show_bounds"] = json!(true);
+        assert_ne!(
+            image_of(&run_in(&mut e, &root, "screenshot", bounds)),
+            image_of(&r)
+        );
+        let mut light = args.clone();
+        light["ambient"] = json!(0.1);
+        assert_ne!(
+            image_of(&run_in(&mut e, &root, "screenshot", light)),
+            image_of(&r)
+        );
+        let mut bad = args.clone();
+        bad["path"] = json!("model.vxm");
+        assert_eq!(
+            run_in(&mut e, &root, "screenshot", bad).is_error,
+            Some(true)
+        );
+        assert!(!dir.join("model.vxm").exists());
+        assert_eq!(
+            run(&mut e, "screenshot", args).is_error,
+            Some(true),
+            "SSE still has no filesystem"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn screenshot_presets_match_explicit_angles_and_validate_options() {
+        let mut e = editor();
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from":[0,1,2],"to":[3,5,6],"color":3}),
+        );
+        for (view, yaw, pitch) in [
+            ("front", 0, 0),
+            ("back", 180, 0),
+            ("left", -90, 0),
+            ("right", 90, 0),
+            ("top", 0, 89),
+            ("three_quarter", 45, 30),
+        ] {
+            let a = run(
+                &mut e,
+                "screenshot",
+                json!({"view":view,"width":64,"height":64}),
+            );
+            let b = run(
+                &mut e,
+                "screenshot",
+                json!({"yaw":yaw,"pitch":pitch,"width":64,"height":64}),
+            );
+            assert_eq!(image_of(&a), image_of(&b));
+        }
+        for options in [
+            json!({"view":"nope"}),
+            json!({"ambient":-1}),
+            json!({"diffuse":2}),
+            json!({"show_bounds":"false"}),
+        ] {
+            assert_eq!(run(&mut e, "screenshot", options).is_error, Some(true));
+        }
     }
 }
