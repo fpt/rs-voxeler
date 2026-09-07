@@ -16,7 +16,7 @@ then collision/chunks/animation) do not.
 ## Architecture
 
 ```text
-voxeler  (the window: winit + softbuffer)
+voxeler  (the window: winit + softbuffer, and an MCP server on loopback)
    │
    ├── voxel-render   faces → transform → clip → raster → z-buffer → framebuffer
    │
@@ -91,6 +91,56 @@ Visibility is deliberately *not* in the history. It is a thing you toggle
 constantly while working, and undo would spend its first few presses turning
 layers back on instead of undoing the edit you wanted back. It still dirties the
 document, because which layers you had hidden is part of the model.
+
+### The agent and the user share one editor, through a queue
+
+`--mcp` serves the editor over MCP's **SSE** transport, on loopback, while the
+window stays open. `kessel mcp` speaks stdio because a console an agent is
+debugging needs no window; this is the opposite case, and the whole point of
+driving a *model editor* from an agent is that a person can watch and object.
+Stdio would own the terminal and give the agent a process of its own.
+
+They do **not** share the editor through a lock. The HTTP threads put jobs on a
+channel and the event loop runs them in `user_event`, against the `Editor` it
+already owns. A `Mutex<Editor>` would work, but it would wrap every field the
+window layer touches and leave open what a tool call does mid-frame. The queue
+answers that: a tool call lands *between* two frames, and the editor stays the
+single-threaded thing every other module assumes. Waking the loop needs an
+`EventLoopProxy`, because `ControlFlow::Wait` would otherwise hold the call
+until the next mouse move.
+
+`crates/voxeler/src/mcp/` is `wire.rs` (JSON-RPC types), `http.rs` (enough
+HTTP/1.1 for SSE), `tools.rs` (the tools, and the only file that touches the
+model) and `mod.rs` (the listener and the bridge). The HTTP is hand-rolled for
+the reason the PNG writer and the 5×7 font are: the alternative is an async
+runtime inside a program that is one blocking event loop. `serde_json` is *not*
+hand-rolled, because a JSON parser is the one piece here worth buying.
+
+Three rules the MCP surface depends on:
+
+- **Loopback only, and no `save`.** The listener binds `127.0.0.1`; the tools
+  can edit the document but cannot write it to disk, cannot delete a layer, and
+  cannot move the camera. An agent that could overwrite the user's file would
+  make "watch it happen" pointless.
+- **A whole tool call is one undo step.** The user shares this history, and a
+  box an agent filled must cost them one `ctrl+Z` rather than five hundred.
+  `Editor::apply_batch` is the entry point for an edit that did not come from a
+  click — no ray, no span, no mirror, just cells.
+- **Every edit reports four exclusive outcomes that sum to `targeted`.** Added,
+  removed, repainted, unchanged. An agent cannot see the screen, so a tool that
+  says "ok" has told it nothing; a tool whose numbers do not add up has told it
+  something false.
+
+### A region can be read from one layer or from the composite
+
+`Reach::layer` is `None` for the composite and `Some(n)` for one layer's own
+grid. A click passes `None` — you select what you can see. A *coordinate* passes
+`Some(active)`, and the difference is not cosmetic: growing a region on the
+composite and writing it to the active layer copies another layer's shape onto
+this one. Driving the real binary produced exactly that — a fill seeded on the
+slab reported "100 added", left the slab untouched, and put a hundred-cell ghost
+on the layer above. `mcp::tools`' `fill` now reads the active layer and refuses
+a seed another layer owns, naming the layer to select instead.
 
 ### Dense in memory, sparse on disk
 
@@ -344,6 +394,10 @@ cd crates && cargo clippy --all-targets
 ./crates/target/release/voxeler models/robot.vxm --thumbnail shot.png
 ```
 
+```bash
+./crates/target/release/voxeler models/robot.vxm --mcp   # serve on 127.0.0.1:8730
+```
+
 `--thumbnail` renders one framed view and exits without opening a window. It is
 how a model gets an icon, and how the renderer gets checked on a machine with no
 display — which is also the fastest way to see whether a rendering change did
@@ -369,6 +423,7 @@ rs-voxeler/
 │   └── png.rs             a minimal PNG writer (stored deflate)
 ├── crates/voxeler/        the editor
 │   ├── editor.rs          state and every operation on it — the tested part
+│   ├── mcp/               the editor as an MCP server: wire, http, tools
 │   ├── view.rs            one frame: backdrop, grid, model, gizmos
 │   ├── hud.rs             palette strip, status line, help card
 │   └── app.rs             winit events in, a blitted framebuffer out
@@ -420,6 +475,12 @@ rs-voxeler/
   the structural methods do the first.
 - **A saved model comes back missing a hidden layer.** `format::native::encode`
   is using `iter_filled` (the composite) where it must use `iter_filled_in`.
+- **An MCP tool call hangs, then times out.** The event loop is not draining.
+  Either the window is gone, or the `EventLoopProxy` wake did not fire —
+  `ControlFlow::Wait` means nothing runs until something wakes it.
+- **An MCP client connects and then nothing works.** Check the `endpoint` event
+  is absolute and that `POST /messages` is served as well as `/message`; both
+  spellings are in the wild, and serving one silently breaks the other's clients.
 - **A click does nothing.** Check `over_panel` first — a HUD rectangle that
   claims more than it draws eats clicks with no feedback at all. After that,
   check whether `target_at` is returning `None`: for everything but build, no

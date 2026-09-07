@@ -18,7 +18,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::editor::{Editor, Target, Tool};
-use crate::{hud, view};
+use crate::{hud, mcp, view};
 
 /// The rendered image is capped at this many pixels and upscaled to fill the
 /// window.
@@ -52,13 +52,45 @@ pub struct App {
     last_drag: (f32, f32),
     modifiers: ModifiersState,
     shown_title: String,
+    /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
+    ///
+    /// Drained here rather than applied on the server's own thread, so an edit
+    /// from an agent lands between two frames like every other edit — and the
+    /// editor stays the single-threaded thing the rest of this program assumes.
+    bridge: Option<mcp::Bridge>,
 }
 
-pub fn run(editor: Editor) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
+/// What the MCP server sends to wake the event loop. Carries nothing: the
+/// message *is* "come and look at the queue".
+struct Wake;
+
+pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
+    let event_loop = EventLoop::<Wake>::with_user_event()
+        .build()
+        .map_err(|e| format!("event loop: {e}"))?;
     // Wait for events rather than spinning: an editor changes only when the
     // user does something, and a redraw is requested explicitly when it does.
+    // That is also why the MCP server needs a proxy to wake this — otherwise an
+    // agent's call would land only on the next mouse move.
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    let bridge = match mcp_port {
+        Some(port) => {
+            // `send_event` needs `&self`, and several connection threads share
+            // one proxy; a mutex makes it `Sync` without asking winit to be.
+            let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+            let wake = std::sync::Arc::new(move || {
+                if let Ok(p) = proxy.lock() {
+                    let _ = p.send_event(Wake);
+                }
+            });
+            let (bridge, addr) = mcp::serve(port, wake)
+                .map_err(|e| format!("mcp: cannot listen on 127.0.0.1:{port}: {e}"))?;
+            eprintln!("voxeler: mcp sse at http://{addr}/sse");
+            Some(bridge)
+        }
+        None => None,
+    };
 
     let mut app = App {
         editor,
@@ -72,6 +104,7 @@ pub fn run(editor: Editor) -> Result<(), String> {
         last_drag: (0.0, 0.0),
         modifiers: ModifiersState::empty(),
         shown_title: String::new(),
+        bridge,
     };
     event_loop
         .run_app(&mut app)
@@ -317,7 +350,24 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<Wake> for App {
+    /// An agent has queued something. Run it here, on the thread that owns the
+    /// editor, then refresh what the window shows: the hover highlight is
+    /// resolved against the model, so an edit from outside invalidates it just
+    /// as one from the mouse does.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: Wake) {
+        let Some(bridge) = self.bridge.take() else { return };
+        let ran = bridge.drain(&mut self.editor);
+        self.bridge = Some(bridge);
+        if ran {
+            self.update_hover();
+            // `request_redraw` also refreshes the title, which is where the
+            // unsaved-changes marker lives — an agent's edit dirties the
+            // document exactly as the user's does.
+            self.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -455,8 +505,12 @@ fn blit(dst: &mut [u32], dst_w: u32, dst_h: u32, src: &Framebuffer, scale: u32) 
 }
 
 /// Open a window on `editor`. Split out so `main` reads as a pipeline.
-pub fn launch(model: voxel_core::VoxelModel, path: PathBuf) -> Result<(), String> {
-    run(Editor::new(model, path))
+pub fn launch(
+    model: voxel_core::VoxelModel,
+    path: PathBuf,
+    mcp_port: Option<u16>,
+) -> Result<(), String> {
+    run(Editor::new(model, path), mcp_port)
 }
 
 #[cfg(test)]

@@ -17,3 +17,9 @@ voxel-core = { path = "voxel-core" }
 voxel-render = { path = "voxel-render" }
 
 thiserror = "1.0"
+
+# The MCP wire format, and nothing else. Hand-writing a JSON parser is the one
+# piece of this server worth buying rather than owning — the HTTP framing and
+# the JSON-RPC types are small and ours, but a JSON parser is neither.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

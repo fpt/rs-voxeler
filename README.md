@@ -21,12 +21,12 @@ cd crates && cargo build --release
 | --- | --- |
 | `voxel-core` | the model: a stack of dense grids, a 256-colour palette, undo/redo, `.vxm` and MagicaVoxel `.vox` |
 | `voxel-render` | a software rasterizer: face extraction, orbit camera, z-buffer, flat shading, PNG output |
-| `voxeler` | the editor: a window, four tools across four reaches, layers, and a palette you can click |
+| `voxeler` | the editor: a window, four tools across four reaches, layers, a palette you can click, and an MCP server |
 
 ## Using the editor
 
 ```bash
-voxeler [FILE] [--size N]
+voxeler [FILE] [--size N] [--mcp [PORT]]
 voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
 
@@ -128,6 +128,57 @@ a model that is deliberately lopsided stays lopsided while you work on it
 symmetrically.
 
 `ctrl` is `cmd` on macOS; both work everywhere.
+
+## Driving it from an agent
+
+```bash
+voxeler robot.vxm --mcp          # window opens, and 127.0.0.1:8730 starts listening
+```
+
+`--mcp` serves the editor over MCP's SSE transport while the window stays open.
+That is the whole reason it is SSE and not stdio: an agent builds, and you watch
+it happen and say "no, not like that". Register it with any MCP client:
+
+```json
+{ "mcpServers": { "voxeler": { "type": "sse", "url": "http://127.0.0.1:8730/sse" } } }
+```
+
+The listener binds loopback only — it hands arbitrary control of your document
+to whoever connects.
+
+| tool | what it does |
+| --- | --- |
+| `describe_model` | size, voxel count, bounds, the layer stack, active layer, colour |
+| `put_voxel` | one voxel; colour 0 erases |
+| `put_rect` | a solid axis-aligned box, corners inclusive |
+| `paint` | recolour the voxels in a box, creating none |
+| `fill` | flood fill from a cell, over the active layer's connected shape |
+| `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
+| `add_layer`, `select_layer`, `set_layer_visible` | the layer stack |
+
+Coordinates are model space — `0..size` on each axis, +Y up, the same
+coordinates the file stores.
+
+**Every edit reports what it did**, because an agent cannot see the screen and
+"ok" tells it nothing:
+
+```json
+{"targeted": 32, "added": 16, "removed": 0, "repainted": 1, "unchanged": 15,
+ "layer": "ARMOUR", "layer_voxels": 16, "model_voxels": 32}
+```
+
+The four outcomes are exclusive and sum to `targeted`, which is what makes them
+a measurement rather than a reassurance: ask for a 5×5×5 box and read
+`targeted: 125, added: 0` and you know you aimed at solid rock.
+
+The agent and you share one editor, one undo history and one file. A whole tool
+call is **one** undo step, so a box an agent filled costs you one `ctrl+Z`.
+Tools write to the active layer and only to it — `fill` refuses a cell another
+layer owns rather than copying that layer's shape onto this one, and says which
+layer to select instead.
+
+Not exposed: saving, deleting or merging layers, and the camera. An agent should
+not be able to overwrite your file, and the view is yours.
 
 ## Where this is going
 
