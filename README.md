@@ -248,6 +248,10 @@ whoever connects.
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
 | `set_palette_color` | change an index's RGB across all layers, with undo/redo |
+| `count_by_color` | which colours the model is made of, and how much of each |
+| `select_by_color` | hold every voxel of one colour, ready for a transform |
+| `replace_color`, `merge_colors`, `swap_colors` | move voxels between palette slots |
+| `compact_palette` | drop unused entries, renumber, and rewrite the voxels to match |
 | `add_layer`, `select_layer`, `set_layer_visible`, `trim_layer` | the layer stack and its boxes |
 | `list_objects`, `create_object`, `rename_object`, `delete_object` | the scene tree: what each part *is* |
 | `set_layer_object`, `reparent_object`, `set_object_visible` | put layers in parts, parts in parts, and hide either |
@@ -270,6 +274,25 @@ and it puts the camera back where it found it.
 
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
+
+## Colour as a way of naming a part
+
+"All the red" is a part in a way "all the cells in this box" is not.
+`count_by_color` says what a model is actually made of; `select_by_color` turns
+one colour into a selection the transforms already understand.
+
+`replace_color`, `merge_colors` and `swap_colors` move voxels **between palette
+slots**; `set_palette_color` changes what a slot means. `swap_colors` swaps the
+voxels rather than the entries, which puts the same picture on screen either way
+but leaves index 3 meaning the red it meant — so a brush set to 3 still paints
+red.
+
+`compact_palette` drops unused entries, renumbers what is left from 1 upwards and
+rewrites every voxel to follow, as one undo step for both halves. It renumbers,
+so it returns the mapping and moves the selected colour along with it.
+
+Index 0 is air, not a colour, and all of these refuse it: "replace 0 with white"
+would mean every empty cell.
 
 ## Objects: naming the parts
 

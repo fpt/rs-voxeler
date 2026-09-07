@@ -45,10 +45,14 @@ pub enum Change {
         before: Rgb8,
         after: Rgb8,
     },
+    /// Boxed, because this variant is the odd one out by two orders of
+    /// magnitude: a `Snapshot` is the whole stack and the palette, and the undo
+    /// stack is overwhelmingly `Cells`. Inline, every one-cell edit on it would
+    /// carry the footprint of a structural change.
     Layers {
         label: &'static str,
-        before: Snapshot,
-        after: Snapshot,
+        before: Box<Snapshot>,
+        after: Box<Snapshot>,
     },
 }
 
@@ -210,8 +214,8 @@ impl History {
         }
         self.undo.push(Change::Layers {
             label,
-            before,
-            after,
+            before: Box::new(before),
+            after: Box::new(after),
         });
         self.redo.clear();
         true

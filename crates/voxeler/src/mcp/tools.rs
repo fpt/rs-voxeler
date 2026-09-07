@@ -289,6 +289,13 @@ pub fn list() -> Vec<ToolInfo> {
         "description": "Palette index. 0 is air, so it erases. Omit to use the colour \
                         currently selected in the editor."
     });
+    // A separate fragment from `color`, and the difference is the point: a
+    // drawing tool takes 0 and erases with it, while a palette operation on 0
+    // would mean "replace all the air", which fills the model.
+    let slot = json!({
+        "type": "integer", "minimum": 1, "maximum": 255,
+        "description": "Palette index, 1..=255. 0 is air, not a colour, and is refused here."
+    });
     let coord = |what: &str| {
         json!({
             "type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3,
@@ -706,6 +713,82 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "count_by_color",
+            description:
+                "Which palette indices the model is actually made of, and how many voxels each \
+                 holds, most first. The observation tool for colour: `screenshot` shows the \
+                 picture and `describe_model` counts cells, but neither says what it is made of. \
+                 Give `layer` to count one layer instead of all of them.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"layer": layer},
+            }),
+        },
+        ToolInfo {
+            name: "select_by_color",
+            description:
+                "Select every voxel of one colour on a layer, ready for move/rotate/flip. \
+                 Colour is how a model is organised — \"all the red\" is a part in a way a box \
+                 is not. Defaults to the active layer. Replaces any current selection.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"color": slot, "layer": layer},
+                "required": ["color"],
+            }),
+        },
+        ToolInfo {
+            name: "replace_color",
+            description:
+                "Recolour every voxel of one index to another, across all layers. This moves \
+                 voxels between palette slots; `set_palette_color` changes what a slot means. \
+                 Neither index may be 0 — 0 is air, and replacing it would fill the model.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"from": slot, "to": slot},
+                "required": ["from", "to"],
+            }),
+        },
+        ToolInfo {
+            name: "merge_colors",
+            description:
+                "Fold several palette indices into one, across all layers. `replace_color` for \
+                 a list — useful for cutting a scheme down before `compact_palette`.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "colors": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1, "maximum": 255},
+                        "minItems": 1,
+                        "description": "The indices to fold in.",
+                    },
+                    "into": slot,
+                },
+                "required": ["colors", "into"],
+            }),
+        },
+        ToolInfo {
+            name: "swap_colors",
+            description:
+                "Exchange two colours in the model, voxel for voxel. The voxels move, not the \
+                 palette entries, so an index still means the colour it meant and a brush set to \
+                 it still paints that colour.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"a": slot, "b": slot},
+                "required": ["a", "b"],
+            }),
+        },
+        ToolInfo {
+            name: "compact_palette",
+            description:
+                "Drop unused palette entries, renumber what is left from 1 upwards, and rewrite \
+                 every voxel to follow — one undo step for both halves. THIS RENUMBERS: any \
+                 index you are holding is stale afterwards, so read the `mapping` the result \
+                 returns. Best saved for a finished asset.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
             name: "list_objects",
             description:
                 "The object tree: what each part of the scene is, and which layers belong to it. \
@@ -791,14 +874,9 @@ pub fn list() -> Vec<ToolInfo> {
                 "type": "object",
                 "properties": {
                     "object": object,
-                    "by": {
-                        "type": "array", "items": {"type": "integer"},
-                        "minItems": 3, "maxItems": 3,
-                        "description": "How far to move, as [dx, dy, dz] in voxels. Negative is \
-                                        allowed; +Y is up."
-                    },
+                    "dx": {"type": "integer"}, "dy": {"type": "integer"}, "dz": {"type": "integer"},
                 },
-                "required": ["object", "by"],
+                "required": ["object", "dx", "dy", "dz"],
             }),
         },
     ];
@@ -1106,6 +1184,112 @@ fn dispatch(
                 layers_json(editor)
             )))
         }
+        "count_by_color" => {
+            let layer = match args.get("layer") {
+                None | Some(Value::Null) => None,
+                _ => Some(layer_arg(editor, args)?),
+            };
+            let mut counts = editor.color_counts(layer);
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let rows: Vec<Value> = counts
+                .iter()
+                .map(|(i, n)| json!({"color": i, "rgb": rgb_of(editor, *i), "voxels": n}))
+                .collect();
+            Ok(CallResult::text(format!(
+                "{} colours in use\n{}",
+                rows.len(),
+                json!({
+                    "colors": rows,
+                    "layer": layer,
+                    "voxels": counts.iter().map(|(_, n)| n).sum::<usize>(),
+                })
+            )))
+        }
+        "select_by_color" => {
+            let index = slot_arg(args, "color")?;
+            let layer = match args.get("layer") {
+                None | Some(Value::Null) => editor.active_layer(),
+                _ => layer_arg(editor, args)?,
+            };
+            let n = editor.select_by_color(index, layer);
+            if n == 0 {
+                return Err(format!(
+                    "layer {layer} holds no voxels of colour {index}; \
+                     count_by_color says what it is made of"
+                ));
+            }
+            Ok(CallResult::text(selection_text(editor)))
+        }
+        "replace_color" | "merge_colors" => {
+            let (from, to) = if name == "replace_color" {
+                (vec![slot_arg(args, "from")?], slot_arg(args, "to")?)
+            } else {
+                let list = args
+                    .get("colors")
+                    .and_then(Value::as_array)
+                    .ok_or("merge_colors needs `colors`")?;
+                let mut out = Vec::new();
+                for v in list {
+                    let i = v.as_u64().ok_or("`colors` must be palette indices")?;
+                    if i == 0 || i > 255 {
+                        return Err(format!("{i} is not a colour; 0 is air and 255 is the top"));
+                    }
+                    out.push(i as u8);
+                }
+                (out, slot_arg(args, "into")?)
+            };
+            let moved = editor.recolor(&from, to);
+            let total: usize = moved.iter().map(|(_, n)| n).sum();
+            Ok(CallResult::text(format!(
+                "{total} voxels recoloured\n{}",
+                json!({
+                    "into": to,
+                    "into_rgb": rgb_of(editor, to),
+                    "from": moved.iter().map(|(i, n)| json!({"color": i, "voxels": n}))
+                        .collect::<Vec<_>>(),
+                    "voxels": total,
+                })
+            )))
+        }
+        "swap_colors" => {
+            let a = slot_arg(args, "a")?;
+            let b = slot_arg(args, "b")?;
+            if a == b {
+                return Err("those are the same colour".into());
+            }
+            let (a_moved, b_moved) = editor.swap_colors(a, b);
+            Ok(CallResult::text(format!(
+                "swapped {} and {} voxels\n{}",
+                a_moved,
+                b_moved,
+                json!({
+                    "a": a, "b": b,
+                    "a_to_b": a_moved, "b_to_a": b_moved,
+                    "note": "the voxels moved, not the palette entries — each index \
+                             still means the colour it meant",
+                })
+            )))
+        }
+        "compact_palette" => {
+            let before = editor.color_counts(None).len();
+            let mapping = editor.compact_palette();
+            if mapping.is_empty() {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "{before} colours, renumbered 1..={}\n{}",
+                mapping.len(),
+                json!({
+                    "mapping": mapping.iter()
+                        .map(|(old, new)| json!({"was": old, "now": new}))
+                        .collect::<Vec<_>>(),
+                    "colors": mapping.len(),
+                    "color": editor.color,
+                    "note": "every index has moved; anything you were holding is stale, \
+                             and the editor's selected colour has followed the mapping",
+                })
+            )))
+        }
         "list_objects" => Ok(CallResult::text(objects_json(editor).to_string())),
         "create_object" => {
             let parent = match args.get("parent") {
@@ -1186,7 +1370,10 @@ fn dispatch(
         }
         "move_object" => {
             let i = object_arg(editor, args, "object")?;
-            let by = corner(args, "by")?;
+            // dx/dy/dz rather than a `by` array, because `move_selection` and
+            // `duplicate_selection` already spell an offset that way and an
+            // agent should not have to remember which of the three is different.
+            let by = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
             let moved = editor.move_object(i, by)?;
             // One JSON object after the line of text, the way every other tool
             // reports: two would make the result unparseable to anything that
@@ -1718,6 +1905,23 @@ fn object_rows(editor: &Editor) -> Vec<Value> {
         .collect()
 }
 
+/// A palette index that must be a colour rather than air.
+///
+/// Separate from the drawing tools' colour argument on purpose: they take 0 and
+/// erase with it, where a palette operation on 0 means "every empty cell" and
+/// would fill the model rather than recolour it.
+fn slot_arg(args: &Value, key: &str) -> Result<u8, String> {
+    let v = args
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("`{key}` must be a palette index"))?;
+    match v {
+        0 => Err(format!("`{key}` is 0, which is air rather than a colour")),
+        1..=255 => Ok(v as u8),
+        _ => Err(format!("`{key}` is {v}; the palette runs to 255")),
+    }
+}
+
 /// An object named by index or by name, like [`layer_arg`].
 fn object_arg(editor: &Editor, args: &Value, key: &str) -> Result<usize, String> {
     let v = args.get(key).ok_or_else(|| format!("missing `{key}`"))?;
@@ -1969,7 +2173,163 @@ mod tests {
         call(e, name, &args)
     }
 
-    // -- objects ----------------------------------------------------------
+    // -- colour -----------------------------------------------------------
+
+    /// The observation tool: what a model is actually made of. `screenshot`
+    /// shows the picture and `describe_model` counts cells; neither answers
+    /// this.
+    #[test]
+    fn count_by_color_says_what_the_model_is_made_of() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(&mut e, "put_rect", json!({"from": [0,1,0], "to": [1,1,1], "color": 9}));
+
+        let j = json_of(&run(&mut e, "count_by_color", json!({})));
+        assert_eq!(j["colors"][0]["color"], 4, "most first");
+        assert_eq!(j["colors"][0]["voxels"], 16);
+        assert_eq!(j["colors"][1]["color"], 9);
+        assert_eq!(j["colors"][1]["voxels"], 4);
+        assert_eq!(j["voxels"], 20);
+        assert_eq!(j["colors"].as_array().unwrap().len(), 2, "and air is not a colour");
+    }
+
+    /// Colour names a part in a way a box does not, so a colour selection has
+    /// to feed the transforms like any other.
+    #[test]
+    fn select_by_color_hands_the_voxels_to_a_transform() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [2,1,2], "color": 9}));
+
+        let j = json_of(&run(&mut e, "select_by_color", json!({"color": 9})));
+        assert_eq!(j["voxels"], 4);
+        run(&mut e, "move_selection", json!({"dx": 0, "dy": 2, "dz": 0}));
+        assert_eq!(e.model().get(1, 3, 1), 9, "the selected colour moved");
+        assert_eq!(e.model().get(1, 1, 1), 0, "and left where it was");
+        assert_eq!(e.model().get(0, 0, 0), 4, "the other colour stayed put");
+    }
+
+    /// A colour that is not there is a miss worth saying out loud — an agent
+    /// that got an empty selection back would transform nothing and not know.
+    #[test]
+    fn selecting_a_colour_the_layer_does_not_hold_says_so() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 4}));
+        let r = run(&mut e, "select_by_color", json!({"color": 200}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("count_by_color"), "{}", text_of(&r));
+    }
+
+    /// Recolouring moves voxels between slots and leaves the palette alone —
+    /// `set_palette_color` is the other one, and confusing them is how a scheme
+    /// change becomes a repaint of the wrong part.
+    #[test]
+    fn replace_color_moves_voxels_between_slots_and_leaves_the_palette_alone() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(&mut e, "add_layer", json!({"name": "TOP"}));
+        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 4}));
+        let was = rgb_of(&e, 4);
+
+        let j = json_of(&run(&mut e, "replace_color", json!({"from": 4, "to": 9})));
+        assert_eq!(j["voxels"], 17, "across every layer, not just the active one");
+        assert_eq!(e.model().get(0, 0, 0), 9);
+        assert_eq!(e.model().get(0, 1, 0), 9);
+        assert_eq!(rgb_of(&e, 4), was, "index 4 still means what it meant");
+
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().get(0, 0, 0), 4, "one undo step for the lot");
+    }
+
+    #[test]
+    fn merge_colors_folds_several_into_one_and_reports_each() {
+        let mut e = editor();
+        for (n, c) in [(0, 4u64), (1, 5), (2, 6)] {
+            run(&mut e, "put_rect", json!({"from": [0,n,0], "to": [1,n,1], "color": c}));
+        }
+        let j = json_of(&run(&mut e, "merge_colors", json!({"colors": [4, 5], "into": 6})));
+        assert_eq!(j["voxels"], 8);
+        let from = j["from"].as_array().unwrap();
+        assert_eq!(from.len(), 2, "each source index is reported");
+        assert_eq!(from[0]["color"], 4);
+        assert_eq!(from[0]["voxels"], 4);
+        assert_eq!(e.model().get(0, 0, 0), 6);
+        assert_eq!(e.model().get(0, 2, 0), 6, "and the target was left alone");
+    }
+
+    /// The voxels move, not the palette entries. Both readings put the same
+    /// picture on screen; only this one leaves an index meaning what it meant.
+    #[test]
+    fn swap_colors_moves_the_voxels_and_not_the_palette() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 9}));
+        let (four, nine) = (rgb_of(&e, 4), rgb_of(&e, 9));
+
+        let j = json_of(&run(&mut e, "swap_colors", json!({"a": 4, "b": 9})));
+        assert_eq!(j["a_to_b"], 16);
+        assert_eq!(j["b_to_a"], 1);
+        assert_eq!(e.model().get(0, 0, 0), 9);
+        assert_eq!(e.model().get(0, 1, 0), 4);
+        assert_eq!((rgb_of(&e, 4), rgb_of(&e, 9)), (four, nine), "the palette did not move");
+    }
+
+    /// A compact renumbers, which means it changes the palette *and* every
+    /// voxel that used one. Both halves have to undo together, or the cells
+    /// come back pointing at colours that have moved.
+    #[test]
+    fn compact_palette_renumbers_both_halves_and_undoes_as_one() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [1,0,1], "color": 40}));
+        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 200}));
+        let (was_40, was_200) = (rgb_of(&e, 40), rgb_of(&e, 200));
+
+        let j = json_of(&run(&mut e, "compact_palette", json!({})));
+        assert_eq!(j["colors"], 2);
+        assert_eq!(j["mapping"][0], json!({"was": 40, "now": 1}));
+        assert_eq!(j["mapping"][1], json!({"was": 200, "now": 2}));
+        assert_eq!(e.model().get(0, 0, 0), 1, "the voxels followed");
+        assert_eq!(e.model().get(0, 1, 0), 2);
+        assert_eq!(rgb_of(&e, 1), was_40, "and so did the colours");
+        assert_eq!(rgb_of(&e, 2), was_200);
+
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().get(0, 0, 0), 40, "one step puts the cells back");
+        assert_eq!(rgb_of(&e, 40), was_40, "and the palette with them");
+    }
+
+    #[test]
+    fn compacting_an_already_compact_palette_is_a_refusal_not_an_undo_step() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 1}));
+        let before = e.undo_depth();
+        let r = run(&mut e, "compact_palette", json!({}));
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(e.undo_depth(), before, "and it costs no undo");
+    }
+
+    /// Index 0 is air. "Replace black with white" on it would fill the model,
+    /// which is the one failure these tools have to be shaped against.
+    #[test]
+    fn no_palette_operation_will_take_air_for_a_colour() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 4}));
+        for (tool, args) in [
+            ("replace_color", json!({"from": 0, "to": 4})),
+            ("replace_color", json!({"from": 4, "to": 0})),
+            ("merge_colors", json!({"colors": [0], "into": 4})),
+            ("merge_colors", json!({"colors": [4], "into": 0})),
+            ("swap_colors", json!({"a": 0, "b": 4})),
+            ("select_by_color", json!({"color": 0})),
+        ] {
+            let r = run(&mut e, tool, args.clone());
+            assert_eq!(r.is_error, Some(true), "{tool} {args}");
+            assert!(text_of(&r).contains("air"), "{tool}: {}", text_of(&r));
+        }
+        assert_eq!(e.model().filled_count(), 1, "and nothing was filled");
+    }
+
+    // -- objects ----------------------------------------------------------""
 
     /// The tree an agent actually builds: a robot with an arm, layers filed
     /// into each, and a path per row so the shape can be read without
@@ -2027,7 +2387,11 @@ mod tests {
         run(&mut e, "put_voxel", json!({"x": 8, "y": 4, "z": 4, "color": 2}));
         let allocated = e.model().allocated_cells();
 
-        let j = json_of(&run(&mut e, "move_object", json!({"object": "ROBOT", "by": [2, 1, 0]})));
+        let j = json_of(&run(
+            &mut e,
+            "move_object",
+            json!({"object": "ROBOT", "dx": 2, "dy": 1, "dz": 0}),
+        ));
         assert_eq!(j["moved_layers"], 2);
         assert_eq!(e.model().get(6, 5, 4), 1, "the body moved");
         assert_eq!(e.model().get(10, 5, 4), 2, "and the child object's layer too");
@@ -2048,7 +2412,7 @@ mod tests {
         run(&mut e, "set_layer_object", json!({"layer": 0, "object": "PART"}));
         run(&mut e, "put_voxel", json!({"x": 7, "y": 1, "z": 1, "color": 3}));
 
-        let r = run(&mut e, "move_object", json!({"object": "PART", "by": [4, 0, 0]}));
+        let r = run(&mut e, "move_object", json!({"object": "PART", "dx": 4, "dy": 0, "dz": 0}));
         assert_eq!(r.is_error, Some(true));
         let why = text_of(&r);
         assert!(why.contains("outside the scene"), "{why}");

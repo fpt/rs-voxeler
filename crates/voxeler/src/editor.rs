@@ -1484,6 +1484,171 @@ impl Editor {
         self.invalidate_mesh();
     }
 
+    // -- colour as a way of naming parts -----------------------------------
+
+    /// Select every voxel of one colour on a layer.
+    ///
+    /// Colour is how a voxel model is organised: "all the red" is a part in a
+    /// way that "all the cells in this box" is not. One layer, like every other
+    /// selection, because the transforms write to one.
+    pub fn select_by_color(&mut self, index: u8, layer: usize) -> usize {
+        let cells: Vec<[i32; 3]> = self
+            .model
+            .iter_filled_in(layer)
+            .filter(|(_, v)| *v == index)
+            .map(|([x, y, z], _)| [x as i32, y as i32, z as i32])
+            .collect();
+        self.set_selection(Selection::new(layer, cells))
+    }
+
+    /// How many voxels each index holds, across every layer or within one.
+    ///
+    /// A walk, not a tally: this is a question an agent asks a few times a
+    /// session, where the per-index counters that would answer it in O(1) would
+    /// have to be maintained on every write for the rest of time.
+    pub fn color_counts(&self, layer: Option<usize>) -> Vec<(u8, usize)> {
+        let mut counts = [0usize; 256];
+        match layer {
+            Some(n) => {
+                for (_, v) in self.model.iter_filled_in(n) {
+                    counts[v as usize] += 1;
+                }
+            }
+            None => {
+                for n in 0..self.model.layer_count() {
+                    for (_, v) in self.model.iter_filled_in(n) {
+                        counts[v as usize] += 1;
+                    }
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .enumerate()
+            .skip(1) // index 0 is air, not a colour
+            .filter(|(_, n)| *n > 0)
+            .map(|(i, n)| (i as u8, n))
+            .collect()
+    }
+
+    /// Every cell holding one of `from`, rewritten to `to`, across every layer.
+    ///
+    /// The palette is untouched: this moves voxels between slots rather than
+    /// changing what a slot means. `set_palette_color` is the other one.
+    ///
+    /// Returns how many voxels moved from each index.
+    pub fn recolor(&mut self, from: &[u8], to: u8) -> Vec<(u8, usize)> {
+        let mut moved = [0usize; 256];
+        let writes: Vec<CellWrite> = (0..self.model.layer_count())
+            .flat_map(|layer| {
+                self.model
+                    .iter_filled_in(layer)
+                    .filter(|(_, v)| from.contains(v) && *v != to)
+                    .map(move |([x, y, z], v)| (layer, [x as i32, y as i32, z as i32], v))
+                    .collect::<Vec<_>>()
+            })
+            .map(|(layer, pos, v)| {
+                moved[v as usize] += 1;
+                CellWrite { layer, pos, color: to }
+            })
+            .collect();
+        self.apply_writes("recolour", writes, |_, _| {});
+        moved
+            .into_iter()
+            .enumerate()
+            .filter(|(_, n)| *n > 0)
+            .map(|(i, n)| (i as u8, n))
+            .collect()
+    }
+
+    /// Exchange two indices, voxel for voxel.
+    ///
+    /// The **voxels** move, not the palette entries. Both readings put the same
+    /// picture on screen — a swap of two slots' colours looks identical to a
+    /// swap of which slot each voxel names — but only this one leaves the
+    /// palette meaning what it meant. After it, index 3 is still the red it was,
+    /// so a brush set to 3 still paints red. Swapping the entries instead would
+    /// silently change what every future edit with that index does.
+    ///
+    /// Returns how many voxels moved each way.
+    pub fn swap_colors(&mut self, a: u8, b: u8) -> (usize, usize) {
+        let mut counts = (0usize, 0usize);
+        let writes: Vec<CellWrite> = (0..self.model.layer_count())
+            .flat_map(|layer| {
+                self.model
+                    .iter_filled_in(layer)
+                    .filter(|(_, v)| *v == a || *v == b)
+                    .map(move |([x, y, z], v)| (layer, [x as i32, y as i32, z as i32], v))
+                    .collect::<Vec<_>>()
+            })
+            .map(|(layer, pos, v)| {
+                let color = if v == a {
+                    counts.0 += 1;
+                    b
+                } else {
+                    counts.1 += 1;
+                    a
+                };
+                CellWrite { layer, pos, color }
+            })
+            .collect();
+        self.apply_writes("swap colours", writes, |_, _| {});
+        counts
+    }
+
+    /// Drop unused palette entries, renumber what is left from 1 upwards, and
+    /// rewrite every voxel to follow. Returns the mapping, old index to new.
+    ///
+    /// One undo step for both halves, through the snapshot path — which is why
+    /// `Snapshot` carries the palette. A compact recorded as cell edits alone
+    /// would undo the voxels and leave them pointing at colours that had moved.
+    ///
+    /// Index 0 stays index 0: it is air, not a colour.
+    pub fn compact_palette(&mut self) -> Vec<(u8, u8)> {
+        let used: Vec<u8> = self.color_counts(None).into_iter().map(|(i, _)| i).collect();
+        if used.len() > 255 {
+            return Vec::new();
+        }
+        let mapping: Vec<(u8, u8)> = used
+            .iter()
+            .enumerate()
+            .map(|(n, old)| (*old, n as u8 + 1))
+            .collect();
+        if mapping.iter().all(|(old, new)| old == new) {
+            self.status = "the palette is already compact".into();
+            return Vec::new();
+        }
+
+        let mut lookup = [0u8; 256];
+        for (old, new) in &mapping {
+            lookup[*old as usize] = *new;
+        }
+        let colors: Vec<voxel_core::Rgb8> =
+            mapping.iter().map(|(old, _)| self.model.palette().get(*old)).collect();
+
+        self.history.restructure(&mut self.model, "compact palette", |model| {
+            for layer in 0..model.layer_count() {
+                let cells: Vec<_> = model
+                    .iter_filled_in(layer)
+                    .map(|([x, y, z], v)| ([x as i32, y as i32, z as i32], lookup[v as usize]))
+                    .collect();
+                for ([x, y, z], v) in cells {
+                    model.set_in(layer, x, y, z, v);
+                }
+            }
+            let mut next = [voxel_core::Rgb8::default(); 256];
+            for (n, c) in colors.iter().enumerate() {
+                next[n + 1] = *c;
+            }
+            model.set_palette(voxel_core::Palette::from_colors(next));
+        });
+        // The selected colour is an index, and every index has just moved.
+        self.color = lookup[self.color as usize].max(1);
+        self.after_structural();
+        self.status = format!("compacted the palette to {} colours", mapping.len());
+        mapping
+    }
+
     pub fn set_palette_color(&mut self, index: u8, color: voxel_core::Rgb8) -> bool {
         let changed = self
             .history

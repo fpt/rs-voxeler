@@ -265,6 +265,37 @@ both are measured in voxels: leaving the camera would make the model appear to
 leap towards you, and leaving the slice would cut through a different part of
 the shape than the one on screen.
 
+### Colour is a way of naming a part
+
+"All the red" is a part in a way that "all the cells in this box" is not, which
+is what `select_by_color` and `count_by_color` are for — an agent could already
+see the picture with `screenshot` and count cells with `describe_model`, and
+could not ask what the model was *made of*.
+
+Two rules the palette operations turn on:
+
+- **Index 0 is air, not a colour, and every one of them refuses it.** `slot_arg`
+  is a separate argument helper from the drawing tools' `color` for exactly this
+  reason: a drawing tool takes 0 and erases with it, where "replace 0 with white"
+  means every empty cell and would fill the model.
+- **Recolouring moves voxels between slots; `set_palette_color` changes what a
+  slot means.** `swap_colors` therefore swaps the *voxels*, not the palette
+  entries. Both readings put the same picture on screen — a swap of two slots'
+  colours looks identical to a swap of which slot each voxel names — but only
+  this one leaves index 3 meaning the red it meant, so a brush set to 3 still
+  paints red.
+
+`compact_palette` is the one that touches both halves: it renumbers indices and
+rewrites every voxel that used one. It goes through the snapshot path, which is
+why `Snapshot` carries the **palette** — a compact recorded as cell edits alone
+would undo the voxels and leave them pointing at colours that had moved. It also
+follows the editor's selected colour through the mapping, and reports the
+mapping, because every index a caller was holding is stale afterwards.
+
+Adding the palette to `Snapshot` is also why `Change::Layers` boxes its
+snapshots: the variant is the odd one out by two orders of magnitude, and inline
+it made every one-cell edit on the undo stack carry 1680 bytes.
+
 ### Structural changes store the stack whole
 
 `History` holds a `Change`, which is either cells or layers. A layer snapshot

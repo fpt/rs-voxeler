@@ -76,6 +76,10 @@ sticking out at its sides.
   switches, so showing the object again restores what was shown before. A layer
   row whose report carries `"shown": false` while `"visible"` is true is inside
   a hidden object — that is why it is not in the voxel count.
+- `count_by_color` reports which palette indices the model actually uses. Check
+  it before a scheme change rather than assuming an index, and use
+  `replace_color` to move a part to another slot — `set_palette_color` changes
+  what the slot means everywhere, which is a different edit.
 - `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid` and `line`
   operations. Top-level `layer`/`color` supply defaults; individual operations
   override them. Explicit layer arguments do not change the active selection.

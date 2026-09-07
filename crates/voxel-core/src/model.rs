@@ -150,6 +150,14 @@ pub struct Snapshot {
     pub size: [u16; 3],
     pub layers: Vec<Layer>,
     pub objects: Vec<Object>,
+    /// The palette goes with the rest.
+    ///
+    /// Most structural changes leave it alone, and for those this costs 768
+    /// bytes against a copy of every layer. `compact_palette` does not: it
+    /// renumbers indices and rewrites every voxel that used one, and the two
+    /// halves have to come back together or an undo leaves a model whose cells
+    /// point at colours that have moved.
+    pub palette: Palette,
     pub active: usize,
 }
 
@@ -1273,6 +1281,7 @@ impl VoxelModel {
             size: self.size,
             layers: self.layers.clone(),
             objects: self.objects.clone(),
+            palette: self.palette.clone(),
             active: self.active,
         }
     }
@@ -1291,6 +1300,7 @@ impl VoxelModel {
         if !snapshot.objects.is_empty() {
             self.objects = snapshot.objects;
         }
+        self.palette = snapshot.palette;
         self.refresh_shown();
         self.refresh_count();
         self.dirty_all();

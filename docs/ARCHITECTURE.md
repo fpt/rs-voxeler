@@ -224,6 +224,29 @@ are both needed because they fail differently:
   horizon one pixel of the work plane really is a whole cell away, so that second
   placement is geometrically correct and still not what anyone meant.
 
+### Colour is a way of naming a part
+
+"All the red" is a part in a way "all the cells in this box" is not.
+`select_by_color` turns that into a selection the transforms already consume, and
+`count_by_color` is the observation an agent was missing — it could see the
+picture and count cells, and could not ask what the model was made of.
+
+- **Index 0 is air and every palette operation refuses it.** `slot_arg` is
+  deliberately a different argument helper from the drawing tools' `color`: they
+  take 0 and erase with it, where "replace 0" means every empty cell and would
+  fill the model.
+- **`swap_colors` swaps the voxels, not the palette entries.** Both readings put
+  the same picture on screen; only this one leaves an index meaning the colour it
+  meant, so a brush set to it still paints that colour.
+- **`compact_palette` touches both halves**, so it goes through the snapshot
+  path — which is why `Snapshot` carries the palette. Recorded as cell edits
+  alone, an undo would put the voxels back pointing at colours that had moved. It
+  reports the mapping, because every index a caller was holding is stale.
+
+That last one is also why `Change::Layers` boxes its snapshots: with the palette
+in, the variant outweighs the others by two orders of magnitude, and the undo
+stack is overwhelmingly `Cells`.
+
 ### Structural changes store the stack whole
 
 `History` holds a `Change`: cells, a palette entry, or layers. A cell edit names

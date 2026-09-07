@@ -214,6 +214,9 @@ check before you repeat one.
   loopback, and `--mcp` refuses every file tool including `save_model`.
 - **Do not make a tool call more than one undo step.** The user shares that
   history.
+- **Do not let a palette operation take index 0.** It is air. "Replace black
+  with white" on it fills the model, which is the one failure those tools are
+  shaped against — use `slot_arg`, not the drawing tools' colour argument.
 
 ## Commits and pull requests
 
