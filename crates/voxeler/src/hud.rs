@@ -410,6 +410,19 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         let label = format!("{} {e}x{e}x{e}", editor.brush.shape.name());
         chip(fb, x, y, &label, editor.span == Span::Voxel);
     }
+
+    // A third row for the mirror planes.
+    //
+    // They were only ever in the help card, and a setting you have to go
+    // looking for is one people ask how to reach. Three chips say both things
+    // at once: that mirroring is per axis, and which key each axis is on.
+    let y = y + h as i32 + 6;
+    let mut x = PAD as i32;
+    overlay::text(fb, x, y + 4, "MIRROR", DIM, TEXT_SCALE);
+    x += text_width("MIRROR", TEXT_SCALE) as i32 + 8;
+    for (axis, key) in ["X", "Y", "Z"].iter().enumerate() {
+        x += chip(fb, x, y, key, editor.mirror[axis]) as i32 + 4;
+    }
 }
 
 const HELP: &[&str] = &[

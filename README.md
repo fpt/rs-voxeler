@@ -40,10 +40,14 @@ whatever size it was saved at, so `--size` only ever describes a new model. A
 editor's own `.vxm`.
 
 The volume is centred on the origin, spanning ±size/2 on every axis, and the
-grid runs through the middle of it. That grid is the work plane: with the build
-tool you can click it directly — a ray that misses the model falls back to the
-plane, from either side — so an empty model is never a dead end. The other tools
-act on a voxel, and do nothing over empty space.
+grid runs through the middle of it. That grid is the work plane, and it is where
+a layer *starts*: while the active layer is empty you can click the plane
+directly, from either side, so a new layer — or one you have just erased the last
+voxel of — is never a dead end. Once that layer holds something, the plane
+closes and you build against what you made, so empty space stops being clickable
+and a click meant for the camera cannot place a voxel. Press `A` for a new layer
+to start another part somewhere else. The other tools act on a voxel, and do
+nothing over empty space.
 
 | | |
 | --- | --- |
@@ -156,9 +160,11 @@ one you were editing, so hiding a layer and saving never throws it away. `.vox`
 has nowhere to put a stack, so `ctrl+E` writes the composite as one model and
 says so.
 
-**Mirroring** reflects the *edit*, not the model. `X` `Y` `Z` each add a plane
-through the middle of that axis, so two give four copies of every stroke and
-three give eight — but nothing is written that the stroke did not touch.
+**Mirroring** is per axis: `X`, `Y` and `Z` each toggle a plane through the
+middle of that axis, and the `MIRROR X Y Z` row under the tools shows which are
+on. Two active planes give four copies of every stroke and three give eight. It
+reflects the *edit*, not the model — nothing is written that the stroke did not
+touch.
 Turning mirroring on does not go back and symmetrise what is already there, so
 a model that is deliberately lopsided stays lopsided while you work on it
 symmetrically.

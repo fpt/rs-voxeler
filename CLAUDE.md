@@ -308,6 +308,27 @@ The grid draws a line every `GRID_STEP` (4) voxels, picked out every
 divides the size. A line per cell is 65 lines each way at 64³, which at any
 framing that fits the model is a grey haze rather than a grid.
 
+### The work plane is where a layer starts, not a standing offer
+
+Building places a voxel against a face, so a layer with nothing in it has
+nothing to build against. The work plane rescues that — but only while the
+**active layer is empty**. `Editor::plane_is_open` is the whole rule, and three
+things fall out of it:
+
+- An empty layer can always be started, which was the fallback's original
+  purpose: erasing your last voxel must not make the layer unrecoverable.
+- A *part* can be started. A new layer for a tree is empty, so its first voxel
+  goes anywhere on the plane; after that the tree is what you build against.
+  `A` is therefore the answer to "how do I put something over there".
+- Empty space stops being clickable the moment there is something to aim at.
+  Leaving the plane permanently open made the entire viewport a build surface,
+  and a click meant for the camera placed a voxel instead. That was reported
+  from use, and it is the reason the rule exists.
+
+`Drag::on_plane` keeps the plane open for the rest of a stroke that began on it
+— the stroke's own first placement fills the layer, which would otherwise close
+the plane out from under the remaining moves.
+
 ### You can always build
 
 Building places a voxel *against a face*, which on an empty grid means there is
@@ -441,6 +462,10 @@ from the one that was asked for.
   another is above it on screen and later in the array, and only one of those
   counts downwards. `hud::layer_hit` does that flip and is tested row by row,
   for the same reason `palette_hit` is.
+- **A setting with no chip is a setting nobody finds.** Mirroring was per axis
+  from the day it landed and was only ever named in the help card, so it was
+  asked about as though it were missing. The `MIRROR X Y Z` row says both things
+  at once: that it is per axis, and which key each axis is on.
 - **The HUD's layout and its hit test live together.** `hud::palette_hit` is the
   exact inverse of the swatch layout, tested swatch by swatch, for the reason
   `kessel`'s `window_to_console` is: a click landing one swatch off reads as a
@@ -601,6 +626,9 @@ rs-voxeler/
 - **An MCP client connects and then nothing works.** Check the `endpoint` event
   is absolute and that `POST /messages` is served as well as `/message`; both
   spellings are in the wild, and serving one silently breaks the other's clients.
+- **A click on empty space does nothing.** That is `plane_is_open`: the active
+  layer has something in it, so the work plane is closed. `A` starts a layer
+  that can be placed anywhere.
 - **A click does nothing.** Check `over_panel` first — a HUD rectangle that
   claims more than it draws eats clicks with no feedback at all. After that,
   check whether `target_at` is returning `None`: for everything but build, no
