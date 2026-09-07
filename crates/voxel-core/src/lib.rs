@@ -26,8 +26,8 @@ pub mod palette;
 pub mod raycast;
 pub mod region;
 
-pub use edit::{Change, Edit, EditBatch, History, LayerState, Stroke};
-pub use model::{Bounds, Layer, VoxelModel, MAX_DIM, MAX_LAYERS};
+pub use edit::{Change, Edit, EditBatch, History, Stroke};
+pub use model::{Bounds, Layer, Snapshot, VoxelModel, MAX_DIM, MAX_LAYERS};
 pub use palette::{Palette, Rgb8};
 pub use raycast::{Face, RayHit};
 pub use region::{Brush, BrushShape, Reach, Span};

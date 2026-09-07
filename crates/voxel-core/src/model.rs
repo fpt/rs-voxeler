@@ -88,6 +88,17 @@ impl Bounds {
     }
 }
 
+/// A whole stack at one moment, and the scene it was sized for.
+///
+/// What an undo step holds when the change was structural rather than a list of
+/// cells. See [`VoxelModel::layer_snapshot`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Snapshot {
+    pub size: [u16; 3],
+    pub layers: Vec<Layer>,
+    pub active: usize,
+}
+
 /// One layer: a grid of its own, placed somewhere in the scene.
 ///
 /// A grid of its own rather than a tag on each cell, so that layers genuinely
@@ -575,18 +586,92 @@ impl VoxelModel {
     /// cell edit already in the history would start pointing at the wrong grid.
     /// Storing the stack whole sidesteps that — undo puts the exact numbering
     /// back, and the older entries line up again.
-    pub fn layer_snapshot(&self) -> (Vec<Layer>, usize) {
-        (self.layers.clone(), self.active)
+    ///
+    /// The scene's own size goes with it. Most structural changes leave that
+    /// alone, but [`subdivide`](Self::subdivide) does not, and layers restored
+    /// at their old coordinates into a scene of the new size would be a stack
+    /// whose boxes all sit outside it.
+    pub fn layer_snapshot(&self) -> Snapshot {
+        Snapshot {
+            size: self.size,
+            layers: self.layers.clone(),
+            active: self.active,
+        }
     }
 
-    /// Put a snapshot back.
-    pub fn restore_layers(&mut self, snapshot: (Vec<Layer>, usize)) {
-        let (layers, active) = snapshot;
-        if layers.is_empty() {
+    /// Put a snapshot back, scene size and all.
+    pub fn restore_layers(&mut self, snapshot: Snapshot) {
+        if snapshot.layers.is_empty() {
             return;
         }
-        self.active = active.min(layers.len() - 1);
-        self.layers = layers;
+        self.size = snapshot.size;
+        self.active = snapshot.active.min(snapshot.layers.len() - 1);
+        self.layers = snapshot.layers;
+    }
+
+    /// Scale the whole scene up, so every voxel becomes `factor`³ of them.
+    ///
+    /// The way to take a shape you are happy with and carve detail into it: the
+    /// silhouette is unchanged and there is simply more room in it. Each layer's
+    /// box scales with its contents, so a stack costs `factor`³ of what it did
+    /// and no more — a scene mostly made of empty range does not start paying
+    /// for it now.
+    ///
+    /// Deliberately a plain replication, not a smoothing. A subdivide that
+    /// rounded corners would be a different model rather than a finer one, and
+    /// you could not carve against it and get back what you drew.
+    ///
+    /// Refused when the result would pass [`MAX_DIM`] on any axis, or for a
+    /// factor below 2 — a factor of 1 is a copy, and there is no point spending
+    /// an undo step on it.
+    pub fn subdivide(&mut self, factor: u16) -> Result<(), String> {
+        if factor < 2 {
+            return Err(format!("a subdivide needs a factor of 2 or more, got {factor}"));
+        }
+        let f = factor as u32;
+        for (a, d) in self.size.iter().enumerate() {
+            if *d as u32 * f > MAX_DIM as u32 {
+                return Err(format!(
+                    "{}x{}x{} by {factor} is {} on {}, past the {MAX_DIM} limit",
+                    self.size[0],
+                    self.size[1],
+                    self.size[2],
+                    *d as u32 * f,
+                    ["x", "y", "z"][a]
+                ));
+            }
+        }
+
+        let fi = factor as i32;
+        for layer in &mut self.layers {
+            let b = layer.bounds;
+            if b.is_empty() {
+                continue;
+            }
+            let scaled = Bounds::new(
+                [b.origin[0] * factor, b.origin[1] * factor, b.origin[2] * factor],
+                [b.size[0] * factor, b.size[1] * factor, b.size[2] * factor],
+            );
+            let mut voxels = vec![0u8; scaled.cells()];
+            for ([x, y, z], v) in layer.iter_filled() {
+                let (bx, by, bz) = (x as i32 * fi, y as i32 * fi, z as i32 * fi);
+                for dz in 0..fi {
+                    for dy in 0..fi {
+                        for dx in 0..fi {
+                            voxels[scaled.index(bx + dx, by + dy, bz + dz)] = v;
+                        }
+                    }
+                }
+            }
+            layer.bounds = scaled;
+            layer.voxels = voxels;
+        }
+        self.size = [
+            self.size[0] * factor,
+            self.size[1] * factor,
+            self.size[2] * factor,
+        ];
+        Ok(())
     }
 
     /// Resize the *scene*, keeping whatever still fits at the same coordinates.
@@ -981,6 +1066,98 @@ mod tests {
         }
         assert_eq!(m.layer_count(), MAX_LAYERS);
         assert!(m.add_layer(0, "one too many").is_none());
+    }
+
+    /// Every voxel becomes a block, and the shape is otherwise untouched.
+    #[test]
+    fn subdividing_scales_the_scene_and_every_layer() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        m.rename_layer(0, "GROUND");
+        m.set(2, 0, 3, 5);
+        let top = m.add_layer(0, "TOWER").unwrap();
+        m.set_active_layer(top);
+        m.set(10, 4, 10, 9);
+        m.set_layer_visible(0, false);
+
+        assert_eq!(m.subdivide(2), Ok(()));
+        assert_eq!(m.size(), [32, 32, 32]);
+        assert_eq!(m.layer_count(), 2);
+        assert_eq!(m.layers()[1].name, "TOWER");
+        assert!(!m.layers()[0].visible, "visibility survives");
+        assert_eq!(m.active_layer(), 1, "and so does the cursor");
+
+        // One voxel became eight, at twice the coordinates.
+        for dz in 0..2 {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    assert_eq!(m.get_in(0, 4 + dx, dy, 6 + dz), 5);
+                    assert_eq!(m.get(20 + dx, 8 + dy, 20 + dz), 9);
+                }
+            }
+        }
+        assert_eq!(m.get_in(0, 4, 0, 5), 0, "and nothing beside it");
+        assert_eq!(m.layers()[1].filled_count(), 8);
+    }
+
+    /// A layer's box scales with its contents, so a scene mostly made of empty
+    /// range does not start paying for it.
+    #[test]
+    fn subdividing_costs_the_cube_of_the_factor_and_no_more() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        m.set(20, 5, 10, 1);
+        m.set(23, 8, 13, 1);
+        let before = m.allocated_cells();
+        assert_eq!(before, 64);
+
+        m.subdivide(2).unwrap();
+        assert_eq!(m.allocated_cells(), before * 8, "and not the scene's cube");
+        assert_eq!(m.layer_bounds(0), Bounds::new([40, 10, 20], [8, 8, 8]));
+    }
+
+    #[test]
+    fn subdividing_past_the_dimension_limit_is_refused() {
+        let mut m = VoxelModel::new(200, 8, 8);
+        m.set(1, 1, 1, 1);
+        let err = m.subdivide(2).unwrap_err();
+        assert!(err.contains("256"), "{err}");
+        assert!(err.contains(" x"), "names the axis: {err}");
+        assert_eq!(m.size(), [200, 8, 8], "and nothing moved");
+        assert_eq!(m.get(1, 1, 1), 1);
+
+        assert!(m.subdivide(1).is_err(), "a factor of 1 is a copy");
+        assert!(m.subdivide(0).is_err());
+    }
+
+    #[test]
+    fn a_factor_of_three_triples_every_axis() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(1, 1, 1, 7);
+        m.subdivide(3).unwrap();
+        assert_eq!(m.size(), [24, 24, 24]);
+        assert_eq!(m.filled_count(), 27);
+        assert_eq!(m.get(3, 3, 3), 7);
+        assert_eq!(m.get(5, 5, 5), 7);
+        assert_eq!(m.get(6, 3, 3), 0);
+    }
+
+    /// The snapshot has to carry the scene size, or undoing a subdivide leaves
+    /// every layer's box outside the scene it is restored into.
+    #[test]
+    fn a_snapshot_puts_the_scene_size_back_too() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        m.set(2, 3, 4, 5);
+        let saved = m.layer_snapshot();
+
+        m.subdivide(2).unwrap();
+        assert_eq!(m.size(), [32, 32, 32]);
+
+        m.restore_layers(saved);
+        assert_eq!(m.size(), [16, 16, 16]);
+        assert_eq!(m.get(2, 3, 4), 5);
+        assert_eq!(m.filled_count(), 1);
+        let b = m.layer_bounds(0);
+        let end = b.end();
+        assert!((0..3).all(|a| end[a] <= 16), "{b:?} is outside the scene");
     }
 
     /// Shrinking the scene cuts every layer's box down to it, keeping whatever

@@ -517,6 +517,23 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "subdivide",
+            description:
+                "Scale the whole scene up so every voxel becomes factor cubed of them. The way \
+                 to take a coarse shape you are happy with and carve detail into it: the \
+                 silhouette is unchanged and there is simply more room in it. Applies to every \
+                 layer at once and is ONE undo step. A plain replication, not a smoothing — \
+                 corners stay square, so what you carve is carved against what you drew. \
+                 Refused when any axis would pass 256.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"factor": {
+                    "type": "integer", "minimum": 2, "maximum": 8, "default": 2,
+                    "description": "Cells per axis per original voxel. 2 is the usual step."
+                }},
+            }),
+        },
+        ToolInfo {
             name: "trim_layer",
             description:
                 "Shrink a layer's box to the voxels it actually holds. Boxes keep their \
@@ -714,6 +731,32 @@ fn dispatch(
             Ok(CallResult::text(format!(
                 "added a layer\n{}",
                 layers_json(editor)
+            )))
+        }
+        "subdivide" => {
+            let factor = match args.get("factor") {
+                None | Some(Value::Null) => 2,
+                Some(v) => v
+                    .as_u64()
+                    .and_then(|f| u16::try_from(f).ok())
+                    .filter(|f| (2..=8).contains(f))
+                    .ok_or("`factor` must be between 2 and 8")?,
+            };
+            let before = editor.model().size();
+            editor.subdivide(factor)?;
+            let [x, y, z] = editor.model().size();
+            Ok(CallResult::text(format!(
+                "subdivided by {factor} — {}x{}x{} is now {x}x{y}x{z}\n{}",
+                before[0],
+                before[1],
+                before[2],
+                json!({
+                    "factor": factor,
+                    "size": [x, y, z],
+                    "voxels": editor.model().filled_count(),
+                    "allocated_cells": editor.model().allocated_cells(),
+                    "layers": layer_rows(editor),
+                })
             )))
         }
         "trim_layer" => {
@@ -1615,6 +1658,38 @@ mod tests {
         assert_eq!(e.model().get(0, 0, 0), 42);
 
         assert_eq!(run(&mut e, "set_color", json!({"color": 0})).is_error, Some(true));
+    }
+
+    #[test]
+    fn subdivide_scales_the_scene_and_reports_it() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        run(&mut e, "put_rect", json!({"from": [2,2,2], "to": [5,5,5], "color": 4}));
+        let voxels = e.model().filled_count();
+
+        let j = json_of(&run(&mut e, "subdivide", json!({})));
+        assert_eq!(j["factor"], 2);
+        assert_eq!(j["size"], json!([32, 32, 32]));
+        assert_eq!(j["voxels"], voxels * 8);
+        assert_eq!(e.model().get(4, 4, 4), 4);
+        assert_eq!(e.undo_depth(), 2, "the rect, then the subdivide");
+
+        // And back, scene size and all.
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().size(), [16, 16, 16]);
+        assert_eq!(e.model().filled_count(), voxels);
+    }
+
+    #[test]
+    fn subdivide_refuses_a_factor_that_would_not_fit_or_make_sense() {
+        let mut e = Editor::new(VoxelModel::new(200, 8, 8), PathBuf::from("t.vxm"));
+        let r = run(&mut e, "subdivide", json!({}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("256"), "{}", text_of(&r));
+
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        assert_eq!(run(&mut e, "subdivide", json!({"factor": 1})).is_error, Some(true));
+        assert_eq!(run(&mut e, "subdivide", json!({"factor": 99})).is_error, Some(true));
+        assert_eq!(e.model().size(), [8, 8, 8]);
     }
 
     // -- layer boxes ------------------------------------------------------

@@ -70,6 +70,7 @@ nothing over empty space.
 | `F` `R` | frame the model, reset the view |
 | `ctrl+Z` `ctrl+Y` | undo, redo |
 | `ctrl+S` `ctrl+E` | save, export `.vox` |
+| `ctrl+D` | subdivide the scene ×2 |
 | `ctrl+R` `ctrl+N` `ctrl+Q` | reload, clear, quit |
 | `H` | the same list, in the window |
 
@@ -240,6 +241,7 @@ whoever connects.
 | `add_layer`, `select_layer`, `set_layer_visible`, `trim_layer` | the layer stack and its boxes |
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
+| `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
 | `new_model`, `open_model`, `save_model`, `list_models` | files inside the root; listing includes subdirectories |
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
@@ -249,6 +251,13 @@ and it puts the camera back where it found it.
 
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
+
+`subdivide` is how a coarse model becomes a detailed one: get the silhouette
+right at 16³, then scale up and carve into the room you have made. It applies to
+**every layer at once** and is one undo step — the scene's own size included, so
+`ctrl+Z` really does put the coarse model back. It is a plain replication rather
+than a smoothing: corners stay square, so what you carve is carved against what
+you drew. `ctrl+D` in the editor does the same by 2.
 
 The file tools accept absolute paths inside any allowed directory, or paths
 relative to the first directory. They refuse paths outside those directories,

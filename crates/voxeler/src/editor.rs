@@ -599,6 +599,43 @@ impl Editor {
         }
     }
 
+    /// Scale the whole scene up, so every voxel becomes `factor`³ of them.
+    ///
+    /// One undo step covering every layer at once, which is why it goes through
+    /// `restructure` rather than a stroke: it changes the scene's own size, and
+    /// a snapshot is the only record that can put that back.
+    ///
+    /// The camera and the slice are moved with it. Neither is part of the
+    /// document, but both are measured in voxels: leaving the camera alone
+    /// would make the model appear to leap towards you, and leaving the slice
+    /// would put the cut through a different part of the shape than the one you
+    /// were looking at.
+    pub fn subdivide(&mut self, factor: u16) -> Result<(), String> {
+        let mut failed = None;
+        let changed = self
+            .history
+            .restructure(&mut self.model, "subdivide", |model| {
+                failed = model.subdivide(factor).err();
+            });
+        if let Some(e) = failed {
+            self.status = e.clone();
+            return Err(e);
+        }
+        if !changed {
+            self.status = "nothing to subdivide".into();
+            return Ok(());
+        }
+        self.camera.distance *= factor as f32;
+        self.slice = self.slice.map(|s| s.saturating_mul(factor));
+        self.after_structural();
+        let [x, y, z] = self.model.size();
+        self.status = format!(
+            "subdivided by {factor} — {x}x{y}x{z}, {} voxels",
+            self.model.filled_count()
+        );
+        Ok(())
+    }
+
     /// Empty the model as one undoable step.
     ///
     /// Every layer, not the visible cells of the active one: `ctrl+N` is "start
@@ -1851,6 +1888,62 @@ mod tests {
         assert_eq!(e.model().get(3, 0, 7), 9, "the whole half it was aimed at");
         assert_eq!(e.model().get(4, 0, 1), 5, "the other colour is a boundary");
         assert_eq!(e.model().filled_count(), 64, "a paint creates nothing");
+    }
+
+    /// Every layer at once, and one `ctrl+Z` puts the whole thing back — scene
+    /// size included, which is the part a cell-diff history could not record.
+    #[test]
+    fn subdividing_scales_every_layer_and_undoes_in_one_step() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+        let before_size = e.model().size();
+        let before_voxels = e.model().filled_count();
+        let steps = e.undo_depth();
+
+        e.subdivide(2).unwrap();
+        assert_eq!(e.model().size(), [16, 16, 16]);
+        assert_eq!(e.model().filled_count(), before_voxels * 8);
+        assert_eq!(e.model().layer_count(), 2);
+        assert_eq!(e.model().get_in(1, 6, 2, 6), 6, "the upper layer scaled too");
+        assert_eq!(e.undo_depth(), steps + 1, "one step, not one per layer");
+        assert!(e.is_dirty());
+
+        e.undo();
+        assert_eq!(e.model().size(), before_size, "the scene came back");
+        assert_eq!(e.model().filled_count(), before_voxels);
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 6);
+        // And the edits made before it still apply to the right cells.
+        e.undo();
+        assert_eq!(e.model().get_in(1, 3, 1, 3), 0);
+    }
+
+    /// The camera and the slice are measured in voxels, so they move with the
+    /// scene — otherwise the model appears to leap towards you and the cut
+    /// lands somewhere else in the shape.
+    #[test]
+    fn subdividing_carries_the_view_with_it() {
+        let mut e = editor_with_floor();
+        e.set_slice(Some(4));
+        let distance = e.camera.distance;
+
+        e.subdivide(2).unwrap();
+        assert_eq!(e.camera.distance, distance * 2.0);
+        assert_eq!(e.slice, Some(8));
+    }
+
+    #[test]
+    fn a_subdivide_that_would_not_fit_changes_nothing() {
+        let mut model = VoxelModel::new(200, 8, 8);
+        model.set(1, 1, 1, 4);
+        let mut e = Editor::new(model, PathBuf::from("t.vxm"));
+        let err = e.subdivide(2).unwrap_err();
+        assert!(err.contains("256"), "{err}");
+        assert_eq!(e.model().size(), [200, 8, 8]);
+        assert_eq!(e.undo_depth(), 0, "and it is not an undo step");
+        assert!(!e.is_dirty());
     }
 
     /// A fill is a click, not a stroke. Dragging on after one must not re-flood
