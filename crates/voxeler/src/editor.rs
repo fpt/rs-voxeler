@@ -81,16 +81,10 @@ impl Selection {
         (!self.cells.is_empty()).then_some((lo, hi))
     }
 
-    fn shifted(&self, delta: [i32; 3]) -> Self {
-        Self {
-            layer: self.layer,
-            cells: self
-                .cells
-                .iter()
-                .map(|c| [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]])
-                .collect(),
-        }
-    }
+}
+
+fn no_selection() -> String {
+    "nothing is selected".into()
 }
 
 /// What moving a selection did.
@@ -770,34 +764,110 @@ impl Editor {
     }
 
     /// Move the selected voxels, as one undo step.
-    ///
-    /// The source cells are cleared and the destinations written in one batch,
-    /// clears first — so a move that overlaps itself keeps the voxels that land
-    /// on cells the move also vacated, instead of erasing its own arrival.
-    ///
-    /// The selection follows the voxels, so a move can be repeated or refined.
     pub fn move_selection(&mut self, delta: [i32; 3]) -> Result<MoveReport, String> {
-        let Some(selection) = self.selection.clone() else {
-            return Err("nothing is selected".into());
-        };
         if delta == [0, 0, 0] {
+            return self.selection.as_ref().map(|_| MoveReport::default()).ok_or_else(no_selection);
+        }
+        self.transform_selection("move selection", |c| {
+            [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]]
+        })
+    }
+
+    /// Mirror the selected voxels about the middle of their own box.
+    ///
+    /// About the selection, not the scene: `M` mirrors an *edit* across the
+    /// model's middle, which is a different thing, and flipping a hand you have
+    /// selected should turn the hand over rather than send it to the far side
+    /// of the volume.
+    ///
+    /// Exact at any size. `lo + hi - v` needs no centre cell, so an even extent
+    /// flips without the half-cell rounding a rotation cannot avoid.
+    pub fn flip_selection(&mut self, axis: usize) -> Result<MoveReport, String> {
+        let Some((lo, hi)) = self.selection.as_ref().and_then(|s| s.bounds()) else {
+            return Err(no_selection());
+        };
+        let sum = lo[axis] + hi[axis];
+        self.transform_selection("flip selection", move |mut c| {
+            c[axis] = sum - c[axis];
+            c
+        })
+    }
+
+    /// Turn the selected voxels a quarter turn at a time about their own box.
+    ///
+    /// Counter-clockwise about the **positive** axis, by the right-hand rule —
+    /// the same convention face winding uses (`e_b × e_c = e_a`), so there is
+    /// one sense of "positive rotation" in this codebase rather than two.
+    ///
+    /// The selection pivots about the **low corner** of its box, not its
+    /// centre. Centring reads better on paper and is not invertible: a quarter
+    /// turn swaps two extents, and where those differ in parity the centre
+    /// falls between cells and has to be rounded. Rounding the same way each
+    /// time accumulates, so `rotate(+1)` then `rotate(-1)` came back a whole
+    /// cell from where it started. Turning something to look at it and turning
+    /// it back is a thing people do constantly, and it has to be exact.
+    ///
+    /// A square footprint pivots identically either way, which is most
+    /// rotations. For one that is not square, follow with `move_selection`.
+    pub fn rotate_selection(&mut self, axis: usize, quarter_turns: i32) -> Result<MoveReport, String> {
+        let Some((lo, hi)) = self.selection.as_ref().and_then(|s| s.bounds()) else {
+            return Err(no_selection());
+        };
+        let turns = quarter_turns.rem_euclid(4);
+        if turns == 0 {
             return Ok(MoveReport::default());
         }
+        // The two axes the rotation moves, in the cyclic order that makes a
+        // positive turn positive.
+        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+        let (eb, ec) = (hi[b] - lo[b] + 1, hi[c] - lo[c] + 1);
+        let (anchor_b, anchor_c) = (lo[b], lo[c]);
+        let _ = hi;
+
+        self.transform_selection("rotate selection", move |cell| {
+            let (mut db, mut dc) = (cell[b] - lo[b], cell[c] - lo[c]);
+            let (mut wb, mut wc) = (eb, ec);
+            for _ in 0..turns {
+                let (nb, nc) = (wc - 1 - dc, db);
+                db = nb;
+                dc = nc;
+                std::mem::swap(&mut wb, &mut wc);
+            }
+            let _ = wb;
+            let mut out = cell;
+            out[b] = anchor_b + db;
+            out[c] = anchor_c + dc;
+            out
+        })
+    }
+
+    /// Apply a cell mapping to the selection, as one undo step.
+    ///
+    /// The shape every transform has. Colours are read **before anything
+    /// moves**, then the clears are emitted ahead of the writes in one batch: a
+    /// transform whose result overlaps its source — a short move, a rotation of
+    /// a squat shape — would otherwise carry a voxel along instead of leaving
+    /// it where it landed, or erase its own arrival.
+    fn transform_selection(
+        &mut self,
+        label: &'static str,
+        map: impl Fn([i32; 3]) -> [i32; 3],
+    ) -> Result<MoveReport, String> {
+        let Some(selection) = self.selection.clone() else {
+            return Err(no_selection());
+        };
         let layer = selection.layer;
         if layer >= self.model.layer_count() {
             return Err("the selected layer is gone".into());
         }
 
-        // Read every colour before anything moves: a cell can be both a source
-        // and a destination, and reading as we went would carry a voxel along
-        // with the move instead of leaving it where it landed.
-        let mut carried: Vec<([i32; 3], u8)> = Vec::with_capacity(selection.len());
-        for c in selection.cells() {
-            carried.push((c, self.model.get_in(layer, c[0], c[1], c[2])));
-        }
+        let carried: Vec<([i32; 3], u8)> = selection
+            .cells()
+            .map(|c| (c, self.model.get_in(layer, c[0], c[1], c[2])))
+            .collect();
+        let source: std::collections::HashSet<[i32; 3]> = selection.cells().collect();
 
         let mut report = MoveReport::default();
-        let source: std::collections::HashSet<[i32; 3]> = selection.cells().collect();
         let mut writes: Vec<CellWrite> = carried
             .iter()
             .map(|(pos, _)| CellWrite {
@@ -806,8 +876,9 @@ impl Editor {
                 color: 0,
             })
             .collect();
+        let mut landed = Vec::with_capacity(carried.len());
         for (pos, color) in &carried {
-            let to = [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]];
+            let to = map(*pos);
             if !self.model.contains(to[0], to[1], to[2]) {
                 report.dropped += 1;
                 continue;
@@ -816,6 +887,7 @@ impl Editor {
             if !source.contains(&to) && self.model.get_in(layer, to[0], to[1], to[2]) != 0 {
                 report.overwritten += 1;
             }
+            landed.push(to);
             writes.push(CellWrite {
                 layer,
                 pos: to,
@@ -823,10 +895,13 @@ impl Editor {
             });
         }
 
-        self.apply_writes("move selection", writes, |_, _| {});
-        self.selection = Some(selection.shifted(delta));
+        self.apply_writes(label, writes, |_, _| {});
+        // The selection follows its voxels, so a transform can be repeated or
+        // refined. Cells that fell outside the scene are simply gone.
+        self.selection = (!landed.is_empty()).then(|| Selection::new(layer, landed));
         self.status = format!(
-            "moved {} voxels{}",
+            "{} {} voxels{}",
+            label.split(' ').next().unwrap_or(label),
             report.moved,
             if report.dropped > 0 {
                 format!(", {} lost off the edge", report.dropped)
@@ -2313,6 +2388,163 @@ mod tests {
         e.move_selection([0, 4, 0]).unwrap();
         assert_eq!(e.model().get_in(0, 3, 4, 3), 4, "moved on layer 0");
         assert_eq!(e.model().layers()[1].filled_count(), 0, "layer 1 untouched");
+    }
+
+    fn filled(e: &Editor) -> std::collections::BTreeSet<[i32; 3]> {
+        e.model()
+            .iter_filled()
+            .map(|(p, _)| [p[0] as i32, p[1] as i32, p[2] as i32])
+            .collect()
+    }
+
+    /// An L, so the direction of a turn is pinned by the cells it produces
+    /// rather than by a description of it. The sense is the right-hand rule
+    /// about the positive axis — the same one face winding uses — so +X goes
+    /// to -Z for a turn about +Y.
+    #[test]
+    fn a_quarter_turn_goes_counter_clockwise_about_the_positive_axis() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        // In the y = 1 plane, from a corner at (4, 1, 4): an arm along +X and
+        // a shorter one along +Z.
+        for x in 4..7 {
+            e.model.set(x, 1, 4, 3);
+        }
+        e.model.set(4, 1, 5, 3);
+        e.select_box([0, 0, 0], [15, 15, 15]);
+
+        e.rotate_selection(1, 1).unwrap();
+        assert_eq!(
+            filled(&e),
+            [[4, 1, 4], [4, 1, 5], [4, 1, 6], [5, 1, 6]]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "the +X arm now runs toward -Z from its root"
+        );
+    }
+
+    /// Turning something to look at it and turning it back has to be exact.
+    /// Preserving the box's *centre* is not: a quarter turn swaps two extents,
+    /// and where those differ in parity the centre falls between cells, so the
+    /// rounding accumulates and a there-and-back came home a cell out.
+    #[test]
+    fn a_rotation_and_its_opposite_come_back_exactly() {
+        for (w, d) in [(4usize, 1usize), (3, 1), (5, 2), (2, 2), (1, 1), (7, 4)] {
+            let mut e = Editor::new(VoxelModel::new(24, 8, 24), PathBuf::from("t.vxm"));
+            for z in 0..d {
+                for x in 0..w {
+                    e.model.set(4 + x as i32, 1, 4 + z as i32, (x + z * 8 + 1) as u8);
+                }
+            }
+            e.select_box([0, 0, 0], [23, 7, 23]);
+            let start = filled(&e);
+
+            e.rotate_selection(1, 1).unwrap();
+            e.rotate_selection(1, -1).unwrap();
+            assert_eq!(filled(&e), start, "{w}x{d}: there and back again");
+
+            for _ in 0..4 {
+                e.rotate_selection(1, 1).unwrap();
+            }
+            assert_eq!(filled(&e), start, "{w}x{d}: four quarter turns");
+        }
+    }
+
+    #[test]
+    fn a_turn_of_none_is_not_an_edit_and_turns_wrap() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 4..8 {
+            e.model.set(x, 1, 4, 3);
+        }
+        e.select_box([0, 0, 0], [15, 15, 15]);
+        let steps = e.undo_depth();
+        assert_eq!(e.rotate_selection(1, 0).unwrap(), MoveReport::default());
+        assert_eq!(e.rotate_selection(1, 4).unwrap(), MoveReport::default());
+        assert_eq!(e.undo_depth(), steps, "neither touched the model");
+
+        // A shape with an arm on each axis, so no turn is a coincidental no-op
+        // — a bar along X is genuinely unchanged by a turn about X.
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for cell in [[4, 1, 4], [6, 1, 4], [4, 3, 4], [4, 1, 6]] {
+            e.model.set(cell[0], cell[1], cell[2], 3);
+        }
+        e.select_box([0, 0, 0], [15, 15, 15]);
+        for axis in 0..3 {
+            let before = filled(&e);
+            e.rotate_selection(axis, 1).unwrap();
+            assert_ne!(filled(&e), before, "axis {axis}");
+            e.rotate_selection(axis, -1).unwrap();
+            assert_eq!(filled(&e), before, "axis {axis} came back");
+        }
+    }
+
+    /// A rotation of a squat shape overlaps its own source, which is the case
+    /// that eats voxels if colours are read as the transform goes.
+    #[test]
+    fn a_rotation_that_overlaps_itself_keeps_every_voxel() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for z in 4..8 {
+            for x in 4..8 {
+                e.model.set(x, 1, z, (x * 4 + z) as u8);
+            }
+        }
+        e.select_box([4, 1, 4], [7, 1, 7]);
+
+        e.rotate_selection(1, 1).unwrap();
+        assert_eq!(e.model().filled_count(), 16, "none lost, none duplicated");
+        let colours: std::collections::HashSet<u8> =
+            e.model().iter_filled().map(|(_, v)| v).collect();
+        assert_eq!(colours.len(), 16, "and every colour is still distinct");
+    }
+
+    /// Flipping is about the selection, not the scene — the difference between
+    /// turning a hand over and sending it to the far wall.
+    #[test]
+    fn a_flip_mirrors_within_the_selections_own_box() {
+        let mut e = Editor::new(VoxelModel::new(32, 16, 16), PathBuf::from("t.vxm"));
+        e.model.set(4, 1, 1, 3);
+        e.model.set(5, 1, 1, 9);
+        e.select_box([4, 1, 1], [5, 1, 1]);
+
+        e.flip_selection(0).unwrap();
+        assert_eq!(e.model().get(4, 1, 1), 9, "the two swapped");
+        assert_eq!(e.model().get(5, 1, 1), 3);
+        assert_eq!(e.model().filled_count(), 2, "and nothing moved across the scene");
+    }
+
+    /// An even extent has no centre cell, and `lo + hi - v` needs none — the
+    /// rounding a rotation cannot avoid does not apply to a flip.
+    #[test]
+    fn a_flip_is_exact_at_any_extent_and_undoes_itself() {
+        for width in [1usize, 2, 3, 8] {
+            let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+            for x in 0..width {
+                e.model.set(2 + x as i32, 1, 1, (x + 1) as u8);
+            }
+            e.select_box([0, 0, 0], [15, 15, 15]);
+            let before: Vec<_> = e.model().iter_filled().collect();
+
+            e.flip_selection(0).unwrap();
+            e.flip_selection(0).unwrap();
+            assert_eq!(
+                e.model().iter_filled().collect::<Vec<_>>(),
+                before,
+                "flipping twice at width {width} is where you started"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transform_needs_a_selection_and_is_one_undo_step() {
+        let mut e = editor_with_floor();
+        assert!(e.flip_selection(0).is_err());
+        assert!(e.rotate_selection(1, 1).is_err());
+        assert_eq!(e.undo_depth(), 0);
+
+        e.select_box([0, 0, 0], [7, 0, 7]);
+        e.rotate_selection(1, 1).unwrap();
+        assert_eq!(e.undo_depth(), 1);
+        e.flip_selection(2).unwrap();
+        assert_eq!(e.undo_depth(), 2);
     }
 
     /// Every layer at once, and one `ctrl+Z` puts the whole thing back — scene

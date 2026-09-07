@@ -295,6 +295,10 @@ pub fn list() -> Vec<ToolInfo> {
             "description": format!("{what} as [x, y, z] in model space, +Y up.")
         })
     };
+    let axis_name = json!({
+        "type": "string", "enum": ["x", "y", "z"],
+        "description": "The axis to turn about, or mirror across."
+    });
     let layer = json!({
         "description": "A layer, by its index (0 is the bottom of the stack) or by its name.",
         "type": ["integer", "string"]
@@ -575,6 +579,37 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "flip_selection",
+            description:
+                "Mirror the selected voxels about the middle of their own box, as ONE undo step. \
+                 About the selection, not the scene — flipping a hand you have selected turns \
+                 the hand over rather than sending it to the far side of the volume. Exact at \
+                 any size, with no rounding.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"axis": axis_name},
+                "required": ["axis"],
+            }),
+        },
+        ToolInfo {
+            name: "rotate_selection",
+            description:
+                "Turn the selected voxels a quarter turn at a time about their own box, as ONE \
+                 undo step. Counter-clockwise about the positive axis by the right-hand rule; \
+                 negative turns go the other way. The box keeps its centre, so a rotation stays \
+                 where the shape was. Where a turn swaps two extents of different parity there \
+                 is no cell at the centre and the result sits half a cell low on those axes.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "axis": axis_name,
+                    "turns": {"type": "integer", "default": 1,
+                              "description": "Quarter turns. 1 is 90 degrees, -1 the other way."},
+                },
+                "required": ["axis"],
+            }),
+        },
+        ToolInfo {
             name: "subdivide",
             description:
                 "Scale the whole scene up so every voxel becomes factor cubed of them. The way \
@@ -825,22 +860,24 @@ fn dispatch(
         "move_selection" => {
             let delta = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
             let report = editor.move_selection(delta)?;
-            Ok(CallResult::text(format!(
-                "moved {} voxels by {delta:?}{}\n{}",
-                report.moved,
-                if report.dropped > 0 {
-                    format!(", {} lost off the edge", report.dropped)
-                } else {
-                    String::new()
-                },
-                json!({
-                    "moved": report.moved,
-                    "overwritten": report.overwritten,
-                    "dropped": report.dropped,
-                    "selection": selection_json(editor),
-                    "model_voxels": editor.model().filled_count(),
-                })
-            )))
+            Ok(CallResult::text(transform_text(editor, "moved", &report)))
+        }
+        "flip_selection" => {
+            let axis = axis_arg(args)?;
+            let report = editor.flip_selection(axis)?;
+            Ok(CallResult::text(transform_text(editor, "flipped", &report)))
+        }
+        "rotate_selection" => {
+            let axis = axis_arg(args)?;
+            let turns = match args.get("turns") {
+                None | Some(Value::Null) => 1,
+                Some(v) => v
+                    .as_i64()
+                    .and_then(|t| i32::try_from(t).ok())
+                    .ok_or("`turns` must be a whole number of quarter turns")?,
+            };
+            let report = editor.rotate_selection(axis, turns)?;
+            Ok(CallResult::text(transform_text(editor, "rotated", &report)))
         }
         "subdivide" => {
             let factor = match args.get("factor") {
@@ -1276,6 +1313,35 @@ fn model_path(editor: &Editor) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// An axis named the way an agent would say it.
+fn axis_arg(args: &Value) -> Result<usize, String> {
+    match args.get("axis").and_then(Value::as_str) {
+        Some("x") | Some("X") => Ok(0),
+        Some("y") | Some("Y") => Ok(1),
+        Some("z") | Some("Z") => Ok(2),
+        _ => Err("`axis` must be \"x\", \"y\" or \"z\"".into()),
+    }
+}
+
+fn transform_text(editor: &Editor, verb: &str, report: &crate::editor::MoveReport) -> String {
+    format!(
+        "{verb} {} voxels{}\n{}",
+        report.moved,
+        if report.dropped > 0 {
+            format!(", {} lost off the edge", report.dropped)
+        } else {
+            String::new()
+        },
+        json!({
+            "moved": report.moved,
+            "overwritten": report.overwritten,
+            "dropped": report.dropped,
+            "selection": selection_json(editor),
+            "model_voxels": editor.model().filled_count(),
+        })
+    )
 }
 
 fn selection_json(editor: &Editor) -> Value {
