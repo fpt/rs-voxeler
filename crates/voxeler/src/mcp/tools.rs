@@ -579,6 +579,48 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "copy_selection",
+            description:
+                "Lift the selected voxels into the clipboard, leaving the model alone. Cells are \
+                 kept relative to the selection's low corner, so pasting at that corner puts \
+                 back exactly what was copied. The clipboard survives undo and is not saved.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "cut_selection",
+            description:
+                "Copy the selected voxels and clear them, as ONE undo step. Nothing is left \
+                 selected afterwards — the clipboard is what holds them now.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "paste",
+            description:
+                "Write the clipboard into the ACTIVE layer with its low corner at a point, as \
+                 ONE undo step. The active layer rather than the one it came from, which is what \
+                 makes copying between layers a paste. What lands is left selected, so it can be \
+                 moved or turned without saying where it went.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"at": coord("Where the clipboard's low corner goes")},
+                "required": ["at"],
+            }),
+        },
+        ToolInfo {
+            name: "duplicate_selection",
+            description:
+                "Copy the selection and paste it at an offset, in one step — a second wheel, a \
+                 mirrored limb — without naming the corner the original sits at. The copy lands \
+                 selected, so duplicate then flip_selection is the whole of a mirrored pair.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dx": {"type": "integer"}, "dy": {"type": "integer"}, "dz": {"type": "integer"},
+                },
+                "required": ["dx", "dy", "dz"],
+            }),
+        },
+        ToolInfo {
             name: "flip_selection",
             description:
                 "Mirror the selected voxels about the middle of their own box, as ONE undo step. \
@@ -861,6 +903,24 @@ fn dispatch(
             let delta = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
             let report = editor.move_selection(delta)?;
             Ok(CallResult::text(transform_text(editor, "moved", &report)))
+        }
+        "copy_selection" => {
+            let n = editor.copy_selection()?;
+            Ok(CallResult::text(clipboard_text(editor, "copied", n)))
+        }
+        "cut_selection" => {
+            let n = editor.cut_selection()?;
+            Ok(CallResult::text(clipboard_text(editor, "cut", n)))
+        }
+        "paste" => {
+            let at = corner(args, "at")?;
+            let report = editor.paste(at)?;
+            Ok(CallResult::text(transform_text(editor, "pasted", &report)))
+        }
+        "duplicate_selection" => {
+            let delta = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
+            let report = editor.duplicate_selection(delta)?;
+            Ok(CallResult::text(transform_text(editor, "duplicated", &report)))
         }
         "flip_selection" => {
             let axis = axis_arg(args)?;
@@ -1323,6 +1383,22 @@ fn axis_arg(args: &Value) -> Result<usize, String> {
         Some("z") | Some("Z") => Ok(2),
         _ => Err("`axis` must be \"x\", \"y\" or \"z\"".into()),
     }
+}
+
+fn clipboard_text(editor: &Editor, verb: &str, n: usize) -> String {
+    // Read back from the clipboard rather than echoing the count: what is
+    // reported is what is *held*, which is the thing a later paste will write.
+    let held = editor.clipboard.as_ref();
+    let size = held.map(|c| c.size()).unwrap_or([0; 3]);
+    format!(
+        "{verb} {n} voxels\n{}",
+        json!({
+            "clipboard_voxels": held.map(|c| c.len()).unwrap_or(0),
+            "clipboard_size": size,
+            "selection": selection_json(editor),
+            "model_voxels": editor.model().filled_count(),
+        })
+    )
 }
 
 fn transform_text(editor: &Editor, verb: &str, report: &crate::editor::MoveReport) -> String {

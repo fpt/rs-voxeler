@@ -87,6 +87,40 @@ fn no_selection() -> String {
     "nothing is selected".into()
 }
 
+/// Voxels lifted out of the model, waiting to be put back somewhere.
+///
+/// # Not part of the document
+///
+/// It is never saved, it is not in a [`Snapshot`](voxel_core::Snapshot), and it
+/// survives undo — undo puts the *model* back, and a clipboard that emptied
+/// itself when you undid the copy would be a surprise rather than a rule.
+///
+/// # Relative to the low corner
+///
+/// Cells are stored as offsets from the copied selection's low corner, so
+/// `paste` at that same corner is exactly what was copied rather than an
+/// arithmetic guess. It carries no layer: a paste writes to the active layer,
+/// which is what makes copying from one layer to another a paste rather than a
+/// separate tool.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Clipboard {
+    cells: Vec<([i32; 3], u8)>,
+    size: [i32; 3],
+}
+
+impl Clipboard {
+    /// How many voxels are held. Never zero: `Editor::clipboard` is `None`
+    /// rather than an empty clipboard, the same rule the selection follows.
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// The extent of what was copied, in cells.
+    pub fn size(&self) -> [i32; 3] {
+        self.size
+    }
+}
+
 /// What moving a selection did.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct MoveReport {
@@ -213,6 +247,9 @@ pub struct Editor {
     /// Voxels held for a transform, if any. Not part of the document: it is
     /// never saved, and it does not survive an undo — see [`Editor::undo`].
     pub selection: Option<Selection>,
+    /// Voxels lifted for a paste, if any. Also not part of the document, but
+    /// unlike the selection it *does* survive undo — see [`Clipboard`].
+    pub clipboard: Option<Clipboard>,
     /// Watching somebody else's document rather than holding one.
     ///
     /// `voxeler attach` sets it. The model belongs to a running `voxeler mcp`,
@@ -245,6 +282,7 @@ impl Editor {
             show_grid: true,
             show_help: false,
             selection: None,
+            clipboard: None,
             viewing: false,
             slice: None,
             mesh: FaceMesh::default(),
@@ -839,6 +877,116 @@ impl Editor {
             out[c] = anchor_c + dc;
             out
         })
+    }
+
+    /// Lift the selected voxels into the clipboard, leaving the model alone.
+    pub fn copy_selection(&mut self) -> Result<usize, String> {
+        let Some(selection) = self.selection.as_ref() else {
+            return Err(no_selection());
+        };
+        let Some((lo, hi)) = selection.bounds() else {
+            return Err(no_selection());
+        };
+        let layer = selection.layer();
+        let cells: Vec<([i32; 3], u8)> = selection
+            .cells()
+            .map(|c| {
+                (
+                    [c[0] - lo[0], c[1] - lo[1], c[2] - lo[2]],
+                    self.model.get_in(layer, c[0], c[1], c[2]),
+                )
+            })
+            .collect();
+        let n = cells.len();
+        self.clipboard = Some(Clipboard {
+            cells,
+            size: [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1],
+        });
+        self.status = format!("copied {n} voxels");
+        Ok(n)
+    }
+
+    /// Copy, then clear what was copied — one undo step for the clearing.
+    pub fn cut_selection(&mut self) -> Result<usize, String> {
+        let n = self.copy_selection()?;
+        let selection = self.selection.clone().ok_or_else(no_selection)?;
+        let layer = selection.layer();
+        let writes: Vec<CellWrite> = selection
+            .cells()
+            .map(|pos| CellWrite {
+                layer,
+                pos,
+                color: 0,
+            })
+            .collect();
+        self.apply_writes("cut selection", writes, |_, _| {});
+        // Nothing is there any more, so nothing is selected. The clipboard is
+        // what holds the voxels now.
+        self.selection = None;
+        self.status = format!("cut {n} voxels");
+        Ok(n)
+    }
+
+    /// Write the clipboard into the **active layer**, its low corner at `at`.
+    ///
+    /// The active layer rather than the one it came from: that is what makes
+    /// copying between layers a paste instead of a separate tool, and it is the
+    /// rule every other tool follows.
+    ///
+    /// What lands is left selected, so a paste can be moved, turned or pasted
+    /// again without saying where it went.
+    pub fn paste(&mut self, at: [i32; 3]) -> Result<MoveReport, String> {
+        let Some(clipboard) = self.clipboard.clone() else {
+            return Err("the clipboard is empty; copy or cut something first".into());
+        };
+        let layer = self.model.active_layer();
+
+        let mut report = MoveReport::default();
+        let mut writes = Vec::with_capacity(clipboard.cells.len());
+        let mut landed = Vec::with_capacity(clipboard.cells.len());
+        for (offset, color) in &clipboard.cells {
+            let to = [at[0] + offset[0], at[1] + offset[1], at[2] + offset[2]];
+            if !self.model.contains(to[0], to[1], to[2]) {
+                report.dropped += 1;
+                continue;
+            }
+            report.moved += 1;
+            if self.model.get_in(layer, to[0], to[1], to[2]) != 0 {
+                report.overwritten += 1;
+            }
+            landed.push(to);
+            writes.push(CellWrite {
+                layer,
+                pos: to,
+                color: *color,
+            });
+        }
+
+        self.apply_writes("paste", writes, |_, _| {});
+        self.selection = (!landed.is_empty()).then(|| Selection::new(layer, landed));
+        self.status = format!(
+            "pasted {} voxels{}",
+            report.moved,
+            if report.dropped > 0 {
+                format!(", {} lost off the edge", report.dropped)
+            } else {
+                String::new()
+            }
+        );
+        Ok(report)
+    }
+
+    /// Copy the selection and paste it at an offset, in one step.
+    ///
+    /// The common case — a second wheel, a mirrored limb — without having to
+    /// name the corner the original happened to sit at. The copy lands
+    /// selected, so `duplicate` then `flip` is the whole of a mirrored pair.
+    pub fn duplicate_selection(&mut self, delta: [i32; 3]) -> Result<MoveReport, String> {
+        let Some((lo, _)) = self.selection.as_ref().and_then(|s| s.bounds()) else {
+            return Err(no_selection());
+        };
+        self.copy_selection()?;
+        self.paste([lo[0] + delta[0], lo[1] + delta[1], lo[2] + delta[2]])
     }
 
     /// Apply a cell mapping to the selection, as one undo step.
@@ -2388,6 +2536,144 @@ mod tests {
         e.move_selection([0, 4, 0]).unwrap();
         assert_eq!(e.model().get_in(0, 3, 4, 3), 4, "moved on layer 0");
         assert_eq!(e.model().layers()[1].filled_count(), 0, "layer 1 untouched");
+    }
+
+    /// Copy then paste at the corner it came from is exactly what was copied —
+    /// which is what the relative-to-the-low-corner storage is for.
+    #[test]
+    fn pasting_where_it_came_from_puts_back_what_was_copied() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 4..7 {
+            e.model.set(x, 2, 3, (x + 20) as u8);
+        }
+        e.select_box([0, 0, 0], [15, 15, 15]);
+        let before: Vec<_> = e.model().iter_filled().collect();
+
+        assert_eq!(e.copy_selection().unwrap(), 3);
+        assert_eq!(e.clipboard.as_ref().unwrap().size(), [3, 1, 1]);
+        e.paste([4, 2, 3]).unwrap();
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn a_paste_lands_selected_so_it_can_be_moved_at_once() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        e.model.set(1, 1, 1, 7);
+        e.select_box([1, 1, 1], [1, 1, 1]);
+        e.copy_selection().unwrap();
+
+        let r = e.paste([8, 8, 8]).unwrap();
+        assert_eq!(r.moved, 1);
+        assert_eq!(e.model().filled_count(), 2, "the original is still there");
+        assert_eq!(
+            e.selection.as_ref().unwrap().bounds(),
+            Some(([8, 8, 8], [8, 8, 8])),
+            "what landed is what is selected"
+        );
+
+        // So the chain works without saying where anything went.
+        e.move_selection([0, 1, 0]).unwrap();
+        assert_eq!(e.model().get(8, 9, 8), 7);
+        assert_eq!(e.model().get(1, 1, 1), 7);
+    }
+
+    /// A paste goes to the active layer, not the one the voxels came from —
+    /// which is what makes copying between layers a paste rather than a
+    /// separate tool.
+    #[test]
+    fn a_paste_writes_to_the_active_layer() {
+        let mut e = editor_with_floor();
+        e.select_box([0, 0, 0], [7, 0, 7]);
+        e.copy_selection().unwrap();
+
+        e.add_layer();
+        e.paste([0, 4, 0]).unwrap();
+        assert_eq!(e.model().layers()[1].filled_count(), 64, "landed on the new layer");
+        assert_eq!(e.model().layers()[0].filled_count(), 64, "the floor is untouched");
+        assert_eq!(e.selection.as_ref().unwrap().layer(), 1);
+    }
+
+    #[test]
+    fn a_cut_takes_the_voxels_and_leaves_nothing_selected() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 2..5 {
+            e.model.set(x, 1, 1, 4);
+        }
+        e.select_box([2, 1, 1], [4, 1, 1]);
+
+        assert_eq!(e.cut_selection().unwrap(), 3);
+        assert_eq!(e.model().filled_count(), 0);
+        assert!(e.selection.is_none(), "nothing is there to be selected");
+        assert_eq!(e.clipboard.as_ref().unwrap().len(), 3);
+
+        e.paste([8, 1, 1]).unwrap();
+        assert_eq!(e.model().filled_count(), 3);
+        assert_eq!(e.model().get(8, 1, 1), 4);
+    }
+
+    /// The clipboard is not the document: undo puts the *model* back, and a
+    /// clipboard that emptied itself when you undid the copy would be a
+    /// surprise rather than a rule.
+    #[test]
+    fn the_clipboard_survives_undo_though_the_selection_does_not() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        e.model.set(1, 1, 1, 7);
+        e.select_box([1, 1, 1], [1, 1, 1]);
+        e.copy_selection().unwrap();
+        e.paste([5, 5, 5]).unwrap();
+
+        e.undo();
+        assert_eq!(e.model().get(5, 5, 5), 0, "the paste was undone");
+        assert!(e.selection.is_none());
+        assert_eq!(e.clipboard.as_ref().unwrap().len(), 1, "the clipboard stands");
+        // And it can be pasted again.
+        e.paste([5, 5, 5]).unwrap();
+        assert_eq!(e.model().get(5, 5, 5), 7);
+    }
+
+    /// The mirrored-pair case the tool exists for: duplicate, then flip, with
+    /// no coordinate arithmetic in between.
+    #[test]
+    fn duplicate_then_flip_is_a_mirrored_pair() {
+        let mut e = Editor::new(VoxelModel::new(24, 24, 24), PathBuf::from("t.vxm"));
+        // An asymmetric "arm": three cells with a bend.
+        for cell in [[4, 4, 4], [5, 4, 4], [6, 4, 4], [6, 5, 4]] {
+            e.model.set(cell[0], cell[1], cell[2], 9);
+        }
+        e.select_connected([4, 4, 4], None);
+
+        e.duplicate_selection([0, 0, 6]).unwrap();
+        assert_eq!(e.model().filled_count(), 8, "two arms now");
+        e.flip_selection(0).unwrap();
+
+        // The copy is mirrored: its bend is at the other end.
+        assert_eq!(e.model().get(6, 5, 4), 9, "the original still bends at +x");
+        assert_eq!(e.model().get(4, 5, 10), 9, "the copy bends at -x");
+        assert_eq!(e.model().filled_count(), 8);
+    }
+
+    #[test]
+    fn pasting_off_the_edge_keeps_what_fits_and_counts_the_rest() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        for x in 0..4 {
+            e.model.set(x, 1, 1, 4);
+        }
+        e.select_box([0, 1, 1], [3, 1, 1]);
+        e.copy_selection().unwrap();
+
+        let r = e.paste([6, 1, 1]).unwrap();
+        assert_eq!(r.moved, 2);
+        assert_eq!(r.dropped, 2);
+    }
+
+    #[test]
+    fn copying_and_pasting_need_something_to_work_with() {
+        let mut e = editor_with_floor();
+        assert!(e.copy_selection().is_err());
+        assert!(e.cut_selection().is_err());
+        assert!(e.duplicate_selection([1, 0, 0]).is_err());
+        assert!(e.paste([0, 0, 0]).is_err(), "the clipboard is empty");
+        assert_eq!(e.undo_depth(), 0);
     }
 
     fn filled(e: &Editor) -> std::collections::BTreeSet<[i32; 3]> {

@@ -5,6 +5,10 @@ description: Create, edit, and inspect layered voxel models with the rs-voxeler 
 
 # Voxel modeling with rs-voxeler
 
+For *changing* a model that already exists — moving a part, mirroring a limb,
+turning something — see `voxeler-editing`, which covers selections and
+transforms. This skill is for building one.
+
 Use the live voxeler MCP editor to build an editable `.vxm` and verify its
 appearance. Prefer batch edits and shape tools over writing a model file with a
 separate generator: the MCP workflow keeps the user's live view and undo history
