@@ -355,6 +355,11 @@ impl App {
                 KeyCode::KeyE => self.editor.export_vox(),
                 KeyCode::KeyR => self.editor.reload(),
                 KeyCode::KeyN => self.editor.clear(),
+                // Behind a modifier: it doubles the whole document, and a bare
+                // key next to the tool row is one to press by accident.
+                KeyCode::KeyD => {
+                    let _ = self.editor.subdivide(2);
+                }
                 KeyCode::KeyQ => event_loop.exit(),
                 _ => return,
             }

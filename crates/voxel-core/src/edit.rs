@@ -15,7 +15,7 @@
 //! meaning what they meant. It costs a copy of the model per structural step,
 //! and structural steps happen a handful of times in a session.
 
-use crate::model::{Layer, VoxelModel};
+use crate::model::{Snapshot, VoxelModel};
 use crate::Rgb8;
 
 /// One cell's change, on one layer.
@@ -36,13 +36,6 @@ pub struct EditBatch {
     pub edits: Vec<Edit>,
 }
 
-/// The whole layer stack at one moment, and which layer was being edited.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct LayerState {
-    pub layers: Vec<Layer>,
-    pub active: usize,
-}
-
 /// One undoable step: cells, or the shape of the stack they live in.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
@@ -54,8 +47,8 @@ pub enum Change {
     },
     Layers {
         label: &'static str,
-        before: LayerState,
-        after: LayerState,
+        before: Snapshot,
+        after: Snapshot,
     },
 }
 
@@ -276,13 +269,12 @@ impl History {
     }
 }
 
-fn snapshot(model: &VoxelModel) -> LayerState {
-    let (layers, active) = model.layer_snapshot();
-    LayerState { layers, active }
+fn snapshot(model: &VoxelModel) -> Snapshot {
+    model.layer_snapshot()
 }
 
-fn restore(model: &mut VoxelModel, state: &LayerState) {
-    model.restore_layers((state.layers.clone(), state.active));
+fn restore(model: &mut VoxelModel, state: &Snapshot) {
+    model.restore_layers(state.clone());
 }
 
 #[cfg(test)]

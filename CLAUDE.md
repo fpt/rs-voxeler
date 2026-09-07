@@ -103,6 +103,30 @@ Three rules, all in `Editor::continue_stroke` and its neighbours:
   the stroke was empty. A tool acting only on the active layer is a rule; a tool
   that ignores you with no explanation is a bug report.
 
+### Subdividing, and what a snapshot has to hold
+
+`VoxelModel::subdivide` scales the scene so every voxel becomes `factor`³ of
+them: the way a coarse shape you are happy with becomes one with room for
+detail. Each layer's box scales with its contents, so the cost is `factor`³ of
+what was allocated rather than of the scene's range — a 16³ scene of 525 cells
+becomes a 32³ scene of 4 200, not of 32 768.
+
+It is a **plain replication, not a smoothing**. A subdivide that rounded corners
+would be a different model rather than a finer one, and you could not carve
+against it and get back what you drew.
+
+It also forced a fix. `layer_snapshot` recorded the layers and the active index
+but **not the scene's size**, which was fine while every structural change left
+that alone. Undoing a subdivide would have restored layers at twice their
+coordinates into a scene half the size — every box outside it, every voxel gone
+from the composite. `Snapshot` now carries the size, and is the one type both
+`model` and `edit` use for it.
+
+The camera and the slice scale with it too. Neither is part of the document, but
+both are measured in voxels: leaving the camera would make the model appear to
+leap towards you, and leaving the slice would cut through a different part of
+the shape than the one on screen.
+
 ### Structural changes store the stack whole
 
 `History` holds a `Change`, which is either cells or layers. A cell edit names

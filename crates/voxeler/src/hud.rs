@@ -448,6 +448,7 @@ const HELP: &[&str] = &[
     "CTRL+Z       UNDO      CTRL+Y  REDO",
     "CTRL+S       SAVE      CTRL+E  EXPORT VOX",
     "CTRL+R       RELOAD    CTRL+N  CLEAR",
+    "CTRL+D       SUBDIVIDE x2",
     "CTRL+Q       QUIT",
     "",
     "L SHIFT+L    NEXT / PREVIOUS LAYER",
