@@ -74,7 +74,7 @@ pub fn draw_mesh(
     palette: &Palette,
     offset: Vec3,
 ) {
-    for quad in &mesh.quads {
+    for quad in mesh.quads() {
         let normal = quad.normal();
         // Back-face cull in world space, before any matrix work. It is one dot
         // product and it removes about half the quads — cheaper than projecting
