@@ -15,10 +15,14 @@ connected to the work.
 - Discover the available `mcp__voxeler__*` tools and call `describe_model` before
   editing. Read scene size, active layer, existing layers and `unsaved` state.
   Tool schemas from the running server take precedence over examples here.
-- For existing assets, use `list_models` to resolve root-relative paths. It
-  searches recursively by default; `directory` and `recursive` narrow it.
-  `describe_model.path` currently reports only the basename, so retain the full
-  relative path returned by listing or used to open the document.
+- Read the allowed directories from the server's initialization instructions
+  or `list_models.roots`. Absolute paths may name files inside any of them;
+  relative paths resolve against the first directory only.
+- For existing assets, use `list_models` and prefer each file's `absolute`
+  field, especially when different directories contain the same basename. It
+  searches all allowed directories recursively by default; `directory` and
+  `recursive` narrow it. `describe_model.path` is only a display basename, so
+  retain the resolved path used to open the document.
 - `new_model` and `open_model` replace the current document and undo history.
   Preserve unrelated unsaved work before switching documents. A newly created
   model contains one seed voxel at `[size/2, size/2, size/2]`; erase it when it
@@ -107,9 +111,12 @@ Bounds are hidden by default; use `show_bounds: true` to inspect extents.
 obscures a rounded white surface. Preview lighting does not change the palette.
 
 Save `.vxm` to preserve layers. `.vox` is a flattened export. `new_model` alone
-writes nothing, and a preview is not a model save. Use explicit root-relative
-paths when saving under `models/`; parent directories must already exist.
-File tools reject absolute paths, `..` and symlink components. The windowed SSE
+writes nothing, and a preview is not a model save. Use absolute paths inside an
+allowed directory or paths relative to the first directory; for example,
+`models/character.vxm` refers to `models/` beneath that first directory. Parent
+directories must already exist. Returned save/preview `path` fields are reusable:
+relative to the first directory, absolute otherwise. File tools reject paths
+outside the allowed directories, `..` and symlink components. The windowed SSE
 server has no file access: return screenshots there and explain when the user
 must save the document themselves.
 

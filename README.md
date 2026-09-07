@@ -187,8 +187,11 @@ reach; they are the only part of the filesystem it can see:
 
 ```json
 { "mcpServers": { "voxeler": { "command": "voxeler",
-                               "args": ["mcp", "~/models", "~/Documents/voxels"] } } }
+                               "args": ["mcp", "/path/to/models", "/path/to/voxels"] } } }
 ```
+
+Replace those paths with existing absolute directories. JSON arguments are passed
+directly to the process: `~` and environment variables are not shell-expanded.
 
 **Name them.** A desktop MCP client spawns its servers with whatever working
 directory the *app* happened to have, so without an argument neither you nor the
@@ -247,18 +250,16 @@ and it puts the camera back where it found it.
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
 
-`screenshot` is the one that shows rather than counts — a voxel total cannot
-tell you the arm is on backwards. It takes `yaw` and `pitch` in degrees and
-frames the model's contents, so it fills the picture whatever the volume's size,
-and it puts the camera back where it found it.
+The file tools accept absolute paths inside any allowed directory, or paths
+relative to the first directory. They refuse paths outside those directories,
+`..` components and symlinks. Under `--mcp`, where you opened the document
+yourself, file access is unavailable.
 
-One tool call is **one undo step**, so `undo` takes back a whole fill however
-many voxels it moved. The history is shared with whoever has the window.
-
-The file tools resolve paths **inside the root and refuse to leave it** — no
-`..`, no absolute paths, checked before anything touches the disk. Under
-`--mcp`, where you opened the document yourself, the root reaches nothing at
-all and they are refused outright.
+Returned `path` fields from `list_models`, `save_model` and `screenshot` follow
+the same rule: relative to the first directory, absolute otherwise. They can be
+passed back to file tools without changing which file they name. `list_models`
+also returns an `absolute` field for each file; prefer it when selecting assets
+across multiple directories. `describe_model.path` is only a display basename.
 
 Coordinates are model space — `0..size` on each axis, +Y up, the same
 coordinates the file stores.
@@ -342,15 +343,16 @@ editor camera's angles are used. Neither successful nor failed PNG output change
 the user's camera, grid setting, undo history or model save state.
 
 An optional `path` writes the same PNG returned in the image block. Its parent
-directory must exist, its extension must be `.png`, and it is confined to the
-server root. PNG file output is unavailable in the windowed SSE server, just like
+directory must exist, its extension must be `.png`, and it must be inside an
+allowed directory. PNG file output is unavailable in the windowed SSE server, just like
 model file output; returning an image still works. `--thumbnail` also frames the
 model's contents, hides bounds and uses the softer preview lighting.
 
-`list_models` searches recursively by default and sorts paths. For one directory
-only, use `{"directory":"models","recursive":false}`. Directory names are
-relative to the server root. File tools reject symlink paths, and recursive
-listing skips symlink files and directories.
+`list_models` searches all allowed directories recursively by default and sorts
+paths. For one directory only, use `{"directory":"models","recursive":false}`.
+Directory names may be absolute inside an allowed directory, or relative to the
+first. File tools reject symlink paths, and recursive listing skips symlink files
+and directories.
 
 ## Where this is going
 

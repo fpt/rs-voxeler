@@ -209,10 +209,11 @@ impl Roots {
         Ok(())
     }
 
-    /// A path back in the shortest form that still names it: relative to a root
-    /// when it is under one, and absolute otherwise.
+    /// A reusable path: relative to the first root, and absolute otherwise.
+    /// Relative inputs always resolve against the first root, so shortening a
+    /// secondary-root path against that root would point at a different file.
     fn relative(&self, path: &Path) -> String {
-        for root in &self.0 {
+        if let Some(root) = self.primary() {
             if let Ok(rest) = path.strip_prefix(root) {
                 return rest.display().to_string();
             }
@@ -414,7 +415,9 @@ pub fn list() -> Vec<ToolInfo> {
         ToolInfo {
             name: "list_models",
             description:
-                "List model files beneath the server root, sorted by relative path. Searches \
+                "List model files beneath the server directories, sorted by reusable path. \
+                 Without directory, searches every root. Paths are relative to the first \
+                 root or absolute; absolute is also returned for each file. Searches \
                  subdirectories by default; symlinks are never followed.",
             input_schema: json!({"type": "object", "properties": {
                 "directory": {"type": "string", "default": "."},
@@ -826,9 +829,8 @@ fn dispatch(
                         continue;
                     }
                     rows.push(json!({
-                        // Both forms: the short one to read, and the absolute
-                        // one to hand back without having to know which root a
-                        // relative path is measured from.
+                        // Both forms are reusable: `path` is relative only to
+                        // the primary root, and `absolute` is always explicit.
                         "path": root.relative(&path),
                         "absolute": path.display().to_string(),
                         "bytes": entry.metadata().map_err(|e| e.to_string())?.len(),
@@ -1822,8 +1824,62 @@ mod tests {
             .map(|m| m["path"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"one.vxm"), "{names:?}");
-        assert!(names.contains(&"two.vxm"), "{names:?}");
+        let second = b.canonicalize().unwrap().join("two.vxm");
+        assert!(names.contains(&second.to_str().unwrap()), "{names:?}");
         assert_eq!(j["roots"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reported_save_and_listing_paths_reopen_the_correct_root() {
+        let a = temp_root("reported-path-a");
+        let b = temp_root("reported-path-b");
+        let root = Roots::new([a.clone(), b.clone()]);
+        let mut e = editor();
+        for (dir, size) in [(&a, 8), (&b, 16)] {
+            let path = dir.canonicalize().unwrap().join("same.vxm");
+            let r = run_in(&mut e, &root, "new_model", json!({"path": path, "size": size}));
+            assert_eq!(r.is_error, None);
+            for args in [json!({"path": path}), json!({})] {
+                let saved = run_in(&mut e, &root, "save_model", args);
+                assert_eq!(saved.is_error, None);
+                let saved = json_of(&saved);
+                assert_eq!(root.resolve(saved["path"].as_str().unwrap()).unwrap(), path);
+                let opened = run_in(&mut e, &root, "open_model", json!({"path": saved["path"]}));
+                assert_eq!(opened.is_error, None);
+                assert_eq!(e.model().size(), [size; 3]);
+            }
+        }
+        let listing = json_of(&run_in(&mut e, &root, "list_models", json!({})));
+        let rows = listing["models"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0]["path"], rows[1]["path"]);
+        for row in rows {
+            let path = root.resolve(row["path"].as_str().unwrap()).unwrap();
+            assert_eq!(path, PathBuf::from(row["absolute"].as_str().unwrap()));
+            let opened = run_in(&mut e, &root, "open_model", json!({"path": row["path"]}));
+            assert_eq!(opened.is_error, None);
+            let size = if path.starts_with(a.canonicalize().unwrap()) { 8 } else { 16 };
+            assert_eq!(e.model().size(), [size; 3]);
+        }
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn screenshot_reports_a_reusable_path_in_the_secondary_root() {
+        let a = temp_root("reported-png-a");
+        let b = temp_root("reported-png-b");
+        let root = Roots::new([a.clone(), b.clone()]);
+        let mut e = editor();
+        let path = b.canonicalize().unwrap().join("preview.png");
+        let r = run_in(&mut e, &root, "screenshot", json!({"path": path, "width": 64, "height": 64}));
+        assert_eq!(r.is_error, None);
+        let report = json_of(&r);
+        assert_eq!(root.resolve(report["path"].as_str().unwrap()).unwrap(), path);
+        assert_eq!(base64(&std::fs::read(&path).unwrap()), image_of(&r));
+        assert!(!a.join("preview.png").exists());
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
     }
 
     /// `a/../b` stays inside and would survive a resolve-then-check, but the

@@ -188,7 +188,9 @@ file name lands. Reported from use. Three things follow:
 - The roots are named in the `initialize` **instructions**, so the agent is told
   where it may write before it tries rather than after a refused save.
 - A relative path resolves against the *first* root; an absolute one may be in
-  any of them.
+  any of them. Returned file paths follow that same rule, so a saved path can
+  be passed back without accidentally selecting a same-named file in another
+  root. `list_models` also includes each file's absolute path.
 - `voxeler mcp` with no argument refuses to root at the filesystem root, which
   is what a desktop client's working directory often is. Explicit is still
   allowed — `voxeler mcp /` means what it says.
@@ -494,9 +496,11 @@ from the one that was asked for.
   before file I/O, including failure paths. Presets view from +Z (front) or +X
   (right), and explicit angles override the preset.
 - **Recursive discovery does not follow links.** `list_models` defaults to a
-  recursive walk, accepts a root-relative directory and sorts the results.
-  `Root::resolve` rejects symlink components as well as absolute/parent paths;
-  PNG exports use that same confinement and require a `.png` extension.
+  recursive walk across all roots, accepts a directory relative to the first
+  root or absolute inside any allowed root, and sorts the results.
+  `Roots::resolve` rejects paths outside the allowed roots, symlink components
+  and parent components. PNG exports use that same confinement and require a
+  `.png` extension.
 
 - **Out of bounds reads as air.** `VoxelModel::get` returns 0 outside the grid,
   and takes `i32` rather than `u16`, because every caller arrives from
