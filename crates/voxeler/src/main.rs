@@ -12,15 +12,30 @@
 //! `--thumbnail OUT.png` renders one framed view and exits without opening a
 //! window. It is how a model gets an icon, and how the renderer can be checked
 //! on a machine that has no display at all.
+//!
+//! `--mcp [PORT]` additionally serves the editor to an AI agent over MCP's
+//! SSE transport, on loopback. The window still opens — that is the point of
+//! choosing SSE over stdio: the agent builds and the user watches.
 
 mod app;
 mod editor;
+mod mcp;
 mod hud;
 mod view;
 
 use std::path::PathBuf;
 
 use editor::{open_or_create, DEFAULT_SIZE};
+
+/// Reported to an MCP client in `initialize`, so an agent's transcript records
+/// which editor it was talking to.
+pub const NAME: &str = "voxeler";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The default MCP port. Unassigned by IANA and unlikely to collide with a
+/// development server, which is the whole of the requirement for a loopback
+/// socket a person types into a config file once.
+pub const DEFAULT_MCP_PORT: u16 = 8730;
 
 fn main() {
     match run() {
@@ -48,8 +63,16 @@ fn run() -> Result<(), String> {
     );
 
     match args.thumbnail {
+        // A thumbnail exits as soon as it has written its PNG, so there would
+        // be nobody to serve and nothing to watch.
+        Some(out) if args.mcp.is_some() => {
+            let _ = out;
+            Err("--mcp and --thumbnail are opposites: one opens a window to watch, \
+                 the other exits without one"
+                .into())
+        }
         Some(out) => thumbnail(model, args.path, &out, args.width, args.height),
-        None => app::launch(model, args.path),
+        None => app::launch(model, args.path, args.mcp),
     }
 }
 
@@ -86,6 +109,8 @@ ARGS:
 OPTIONS:
     --size N            edge length for a new model (default: 32, max: 256)
                         ignored when FILE exists -- a saved model keeps its own
+    --mcp [PORT]        also serve the editor to an AI agent over MCP/SSE on
+                        127.0.0.1:PORT (default: 8730). The window still opens
     --thumbnail OUT     render one view to OUT.png and exit, no window
     --width N           thumbnail width  (default: 512)
     --height N          thumbnail height (default: 512)
@@ -96,6 +121,9 @@ struct Args {
     path: PathBuf,
     size: u16,
     help: bool,
+    /// `Some(port)` when `--mcp` was given. A port of 0 asks the OS for a free
+    /// one, which is what the tests use.
+    mcp: Option<u16>,
     thumbnail: Option<PathBuf>,
     width: u32,
     height: u32,
@@ -109,6 +137,7 @@ impl Args {
             path: PathBuf::from("model.vxm"),
             size: DEFAULT_SIZE,
             help: false,
+            mcp: None,
             thumbnail: None,
             width: 512,
             height: 512,
@@ -132,6 +161,19 @@ impl Args {
                             voxel_core::MAX_DIM
                         ));
                     }
+                }
+                // The port is optional, so it is only consumed when the next
+                // argument actually looks like one — `--mcp model.vxm` means
+                // the default port and that file, not a parse error.
+                "--mcp" => {
+                    let port = match args.peek().and_then(|a| a.parse::<u16>().ok()) {
+                        Some(p) => {
+                            args.next();
+                            p
+                        }
+                        None => DEFAULT_MCP_PORT,
+                    };
+                    out.mcp = Some(port);
                 }
                 "--thumbnail" => {
                     out.thumbnail = Some(PathBuf::from(

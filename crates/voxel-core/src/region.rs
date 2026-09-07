@@ -136,6 +136,16 @@ pub struct Reach {
     /// Layers at or above this Y are hidden by a slice. `u16::MAX` when the
     /// model is whole.
     pub y_limit: u16,
+    /// Which grid the region is read from: `None` for the composite — what is
+    /// on screen, which is what a click selects — or `Some(layer)` for that
+    /// layer's own grid.
+    ///
+    /// A caller that writes to one layer and grows its region on the composite
+    /// can pick up cells that layer does not own, and writing those makes a
+    /// copy of another layer's shape rather than changing it. A click is
+    /// allowed that, because the user can see both layers and undo. A caller
+    /// naming coordinates sight-unseen should ask the layer it is writing to.
+    pub layer: Option<usize>,
 }
 
 /// Every cell the span covers, starting with the seed.
@@ -154,13 +164,21 @@ pub fn cells(model: &VoxelModel, span: Span, reach: Reach) -> Vec<[i32; 3]> {
     }
 }
 
-/// The index at a cell as the *screen* sees it: a layer a slice hides reads as
-/// air, so a cross-section's top is a face like any other.
-fn visible(model: &VoxelModel, p: [i32; 3], y_limit: u16) -> u8 {
-    if p[1] >= y_limit as i32 {
+/// The index at a cell, on whichever grid this reach reads.
+fn at(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> u8 {
+    match reach.layer {
+        Some(l) => model.get_in(l, p[0], p[1], p[2]),
+        None => model.get(p[0], p[1], p[2]),
+    }
+}
+
+/// The same, as the *screen* sees it: a layer a slice hides reads as air, so a
+/// cross-section's top is a face like any other.
+fn visible(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> u8 {
+    if p[1] >= reach.y_limit as i32 {
         0
     } else {
-        model.get(p[0], p[1], p[2])
+        at(model, reach, p)
     }
 }
 
@@ -172,7 +190,7 @@ fn visible(model: &VoxelModel, p: [i32; 3], y_limit: u16) -> u8 {
 fn joins(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
     model.contains(p[0], p[1], p[2])
         && p[1] < reach.y_limit as i32
-        && model.get(p[0], p[1], p[2]) == reach.matches
+        && at(model, reach, p) == reach.matches
 }
 
 /// Whether `p` presents the same face the click landed on.
@@ -187,10 +205,9 @@ fn joins(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
 fn on_face(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
     let n = reach.face.normal();
     if reach.matches == 0 {
-        reach.grounded
-            || visible(model, [p[0] - n[0], p[1] - n[1], p[2] - n[2]], reach.y_limit) != 0
+        reach.grounded || visible(model, reach, [p[0] - n[0], p[1] - n[1], p[2] - n[2]]) != 0
     } else {
-        visible(model, [p[0] + n[0], p[1] + n[1], p[2] + n[2]], reach.y_limit) == 0
+        visible(model, reach, [p[0] + n[0], p[1] + n[1], p[2] + n[2]]) == 0
     }
 }
 
@@ -307,6 +324,7 @@ mod tests {
             brush: Brush::default(),
             grounded: false,
             y_limit: u16::MAX,
+            layer: None,
         }
     }
 
@@ -490,6 +508,31 @@ mod tests {
         let got = cells(&m, Span::Voxel, r);
         assert_eq!(got.len(), 8, "one octant of the 3x3x3");
         assert!(got.iter().all(|p| p.iter().all(|c| (0..2).contains(c))));
+    }
+
+    /// Reading one layer's own grid rather than the composite: the difference
+    /// between changing a shape and copying it onto the layer above.
+    #[test]
+    fn a_region_can_be_grown_on_one_layers_own_grid() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        for x in 0..4 {
+            m.set(x, 0, 0, 1);
+        }
+        let top = m.add_layer(0, "cover").unwrap();
+        m.set_active_layer(top);
+        m.set(2, 0, 0, 1);
+
+        // Along X, so the run is the row rather than one cell of a column.
+        // On the composite it is the whole four-cell row.
+        let mut r = reach([0, 0, 0], Face::PosX, 1);
+        assert_eq!(cells(&m, Span::Axis, r).len(), 4);
+
+        // On the upper layer's own grid there is nothing at the seed at all.
+        r.layer = Some(top);
+        assert!(cells(&m, Span::Axis, r).is_empty());
+        // And seeded where that layer does hold something, the run is its own.
+        r.seed = [2, 0, 0];
+        assert_eq!(cells(&m, Span::Axis, r), vec![[2, 0, 0]]);
     }
 
     /// A click on something that is not what the span is made of yields

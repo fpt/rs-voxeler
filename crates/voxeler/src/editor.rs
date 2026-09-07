@@ -423,6 +423,10 @@ impl Editor {
             grounded: target.is_ground(),
             // An edit must not reach a layer the slice has taken off screen.
             y_limit: self.slice.unwrap_or(u16::MAX),
+            // The composite: a click selects what the user can see, and they
+            // can see which layers are stacked and undo if it was not what
+            // they meant. See `write_cells`.
+            layer: None,
         };
         // The region is grown over the *composite*: you point at what you can
         // see, so that is what a fill selects. What it writes is then narrowed
@@ -584,6 +588,17 @@ impl Editor {
         // up sharing a name after a reorder, which is untidy but honest — the
         // alternative is renaming layers behind the user's back.
         let name = format!("LAYER {}", self.model.layer_count() + 1);
+        self.insert_layer(name);
+    }
+
+    /// The same, with a name the caller chose — what an agent driving the
+    /// editor over MCP wants, having a purpose in mind that "LAYER 3" does not
+    /// record.
+    pub fn add_named_layer(&mut self, name: &str) {
+        self.insert_layer(name.to_string());
+    }
+
+    fn insert_layer(&mut self, name: String) {
         let mut added = None;
         let changed = self.history.restructure(&mut self.model, "add layer", |model| {
             added = model.add_layer(model.active_layer(), name);
@@ -638,6 +653,61 @@ impl Editor {
         }
     }
 
+    /// Show or hide a layer by index. Ignores an index that is not there — a
+    /// caller naming a layer that does not exist has already been told so.
+    pub fn set_layer_visible(&mut self, i: usize, visible: bool) {
+        if i >= self.model.layer_count() {
+            return;
+        }
+        self.model.set_layer_visible(i, visible);
+        self.dirty = true;
+        self.invalidate_mesh();
+        self.status = format!(
+            "{} {}",
+            self.layer_name(i),
+            if visible { "shown" } else { "hidden" }
+        );
+    }
+
+    /// Write `color` into a set of cells on the active layer, as one undo step,
+    /// reporting each cell's before and after to `observe`.
+    ///
+    /// The entry point for an edit that did not come from a click: no ray, no
+    /// span, no mirror — a caller that already knows which cells it means. One
+    /// undo step because the user shares this history, and an agent that filled
+    /// a box should cost them one `ctrl+Z` rather than five hundred.
+    ///
+    /// `cells` is a closure over the model so a caller can choose against the
+    /// grid it is about to change — a paint wants the solid cells, a fill wants
+    /// a flood — without this method knowing which.
+    pub fn apply_batch(
+        &mut self,
+        label: &'static str,
+        color: u8,
+        cells: impl FnOnce(&VoxelModel, usize) -> Vec<[i32; 3]>,
+        mut observe: impl FnMut(u8, u8),
+    ) {
+        let layer = self.model.active_layer();
+        let picked = cells(&self.model, layer);
+        let changed = self.history.edit(&mut self.model, label, |model, stroke| {
+            for [x, y, z] in picked {
+                if !model.contains(x, y, z) {
+                    continue;
+                }
+                // Read before the write, and report even when nothing moved:
+                // "you asked for 125 cells and 125 were already that colour" is
+                // an answer, and silence is not.
+                let before = model.get_in(layer, x, y, z);
+                stroke.set_in(model, layer, x, y, z, color);
+                observe(before, color);
+            }
+        });
+        if changed {
+            self.dirty = true;
+        }
+        self.invalidate_mesh();
+    }
+
     /// Show or hide the active layer.
     ///
     /// Not an undo step, though it does dirty the document: visibility is a
@@ -648,14 +718,7 @@ impl Editor {
     pub fn toggle_layer_visible(&mut self) {
         let i = self.model.active_layer();
         let visible = !self.model.layers()[i].visible;
-        self.model.set_layer_visible(i, visible);
-        self.dirty = true;
-        self.invalidate_mesh();
-        self.status = format!(
-            "{} {}",
-            self.layer_name(i),
-            if visible { "shown" } else { "hidden" }
-        );
+        self.set_layer_visible(i, visible);
     }
 
     fn after_structural(&mut self) {
