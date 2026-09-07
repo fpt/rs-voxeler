@@ -27,7 +27,7 @@ cd crates && cargo build --release
 
 ```bash
 voxeler [FILE] [--size N] [--mcp [PORT]]
-voxeler mcp [DIR]                 serve an agent over stdio, headless
+voxeler mcp [DIR...]              serve an agent over stdio, headless
 voxeler attach [DIR]              open a window onto a running `voxeler mcp`
 voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
@@ -176,12 +176,23 @@ symmetrically.
 Two transports, because they answer different questions.
 
 **`voxeler mcp` — stdio, headless.** The agent starts it, so "is the server
-running?" never comes up. It is rooted at a directory, and that is the only part
-of the filesystem its `open`/`save` tools can reach:
+running?" never comes up. Name the directories its `open`/`save` tools may
+reach; they are the only part of the filesystem it can see:
 
 ```json
-{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp", "/path/to/models"] } } }
+{ "mcpServers": { "voxeler": { "command": "voxeler",
+                               "args": ["mcp", "~/models", "~/Documents/voxels"] } } }
 ```
+
+**Name them.** A desktop MCP client spawns its servers with whatever working
+directory the *app* happened to have, so without an argument neither you nor the
+agent can say where a bare file name lands. (If that working directory turns out
+to be the filesystem root, the server refuses to start rather than quietly
+handing an agent every file on the machine.)
+
+The directories are reported back in the server's `initialize` instructions, so
+the agent is told where it may write before it tries. Paths given to the tools
+may be **absolute inside any of them**, or relative to the first.
 
 **`voxeler attach` — a window onto that session.** The stdio server is headless,
 so this is how a person joins and watches the model being built:
@@ -227,10 +238,12 @@ and it puts the camera back where it found it.
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
 
-The file tools resolve paths **inside the root and refuse to leave it** — no
-`..`, no absolute paths, checked before anything touches the disk. Under
-`--mcp`, where you opened the document yourself, the root reaches nothing at
-all and they are refused outright.
+The file tools resolve paths **inside those directories and refuse to leave
+them**. `..` is rejected lexically, before anything touches the disk; an
+absolute path is checked against the directories, and against the *canonical*
+form of it, so a symlink pointing out of one does not get through. Under
+`--mcp`, where you opened the document yourself, they reach nothing at all and
+are refused outright — you opened it, you save it.
 
 Coordinates are model space — `0..size` on each axis, +Y up, the same
 coordinates the file stores.

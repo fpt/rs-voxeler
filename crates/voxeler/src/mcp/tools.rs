@@ -28,20 +28,32 @@ use voxel_core::{Bounds, Face, VoxelModel};
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
 
-/// The directory an agent's file tools are confined to.
+/// The directories an agent's file tools may reach.
 ///
 /// An MCP server is driven by a model reading content nobody vetted, so `open`
-/// and `save` resolve inside one directory and refuse to leave it. The check is
-/// on the *lexical* path — `..` components and absolute paths are rejected
-/// before anything touches the filesystem — because a check made by
-/// canonicalising the result has already followed whatever symlink was there.
-#[derive(Clone, Debug)]
-pub struct Root(Option<PathBuf>);
+/// and `save` resolve inside a set of directories and refuse to leave them.
+///
+/// # Absolute paths are how you say where you mean
+///
+/// A relative path is resolved against the first root, which is fine when you
+/// started the server yourself in the directory you meant. A desktop MCP client
+/// spawns it with whatever working directory the *app* happened to have, and
+/// then nobody — user or agent — can say where "robot.vxm" is going. So an
+/// absolute path is accepted too, checked against the roots rather than
+/// refused, and the roots are named in the server's `initialize` instructions
+/// so the agent is told where it may write before it tries.
+#[derive(Clone, Debug, Default)]
+pub struct Roots(Vec<PathBuf>);
 
-impl Root {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        Self(Some(dir.canonicalize().unwrap_or(dir)))
+impl Roots {
+    /// Every directory the file tools may reach. The first is where a relative
+    /// path lands.
+    pub fn new(dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self(
+            dirs.into_iter()
+                .map(|d| d.canonicalize().unwrap_or(d))
+                .collect(),
+        )
     }
 
     /// No filesystem at all — what the SSE transport uses.
@@ -51,48 +63,78 @@ impl Root {
     /// worked, and one that could open would replace what they were looking at.
     /// Both are the user's to do.
     pub fn none() -> Self {
-        Self(None)
+        Self(Vec::new())
     }
 
-    fn dir(&self) -> Result<&Path, String> {
-        self.0.as_deref().ok_or_else(|| {
-            "this server edits the document the user already has open, and cannot reach \
-             the filesystem. The user saves it."
-                .to_string()
-        })
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn dirs(&self) -> &[PathBuf] {
+        &self.0
+    }
+
+    /// Where a relative path lands, and where a new server's model is named.
+    pub fn primary(&self) -> Option<&Path> {
+        self.0.first().map(PathBuf::as_path)
     }
 
     pub fn display(&self) -> String {
-        match &self.0 {
-            Some(d) => d.display().to_string(),
-            None => "(none)".into(),
+        if self.0.is_empty() {
+            return "(none)".into();
         }
+        self.0
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
-    /// The directory itself. Only a caller that made a real root asks.
-    pub fn path(&self) -> &Path {
-        self.0.as_deref().unwrap_or(Path::new(""))
+    /// What an agent is told at `initialize`, so it knows where it may write
+    /// without having to guess at the server's working directory.
+    pub fn instructions(&self) -> String {
+        if self.0.is_empty() {
+            return "This server edits the document the user already has open. It has no \
+                    access to the filesystem: the user opens and saves."
+                .into();
+        }
+        format!(
+            "Voxel models are read and written under these directories:\n{}\n\nPaths may be \
+             absolute inside one of them, or relative to the first. Call list_models to see \
+             what is there, describe_model for the model being edited.",
+            self.0
+                .iter()
+                .map(|d| format!("  {}", d.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
     }
 
-    /// Resolve a relative path inside the root, or say why not.
+    /// Resolve a path the agent gave, or say why not.
+    ///
+    /// The check is on the *lexical* path — `..` components are rejected before
+    /// anything touches the filesystem — and then, for an absolute path, on the
+    /// canonical form of the deepest part of it that exists. A prefix test on
+    /// the name alone would be satisfied by a symlink inside a root pointing
+    /// anywhere at all.
     pub fn resolve(&self, given: &str) -> Result<PathBuf, String> {
-        let dir = self.dir()?;
-        let path = Path::new(given);
-        if path.is_absolute() {
-            return Err(format!(
-                "{given:?} is an absolute path; name a file inside {} instead",
-                dir.display()
-            ));
+        if self.0.is_empty() {
+            return Err("this server edits the document the user already has open, and cannot \
+                        reach the filesystem. The user saves it."
+                .into());
         }
+        let path = Path::new(given);
         for part in path.components() {
             match part {
-                Component::Normal(_) | Component::CurDir => {}
+                Component::Normal(_) | Component::CurDir | Component::RootDir => {}
+                Component::Prefix(_) if path.is_absolute() => {}
                 // `..` is refused outright rather than resolved and re-checked:
                 // "a/../b" is harmless and "../b" is not, and telling them apart
                 // after the fact is exactly the reasoning that goes wrong.
                 _ => {
                     return Err(format!(
-                        "{given:?} leaves the root; paths may not contain `..` or start at /"
+                        "{given:?} contains `..`; name a path without one, under {}",
+                        self.display()
                     ))
                 }
             }
@@ -100,14 +142,66 @@ impl Root {
         if path.components().next().is_none() {
             return Err("a file name is required".into());
         }
-        Ok(dir.join(path))
+
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            // Unwrapped safely: the empty case returned above.
+            self.0[0].join(path)
+        };
+        if self.contains(&full) {
+            Ok(full)
+        } else {
+            Err(format!(
+                "{given:?} is outside the directories this server may use: {}",
+                self.display()
+            ))
+        }
     }
 
-    /// A path back in the form the agent gave it, for reporting.
-    fn relative(&self, path: &Path) -> String {
-        match &self.0 {
-            Some(dir) => path.strip_prefix(dir).unwrap_or(path).display().to_string(),
-            None => path.display().to_string(),
+    /// Whether a path is inside one of the roots, following symlinks as far as
+    /// the filesystem can.
+    fn contains(&self, path: &Path) -> bool {
+        let real = canonical_enough(path);
+        self.0.iter().any(|root| real.starts_with(root))
+    }
+
+    /// A path back in the shortest form that still names it: relative to a root
+    /// when it is under one, and absolute otherwise.
+    fn label(&self, path: &Path) -> String {
+        for root in &self.0 {
+            if let Ok(rest) = path.strip_prefix(root) {
+                return rest.display().to_string();
+            }
+        }
+        path.display().to_string()
+    }
+}
+
+/// The canonical form of a path that may not exist yet: canonicalize the
+/// deepest ancestor that does, and put the rest back on the end.
+///
+/// `save_model` names a file that is about to be created, so plain
+/// `canonicalize` fails on exactly the case that matters most.
+fn canonical_enough(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut here = path.to_path_buf();
+    loop {
+        if let Ok(real) = here.canonicalize() {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match here.file_name() {
+            Some(name) => {
+                rest.push(name.to_os_string());
+                if !here.pop() {
+                    return path.to_path_buf();
+                }
+            }
+            None => return path.to_path_buf(),
         }
     }
 }
@@ -410,11 +504,11 @@ pub fn list() -> Vec<ToolInfo> {
 /// a bad coordinate is something the agent should read and correct, not a
 /// protocol fault that tears down its session.
 pub fn call(editor: &mut Editor, name: &str, args: &Value) -> CallResult {
-    call_in(editor, &Root::none(), name, args)
+    call_in(editor, &Roots::none(), name, args)
 }
 
 /// The same, with a root the file tools may reach into.
-pub fn call_in(editor: &mut Editor, root: &Root, name: &str, args: &Value) -> CallResult {
+pub fn call_in(editor: &mut Editor, root: &Roots, name: &str, args: &Value) -> CallResult {
     match dispatch(editor, root, name, args) {
         Ok(result) => result,
         Err(message) => CallResult::failure(message),
@@ -423,12 +517,12 @@ pub fn call_in(editor: &mut Editor, root: &Root, name: &str, args: &Value) -> Ca
 
 fn dispatch(
     editor: &mut Editor,
-    root: &Root,
+    root: &Roots,
     name: &str,
     args: &Value,
 ) -> Result<CallResult, String> {
     match name {
-        "describe_model" => Ok(CallResult::text(describe(editor))),
+        "describe_model" => Ok(CallResult::text(describe(editor, root))),
         "put_voxel" => {
             let p = point_in(args, editor.model())?;
             let color = color_arg(editor, args)?;
@@ -629,25 +723,35 @@ fn dispatch(
         }
         "list_models" => {
             let mut rows: Vec<Value> = Vec::new();
-            for entry in std::fs::read_dir(root.dir()?)
-                .map_err(|e| format!("cannot read {}: {e}", root.display()))?
-                .flatten()
-            {
-                let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !ext.eq_ignore_ascii_case("vxm") && !ext.eq_ignore_ascii_case("vox") {
+            if root.is_empty() {
+                return Err(root.resolve("x").unwrap_err());
+            }
+            for dir in root.dirs() {
+                let Ok(entries) = std::fs::read_dir(dir) else {
                     continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if !ext.eq_ignore_ascii_case("vxm") && !ext.eq_ignore_ascii_case("vox") {
+                        continue;
+                    }
+                    rows.push(json!({
+                        // Both forms: the short one to read, and the absolute
+                        // one to hand back without having to know which root a
+                        // relative path is measured from.
+                        "path": root.label(&path),
+                        "absolute": path.display().to_string(),
+                        "bytes": entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    }));
                 }
-                rows.push(json!({
-                    "path": root.relative(&path),
-                    "bytes": entry.metadata().map(|m| m.len()).unwrap_or(0),
-                }));
             }
             Ok(CallResult::text(format!(
-                "{} model files in {}\n{}",
+                "{} model files under {}\n{}",
                 rows.len(),
                 root.display(),
-                json!({"root": root.display().to_string(), "models": rows})
+                json!({"roots": root.dirs().iter().map(|d| d.display().to_string())
+                            .collect::<Vec<_>>(), "models": rows})
             )))
         }
         "open_model" => {
@@ -658,7 +762,7 @@ fn dispatch(
             }
             let model = voxel_core::format::load(&path).map_err(|e| format!("{given}: {e}"))?;
             editor.open(model, path);
-            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor))))
+            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor, root))))
         }
         "new_model" => {
             let given = path_arg(args)?;
@@ -676,7 +780,7 @@ fn dispatch(
             editor.open(crate::editor::new_model(size), path);
             Ok(CallResult::text(format!(
                 "started {given}, {size}x{size}x{size} — not written until save_model\n{}",
-                describe(editor)
+                describe(editor, root)
             )))
         }
         "save_model" => {
@@ -687,12 +791,16 @@ fn dispatch(
                 // saving over it while they work is not an agent's call to
                 // make. With one, the path came through `resolve` already.
                 None => {
-                    root.dir()?;
+                    // Still gated on there being a root: without one the
+                    // editor's path is the *user's* file.
+                    if root.is_empty() {
+                        return Err(root.resolve("x").unwrap_err());
+                    }
                     editor.path().to_path_buf()
                 }
             };
             voxel_core::format::save(&path, editor.model())
-                .map_err(|e| format!("{}: {e}", root.relative(&path)))?;
+                .map_err(|e| format!("{}: {e}", root.label(&path)))?;
             let flattened = path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("vox"))
@@ -700,14 +808,14 @@ fn dispatch(
             editor.mark_saved(&path);
             Ok(CallResult::text(format!(
                 "saved {}{}\n{}",
-                root.relative(&path),
+                root.label(&path),
                 if flattened {
                     format!(" — {} layers flattened into one", editor.model().layer_count())
                 } else {
                     String::new()
                 },
                 json!({
-                    "path": root.relative(&path),
+                    "path": root.label(&path),
                     "voxels": editor.model().filled_count(),
                     "layers": editor.model().layer_count(),
                     "flattened": flattened,
@@ -838,7 +946,7 @@ fn summary(r: &Report) -> String {
     )
 }
 
-fn describe(editor: &Editor) -> String {
+fn describe(editor: &Editor, root: &Roots) -> String {
     let model = editor.model();
     let [sx, sy, sz] = model.size();
     let bounds = model
@@ -860,19 +968,14 @@ fn describe(editor: &Editor) -> String {
             "color_rgb": rgb_of(editor, editor.color),
             "active_layer": editor.active_layer(),
             "layers": layer_rows(editor),
-            "path": model_path(editor),
+            // Absolute, so an agent that cannot see the server's working
+            // directory still knows exactly which file it is editing.
+            "path": editor.path().display().to_string(),
+            "roots": root.dirs().iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
             "unsaved": editor.is_dirty(),
             "note": "every editing tool writes to the active layer only",
         })
     )
-}
-
-fn model_path(editor: &Editor) -> String {
-    editor
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 fn layer_rows(editor: &Editor) -> Vec<Value> {
@@ -1433,16 +1536,15 @@ mod tests {
         dir
     }
 
-    fn run_in(e: &mut Editor, root: &Root, name: &str, args: Value) -> CallResult {
+    fn run_in(e: &mut Editor, root: &Roots, name: &str, args: Value) -> CallResult {
         call_in(e, root, name, &args)
     }
 
-    /// The boundary an agent must not cross. Every one of these is a path that
-    /// resolves outside the root, and the check is lexical so none of them
-    /// reaches the filesystem to find out.
+    /// The boundary an agent must not cross.
     #[test]
     fn a_path_that_leaves_the_root_is_refused() {
-        let root = Root::new(temp_root("escape"));
+        let dir = temp_root("escape");
+        let root = Roots::new([dir.clone()]);
         for bad in [
             "../outside.vxm",
             "a/../../outside.vxm",
@@ -1459,12 +1561,76 @@ mod tests {
         assert!(root.resolve("./robot.vxm").is_ok());
     }
 
+    /// The reason this exists: a desktop client spawns the server with a
+    /// working directory nobody can see, so a full path has to be sayable.
+    #[test]
+    fn an_absolute_path_inside_a_root_is_accepted() {
+        let dir = temp_root("absolute");
+        let root = Roots::new([dir.clone()]);
+        let real = dir.canonicalize().unwrap();
+
+        let inside = real.join("robot.vxm");
+        assert_eq!(root.resolve(inside.to_str().unwrap()).unwrap(), inside);
+        // Including one that does not exist yet, which is every save.
+        let deep = real.join("parts").join("arm.vxm");
+        assert_eq!(root.resolve(deep.to_str().unwrap()).unwrap(), deep);
+
+        // A sibling directory is still outside, absolute or not.
+        let outside = temp_root("absolute-elsewhere").canonicalize().unwrap();
+        assert!(root.resolve(outside.join("x.vxm").to_str().unwrap()).is_err());
+    }
+
+    /// More than one root, because a desktop config names the places models
+    /// live rather than one working directory.
+    #[test]
+    fn a_path_may_be_absolute_inside_any_root() {
+        let a = temp_root("many-a");
+        let b = temp_root("many-b");
+        let root = Roots::new([a.clone(), b.clone()]);
+
+        assert!(root.resolve(a.canonicalize().unwrap().join("x.vxm").to_str().unwrap()).is_ok());
+        assert!(root.resolve(b.canonicalize().unwrap().join("y.vxm").to_str().unwrap()).is_ok());
+        // A relative path lands in the first, which is what the instructions say.
+        assert_eq!(
+            root.resolve("z.vxm").unwrap(),
+            a.canonicalize().unwrap().join("z.vxm")
+        );
+    }
+
+    /// A prefix test on the name alone would be satisfied by a symlink inside
+    /// a root pointing anywhere at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_a_root_does_not_get_through() {
+        let dir = temp_root("symlink");
+        let outside = temp_root("symlink-outside");
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+        let root = Roots::new([dir.clone()]);
+
+        assert!(root.resolve("escape/stolen.vxm").is_err(), "through the link by name");
+        let via = dir.canonicalize().unwrap().join("escape").join("stolen.vxm");
+        assert!(root.resolve(via.to_str().unwrap()).is_err(), "and absolutely");
+    }
+
+    /// What the agent is told at `initialize`, since it cannot see the
+    /// server's working directory.
+    #[test]
+    fn the_instructions_name_the_directories() {
+        let dir = temp_root("instructions");
+        let text = Roots::new([dir.clone()]).instructions();
+        assert!(text.contains(&dir.canonicalize().unwrap().display().to_string()), "{text}");
+        assert!(text.contains("absolute"), "{text}");
+
+        let none = Roots::none().instructions();
+        assert!(none.contains("no access") || none.contains("The user"), "{none}");
+    }
+
     /// `a/../b` stays inside and would survive a resolve-then-check, but the
     /// rule refuses every `..` rather than reasoning about which ones are safe
     /// — that reasoning is exactly what goes wrong.
     #[test]
     fn even_a_harmless_dotdot_is_refused() {
-        let root = Root::new(temp_root("dotdot"));
+        let root = Roots::new([temp_root("dotdot")]);
         assert!(root.resolve("a/../b.vxm").is_err());
     }
 
@@ -1483,7 +1649,7 @@ mod tests {
     #[test]
     fn a_model_can_be_started_saved_listed_and_opened_again() {
         let dir = temp_root("lifecycle");
-        let root = Root::new(&dir);
+        let root = Roots::new([dir.clone()]);
         let mut e = editor();
 
         run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 16}));
@@ -1514,7 +1680,7 @@ mod tests {
     #[test]
     fn saving_as_vox_reports_the_layers_it_flattened() {
         let dir = temp_root("flatten");
-        let root = Root::new(&dir);
+        let root = Roots::new([dir.clone()]);
         let mut e = editor();
         run_in(&mut e, &root, "new_model", json!({"path": "m.vxm", "size": 8}));
         run_in(&mut e, &root, "add_layer", json!({"name": "TOP"}));
@@ -1531,7 +1697,7 @@ mod tests {
 
     #[test]
     fn opening_a_file_that_is_not_there_says_how_to_make_one() {
-        let root = Root::new(temp_root("missing"));
+        let root = Roots::new([temp_root("missing")]);
         let mut e = editor();
         let r = run_in(&mut e, &root, "open_model", json!({"path": "nope.vxm"}));
         assert_eq!(r.is_error, Some(true));
@@ -1542,13 +1708,20 @@ mod tests {
     #[test]
     fn describe_model_names_the_file_and_whether_it_is_unsaved() {
         let dir = temp_root("describe");
-        let root = Root::new(&dir);
+        let root = Roots::new([dir.clone()]);
         let mut e = editor();
         run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 8}));
         run_in(&mut e, &root, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 3}));
 
         let j = json_of(&run_in(&mut e, &root, "describe_model", json!({})));
-        assert_eq!(j["path"], "robot.vxm");
+        // Absolute: an agent that cannot see the server's working directory
+        // still knows exactly which file it is editing.
+        assert!(
+            j["path"].as_str().unwrap().ends_with("/robot.vxm"),
+            "{}", j["path"]
+        );
+        assert!(Path::new(j["path"].as_str().unwrap()).is_absolute());
+        assert_eq!(j["roots"].as_array().unwrap().len(), 1);
         assert_eq!(j["unsaved"], true);
 
         run_in(&mut e, &root, "save_model", json!({}));
