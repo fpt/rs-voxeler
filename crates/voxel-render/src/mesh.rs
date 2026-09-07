@@ -114,31 +114,47 @@ impl Default for ExtractOptions {
 }
 
 /// Extract every face of `model` that touches air.
+///
+/// Walks the **layers**, not the scene. A scene's size is a range and a layer is
+/// only as big as its contents, so sweeping the range would visit a quarter of a
+/// million cells to find a 64x64x5 ground plane's twenty thousand — and would
+/// scale with the space you left yourself rather than with what you drew in it.
+///
+/// Each cell is emitted by the layer that *owns* it, so where two layers overlap
+/// the faces come out once, from the one on top. Asking `owner_at` per cell is
+/// what makes that true without a scene-sized scratch buffer to mark cells off
+/// in.
 pub fn extract(model: &VoxelModel, opts: ExtractOptions) -> FaceMesh {
-    let [sx, sy, sz] = model.size();
-    let sy = sy.min(opts.y_limit);
+    let cut = model.size()[1].min(opts.y_limit) as i32;
     let mut quads = Vec::new();
 
-    for z in 0..sz as i32 {
-        for y in 0..sy as i32 {
-            for x in 0..sx as i32 {
-                let index = model.get(x, y, z);
-                if index == 0 {
-                    continue;
-                }
-                for face in Face::ALL {
-                    let n = face.normal();
-                    let (nx, ny, nz) = (x + n[0], y + n[1], z + n[2]);
-                    // Above the cut counts as air, which is what puts a lid on
-                    // the slice. Outside the grid already reads as air.
-                    let occluded = ny < sy as i32 && model.is_solid(nx, ny, nz);
-                    if !occluded {
-                        quads.push(FaceQuad {
-                            voxel: [x as u16, y as u16, z as u16],
-                            face,
-                            index,
-                        });
-                    }
+    for (n, layer) in model.layers().iter().enumerate() {
+        if !layer.visible {
+            continue;
+        }
+        for ([x, y, z], index) in layer.iter_filled() {
+            let (x, y, z) = (x as i32, y as i32, z as i32);
+            if y >= cut {
+                continue;
+            }
+            // Somebody has to own the cell, and it is whoever is on top of it.
+            // Without this a cell two layers share would be meshed twice, and
+            // the lower copy would z-fight the upper one.
+            if model.owner_at(x, y, z) != Some(n) {
+                continue;
+            }
+            for face in Face::ALL {
+                let f = face.normal();
+                let (nx, ny, nz) = (x + f[0], y + f[1], z + f[2]);
+                // Above the cut counts as air, which is what puts a lid on the
+                // slice. Outside the scene already reads as air.
+                let occluded = ny < cut && model.is_solid(nx, ny, nz);
+                if !occluded {
+                    quads.push(FaceQuad {
+                        voxel: [x as u16, y as u16, z as u16],
+                        face,
+                        index,
+                    });
                 }
             }
         }
@@ -149,6 +165,43 @@ pub fn extract(model: &VoxelModel, opts: ExtractOptions) -> FaceMesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two layers sharing a cell must mesh it once, from the one on top —
+    /// otherwise the lower copy z-fights the upper one at every shared face.
+    #[test]
+    fn a_cell_two_layers_share_is_meshed_once_by_its_owner() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(1, 1, 1, 3);
+        let top = m.add_layer(0, "cover").unwrap();
+        m.set_active_layer(top);
+        m.set(1, 1, 1, 8);
+
+        let mesh = extract(&m, ExtractOptions::default());
+        assert_eq!(mesh.quads.len(), 6, "one cube, not two");
+        assert!(mesh.quads.iter().all(|q| q.index == 8), "the top layer's colour");
+
+        // Hide the cover and the one underneath takes over, still once.
+        m.set_layer_visible(top, false);
+        let mesh = extract(&m, ExtractOptions::default());
+        assert_eq!(mesh.quads.len(), 6);
+        assert!(mesh.quads.iter().all(|q| q.index == 3));
+    }
+
+    /// Extraction walks the layers, so a scene with room to spare costs what is
+    /// drawn in it rather than what it could hold.
+    #[test]
+    fn layers_far_apart_in_a_large_scene_both_mesh() {
+        let mut m = VoxelModel::new(256, 16, 16);
+        m.set(0, 0, 0, 1);
+        let far = m.add_layer(0, "far").unwrap();
+        m.set_active_layer(far);
+        m.set(255, 15, 15, 2);
+
+        let mesh = extract(&m, ExtractOptions::default());
+        assert_eq!(mesh.quads.len(), 12, "two lone voxels, six faces each");
+        assert_eq!(m.allocated_cells(), 2, "and the scene between them costs nothing");
+    }
+
 
     #[test]
     fn a_lone_voxel_has_six_faces() {

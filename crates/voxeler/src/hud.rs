@@ -441,7 +441,7 @@ const HELP: &[&str] = &[
     "A D          ADD / DELETE LAYER",
     "V N          SHOW-HIDE / RENAME LAYER",
     "K J          MOVE LAYER UP / DOWN",
-    "U            MERGE LAYER DOWN",
+    "U T          MERGE DOWN / TRIM TO FIT",
     "",
     "H            CLOSE THIS",
 ];

@@ -58,6 +58,7 @@ act on a voxel, and do nothing over empty space.
 | `X` `Y` `Z` | mirror the edit across each axis (`M` = `X`) |
 | `L` `shift+L` | next / previous layer |
 | `A` `D` | add / delete a layer |
+| `T` | trim the layer's box to its contents |
 | `V` `N` | show-hide / rename the active layer |
 | `K` `J` `U` | move the layer up / down, merge it down |
 | `G` | ground grid |
@@ -101,6 +102,39 @@ the body is still underneath, whole.
   ARMOUR   · █ █ ·        hide ARMOUR →   █ █ █ █
   BODY     █ █ █ █                        (the body, intact)
 ```
+
+### Each layer has its own box
+
+A scene's size is the **range** voxels may occupy, not a grid that gets
+allocated. Each layer carries an origin and a size of its own and costs only
+that, so a ground plane, a tree and a character can share a 64³ scene without
+three copies of it:
+
+```text
+  GROUND     origin  0, 0, 0    size 64 x  5 x 64
+  TREE       origin 20, 5,10    size 16 x 32 x 16
+  CHARACTER  origin 40, 5,40    size 16 x 16 x 16
+                                     ─────────────
+  allocated                          32 769 cells
+  four 64³ grids would be         1 048 576 cells
+```
+
+The box **grows to fit** whatever you draw, so a new layer starts empty and
+costs nothing until used, and you never have to size one before drawing in it.
+Declaring a box up front is a statement of where a part will live, not a wall:
+
+```
+add_layer  name=TREE  origin=[20,5,10]  size=[16,32,16]
+```
+
+It shrinks only when asked — `T` in the editor, `trim_layer` over MCP — so
+erasing and redrawing in one spot does not churn the allocation. The active
+layer's box is outlined in the viewport, since where it sits is otherwise the
+one thing you cannot see.
+
+`.vxm` is now **VXM3** and stores each layer's box. `VXM2` and `VXM1` still
+load, and are trimmed on the way in: an old file gains the smaller shape simply
+by being opened.
 
 The panel under the palette lists the stack, top first, with each layer's own
 voxel count. Click a row to select it, click its box to show or hide it.
@@ -174,7 +208,7 @@ whoever connects.
 | `paint` | recolour the voxels in a box, creating none |
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
-| `add_layer`, `select_layer`, `set_layer_visible` | the layer stack |
+| `add_layer`, `select_layer`, `set_layer_visible`, `trim_layer` | the layer stack and its boxes |
 | `screenshot` | render the model to a PNG and return it as an image |
 | `undo`, `redo` | take back whole tool calls |
 | `new_model`, `open_model`, `save_model`, `list_models` | files, inside the root |

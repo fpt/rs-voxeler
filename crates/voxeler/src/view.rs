@@ -11,6 +11,9 @@ const SKY_BOTTOM: u32 = 0x141A24;
 const GRID_FINE: u32 = 0x2E3648;
 const GRID_COARSE: u32 = 0x4A5570;
 const VOLUME_BOX: u32 = 0x5C6B8A;
+/// The active layer's own extent, dimmer than the scene's own edge so the two
+/// read as an inner box rather than as two equal frames.
+const LAYER_BOX: u32 = 0x3E6B7A;
 const ERASE_MARK: u32 = 0xFF5A4A;
 
 /// How far a gizmo is nudged towards the outside of the surface it marks.
@@ -114,6 +117,25 @@ fn draw_volume_box(
         z: offset.z + size[2] as f32,
     } + Vec3::splat(LIFT);
     raster::draw_box(fb, scene, min, max, VOLUME_BOX, 0.0);
+
+    // The active layer's own box, when it is not simply the whole scene. A
+    // layer is allocated to its box, and where that box sits is the thing you
+    // cannot otherwise see — a voxel placed outside it silently enlarges the
+    // layer, and this is what makes that visible before it happens.
+    let b = editor.model().layer_bounds(editor.active_layer());
+    if !b.is_empty() && (b.origin != [0; 3] || b.size != size) {
+        let lo = Vec3 {
+            x: offset.x + b.origin[0] as f32,
+            y: offset.y + b.origin[1] as f32,
+            z: offset.z + b.origin[2] as f32,
+        };
+        let hi = Vec3 {
+            x: lo.x + b.size[0] as f32,
+            y: lo.y + b.size[1] as f32,
+            z: lo.z + b.size[2] as f32,
+        };
+        raster::draw_box(fb, scene, lo, hi, LAYER_BOX, 0.0);
+    }
 
     if let Some(cut) = editor.slice {
         let y = offset.y + cut as f32;

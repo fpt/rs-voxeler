@@ -29,6 +29,36 @@ so it stays that way. `voxel-render` knows nothing about editing. Everything
 about *what a click means* is in `voxeler/src/editor.rs`, which is why that file
 has tests and `app.rs` has almost none.
 
+### A scene is a range; a layer is a box
+
+`VoxelModel::size` says where voxels *may* go — what the work plane spans, what
+the camera frames, what a ray is clipped to. **Nothing of that size is
+allocated.** Each layer carries a `Bounds` (origin + size) and allocates only
+that, which is what lets a 64×64×5 ground, a 16×32×16 tree and a 16³ character
+share a 64³ scene for 32 769 cells instead of 1 048 576.
+
+Three rules make the box invisible in ordinary use:
+
+- **It grows to fit.** `set_in` enlarges the box before writing, so a new layer
+  starts empty and you never size one before drawing in it. A declared box is a
+  starting size, not a wall.
+- **Writing air outside it does not grow it.** An erase that missed has nothing
+  to record, and it is the one way a box could grow without gaining anything.
+- **It shrinks only when asked** (`trim_layer`). Erasing and redrawing in one
+  spot would otherwise reallocate the layer on every stroke.
+
+The **composite cache is gone**, and had to be: it was scene-sized, which is
+precisely the allocation this design exists to avoid. `get` now walks the layers
+top-down — sixteen bounds tests against one load. That would be a bad trade if
+anything still swept the scene volume, so nothing does: `extract` and
+`iter_filled` walk the *layers*, which is a far larger saving than the lookup
+gives back. Anything tempted to loop `for z for y for x` over `model.size()` is
+now the thing to be suspicious of.
+
+Where two layers overlap, the cell belongs to whoever is on top (`owner_at`) and
+only that layer emits it — otherwise a shared cell meshes twice and the lower
+copy z-fights the upper one.
+
 ### A layer is a grid of its own
 
 Layers composite top down: `VoxelModel::get` returns the topmost *visible*
@@ -428,10 +458,13 @@ from the one that was asked for.
 - **A missing file is not an error.** `voxeler robot.vxm` in an empty directory
   starts a model. Refusing would mean the tool could only open what some other
   tool had already made.
-- **The file stores each layer, not the composite.** `.vxm` is `VXM2`: a layer
-  count, the active layer, then per layer its flags, name and own sparse voxel
-  list. `VXM1` — the layerless original — still loads, as a single layer. A file
-  already on disk is not free to rewrite itself.
+- **The file stores each layer, not the composite.** `.vxm` is `VXM3`: a scene
+  range, a layer count, the active layer, then per layer its flags, name, origin,
+  size and own sparse voxel list. Coordinates are relative to the layer's origin,
+  so one byte covers a layer anywhere in the scene. `VXM2` (layers, no boxes) and
+  `VXM1` (no layers) still load, and are **trimmed** on the way in — an old file
+  gains the smaller shape by being opened. A file already on disk is not free to
+  rewrite itself.
 - **An export is a flatten.** `.vox` has nowhere to put a stack, so `ctrl+E`
   writes the composite as one model and the status line says how many layers
   went into it. Doing otherwise means the nTRN/nGRP/nSHP scene graph a
@@ -481,7 +514,7 @@ what you meant.
 ```text
 rs-voxeler/
 ├── crates/voxel-core/     the model, host- and render-free
-│   ├── model.rs           the layer stack, and the composite it adds up to
+│   ├── model.rs           the scene range, and the boxed layers in it
 │   ├── palette.rs         256 colours; 0 is air
 │   ├── edit.rs            Stroke + History
 │   ├── raycast.rs         Amanatides–Woo grid traversal
@@ -543,12 +576,18 @@ rs-voxeler/
 - **A click on a voxel does nothing, and the status line names a layer.** That
   is the rule, not a bug: tools write to the active layer. Select the layer the
   message names, or `V` to hide it and reach what is under it.
-- **A layer is drawn that should be hidden, or vice versa.** The composite is
-  stale. Every path that changes the stack has to end in `recomposite`; every
-  path that changes one cell has to repair that cell. `set_in` does the second;
-  the structural methods do the first.
+- **A layer is drawn that should be hidden, or vice versa.** `get` and
+  `owner_at` both filter on `visible`; a path that reads `Layer::at` directly
+  skips that filter.
+- **A voxel written to a layer vanishes.** It landed outside the scene's range —
+  `set_in` refuses those — or the box was set with `set_layer_bounds` to
+  something that cut it off. `set_layer_bounds` refuses a box that would drop
+  voxels; `trim_layer` and a scene `resize` are the only paths that may.
 - **A saved model comes back missing a hidden layer.** `format::native::encode`
-  is using `iter_filled` (the composite) where it must use `iter_filled_in`.
+  is using `iter_filled` (composited) where it must use `iter_filled_in`.
+- **A scene is slow, or allocates far more than its contents.** Something is
+  sweeping `model.size()` instead of walking the layers, or a layer was never
+  trimmed after a large erase — `allocated_cells()` is the number to look at.
 - **`voxeler attach` says nothing is running when a server is.** The session
   file is keyed by *canonical* root, and discovery prefers one rooted at the
   current directory. Name the root explicitly, or check `VOXELER_SESSION_DIR`
