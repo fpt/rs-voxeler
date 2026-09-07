@@ -14,6 +14,9 @@ const VOLUME_BOX: u32 = 0x5C6B8A;
 /// The active layer's own extent, dimmer than the scene's own edge so the two
 /// read as an inner box rather than as two equal frames.
 const LAYER_BOX: u32 = 0x3E6B7A;
+/// The box the current selection occupies. Bright, because it is a thing you
+/// are about to act on rather than a boundary you work inside.
+const SELECTION_BOX: u32 = 0xFF9A3C;
 const ERASE_MARK: u32 = 0xFF5A4A;
 
 /// How far a gizmo is nudged towards the outside of the surface it marks.
@@ -82,6 +85,23 @@ pub fn render_with_options(
 
     if options.show_bounds {
         draw_volume_box(fb, &scene, editor, size, offset);
+    }
+
+    // What a transform would move. Only its extent, not every cell: a selection
+    // is often thousands of voxels, and an outline per cell is a thicket. The
+    // count is in the status line and in `describe_selection`.
+    if let Some((lo, hi)) = editor.selection.as_ref().and_then(|s| s.bounds()) {
+        let min = Vec3 {
+            x: offset.x + lo[0] as f32,
+            y: offset.y + lo[1] as f32,
+            z: offset.z + lo[2] as f32,
+        } - Vec3::splat(LIFT);
+        let max = Vec3 {
+            x: offset.x + hi[0] as f32 + 1.0,
+            y: offset.y + hi[1] as f32 + 1.0,
+            z: offset.z + hi[2] as f32 + 1.0,
+        } + Vec3::splat(LIFT);
+        raster::draw_box(fb, &scene, min, max, SELECTION_BOX, 0.0);
     }
 
     if let Some(target) = hover {

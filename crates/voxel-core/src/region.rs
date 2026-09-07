@@ -24,7 +24,7 @@
 //! neighbour tests, so the top of a cross-section is a face a region can grow
 //! along, exactly as it is a face you can click.
 
-use crate::model::VoxelModel;
+use crate::model::{Bounds, VoxelModel};
 use crate::raycast::Face;
 
 /// The largest brush radius, giving a 17³ cube.
@@ -33,6 +33,38 @@ use crate::raycast::Face;
 /// the default volume's edge is already a stamp rather than a stroke, and the
 /// slider has to stop somewhere the HUD can still label.
 pub const MAX_BRUSH: u8 = 8;
+
+/// What a region grows over.
+///
+/// Two questions, not one. A *fill* asks about a colour — it stops where the
+/// colour changes, which is what makes it a fill rather than "recolour
+/// everything touching this". A *selection* asks about material — an arm is one
+/// part whether or not the glove on the end of it is a different colour, and a
+/// region that stopped at the wrist would be the wrong answer to "select this
+/// arm".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Match {
+    /// Cells holding exactly this index. `Index(0)` is air, which is what a
+    /// build grows over.
+    Index(u8),
+    /// Any cell that is not air, whatever colour.
+    Solid,
+}
+
+impl Match {
+    fn accepts(self, value: u8) -> bool {
+        match self {
+            Match::Index(i) => value == i,
+            Match::Solid => value != 0,
+        }
+    }
+
+    /// Whether this region is made of air, which is the case where the material
+    /// a plane span backs onto is on the other side. See [`on_face`].
+    fn is_air(self) -> bool {
+        self == Match::Index(0)
+    }
+}
 
 /// How far an edit spreads from the cell under the cursor.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -122,10 +154,8 @@ pub struct Reach {
     /// The face that was clicked. Its axis orients [`Span::Axis`] and picks the
     /// layer [`Span::Plane`] stays in.
     pub face: Face,
-    /// The palette index a cell must hold to join the region: 0 when building,
-    /// because a build grows over air, and the colour under the cursor when
-    /// erasing or painting.
-    pub matches: u8,
+    /// What a cell must hold to join the region.
+    pub matches: Match,
     /// Only consulted by [`Span::Voxel`].
     pub brush: Brush,
     /// Whether the face is the editor's work plane rather than a surface of the
@@ -136,6 +166,15 @@ pub struct Reach {
     /// Layers at or above this Y are hidden by a slice. `u16::MAX` when the
     /// model is whole.
     pub y_limit: u16,
+    /// A box the region may not grow outside, if any.
+    ///
+    /// Not a filter applied afterwards: a flood that spread *through* cells
+    /// outside the box and was trimmed at the end would reach parts the box was
+    /// meant to keep out. Bounding the growth is what makes "this arm, and not
+    /// the body it is attached to" expressible at all — a part of a figure is
+    /// connected to the rest of it, so connectivity alone can only ever answer
+    /// "the whole figure".
+    pub within: Option<Bounds>,
     /// Which grid the region is read from: `None` for the composite — what is
     /// on screen, which is what a click selects — or `Some(layer)` for that
     /// layer's own grid.
@@ -189,8 +228,9 @@ fn visible(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> u8 {
 /// that a build may flood into, it is a layer the edit must not reach.
 fn joins(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
     model.contains(p[0], p[1], p[2])
+        && reach.within.is_none_or(|b| b.contains(p[0], p[1], p[2]))
         && p[1] < reach.y_limit as i32
-        && at(model, reach, p) == reach.matches
+        && reach.matches.accepts(at(model, reach, p))
 }
 
 /// Whether `p` presents the same face the click landed on.
@@ -204,7 +244,7 @@ fn joins(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
 /// every voxel that happens to share the layer.
 fn on_face(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
     let n = reach.face.normal();
-    if reach.matches == 0 {
+    if reach.matches.is_air() {
         reach.grounded || visible(model, reach, [p[0] - n[0], p[1] - n[1], p[2] - n[2]]) != 0
     } else {
         visible(model, reach, [p[0] + n[0], p[1] + n[1], p[2] + n[2]]) == 0
@@ -317,6 +357,10 @@ mod tests {
     }
 
     fn reach(seed: [i32; 3], face: Face, matches: u8) -> Reach {
+        reach_for(seed, face, Match::Index(matches))
+    }
+
+    fn reach_for(seed: [i32; 3], face: Face, matches: Match) -> Reach {
         Reach {
             seed,
             face,
@@ -324,6 +368,7 @@ mod tests {
             brush: Brush::default(),
             grounded: false,
             y_limit: u16::MAX,
+            within: None,
             layer: None,
         }
     }
@@ -533,6 +578,66 @@ mod tests {
         // And seeded where that layer does hold something, the run is its own.
         r.seed = [2, 0, 0];
         assert_eq!(cells(&m, Span::Axis, r), vec![[2, 0, 0]]);
+    }
+
+    /// A part is often more than one colour, and a selection that stopped at
+    /// the seam would be the wrong answer to "this connected piece".
+    #[test]
+    fn a_solid_region_crosses_a_colour_boundary_where_an_index_region_stops() {
+        let m = floor();
+        let index = cells(&m, Span::Volume, reach([1, 0, 1], Face::PosY, 1));
+        assert_eq!(index.len(), 4 * 8, "half the floor, where the colour changes");
+
+        let solid = cells(&m, Span::Volume, reach_for([1, 0, 1], Face::PosY, Match::Solid));
+        assert_eq!(solid.len(), 8 * 8, "the whole floor, both colours");
+    }
+
+    /// And it still stops at air, or "connected" would mean nothing.
+    #[test]
+    fn a_solid_region_stops_at_air() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(1, 1, 1, 3);
+        m.set(2, 1, 1, 9);
+        m.set(5, 1, 1, 3);
+        let got = cells(&m, Span::Volume, reach_for([1, 1, 1], Face::PosY, Match::Solid));
+        assert_eq!(sorted(got), vec![[1, 1, 1], [2, 1, 1]]);
+    }
+
+    /// A part of a figure is connected to the rest of it, so connectivity alone
+    /// can only ever answer "the whole figure". The box is what makes "this
+    /// arm" expressible.
+    #[test]
+    fn a_region_can_be_held_inside_a_box() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        for x in 2..12 {
+            m.set(x, 1, 1, 3);
+        }
+        let mut r = reach_for([3, 1, 1], Face::PosY, Match::Solid);
+        assert_eq!(cells(&m, Span::Volume, r).len(), 10, "the whole bar");
+
+        r.within = Some(Bounds::new([2, 0, 0], [4, 16, 16]));
+        let held = cells(&m, Span::Volume, r);
+        assert_eq!(sorted(held), vec![[2, 1, 1], [3, 1, 1], [4, 1, 1], [5, 1, 1]]);
+    }
+
+    /// Bounded during growth, not trimmed after: a flood that spread through
+    /// cells outside the box would reach parts the box was meant to keep out.
+    #[test]
+    fn a_box_stops_the_growth_rather_than_filtering_the_result() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        // A U: two arms inside the box, joined only by a floor outside it.
+        for z in 2..8 {
+            m.set(3, 1, z, 3);
+            m.set(9, 1, z, 3);
+        }
+        for x in 3..10 {
+            m.set(x, 0, 7, 3);
+        }
+        let mut r = reach_for([3, 1, 2], Face::PosY, Match::Solid);
+        r.within = Some(Bounds::new([0, 1, 0], [16, 15, 16]));
+        let held = cells(&m, Span::Volume, r);
+        assert_eq!(held.len(), 6, "one arm only — the join is below the box");
+        assert!(held.iter().all(|p| p[0] == 3));
     }
 
     /// A click on something that is not what the span is made of yields

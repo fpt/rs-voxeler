@@ -242,6 +242,9 @@ whoever connects.
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
 | `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
+| `select_box`, `select_connected` | hold voxels for a transform |
+| `describe_selection`, `clear_selection` | what is held, and let go |
+| `move_selection` | move the held voxels, one undo step |
 | `new_model`, `open_model`, `save_model`, `list_models` | files inside the root; listing includes subdirectories |
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
@@ -251,6 +254,38 @@ and it puts the camera back where it found it.
 
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
+
+## Selecting and moving
+
+Drawing puts voxels down; a selection picks them back up.
+
+```
+select_connected  x=8 y=12 z=11  from=[7,0,0] to=[9,23,23]
+move_selection    dx=-2 dy=0 dz=0
+```
+
+A selection is the set of **cells**, not a box — air inside a box is not
+selected, so moving carries the shape rather than a cube of nothing that erases
+whatever it lands on. It belongs to the layer it was made on, so changing the
+active layer afterwards still moves the voxels you were shown.
+
+`select_connected` grows by **material, not colour**, so a part made of several
+colours comes out whole. But a limb is attached to its body, so unbounded
+connectivity can only ever answer "the whole figure" — give `from`/`to` and the
+growth is held inside that box, which is what makes "this arm" sayable. The
+growth is bounded, not trimmed afterwards: a flood that spread *through* cells
+outside the box would come back with parts the box was meant to keep out.
+
+A move is one undo step. It clears the source and writes the destination in one
+batch, clears first, so a move shorter than the selection overlaps itself
+without eating its own arrival. Voxels pushed outside the scene are lost and
+counted. The selection follows the voxels, so a move can be repeated or refined.
+
+Undo drops the selection — it names coordinates, and an undo changes what is at
+them. The current selection is outlined in the viewport, so whoever is attached
+can see what an agent is about to move.
+
+## Subdividing
 
 `subdivide` is how a coarse model becomes a detailed one: get the silhouette
 right at 16³, then scale up and carve into the room you have made. It applies to

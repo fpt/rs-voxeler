@@ -517,6 +517,64 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "select_box",
+            description:
+                "Select the voxels of the active layer inside a box, corners inclusive. The \
+                 voxels, not the box — air inside it is not selected, so moving the result \
+                 carries the shape rather than a cube of nothing. Replaces any current \
+                 selection.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"from": coord("One corner"), "to": coord("The opposite corner")},
+                "required": ["from", "to"],
+            }),
+        },
+        ToolInfo {
+            name: "select_connected",
+            description:
+                "Select the connected piece of the active layer containing a cell — an arm, a \
+                 leg, one rock of several. Connected by material, not by colour, so a part made \
+                 of several colours comes out whole. Give `from` and `to` to hold the growth \
+                 inside a box: a limb is attached to the body, so without one the answer to \
+                 \"this arm\" is the whole figure. Replaces any current selection.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer"}, "y": {"type": "integer"}, "z": {"type": "integer"},
+                    "from": coord("Optional low corner of a box the selection may not leave"),
+                    "to": coord("Optional opposite corner"),
+                },
+                "required": ["x", "y", "z"],
+            }),
+        },
+        ToolInfo {
+            name: "describe_selection",
+            description:
+                "What is selected: how many voxels, which layer, and the box they occupy. \
+                 Call it after selecting to check you got the part you meant before moving it.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "clear_selection",
+            description: "Forget the current selection. Changes no voxels.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "move_selection",
+            description:
+                "Move the selected voxels by an offset, as ONE undo step. The cells they came \
+                 from are cleared and the destinations written, so this moves rather than \
+                 copies. Voxels pushed outside the scene are lost and counted. The selection \
+                 follows, so a move can be repeated or refined.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dx": {"type": "integer"}, "dy": {"type": "integer"}, "dz": {"type": "integer"},
+                },
+                "required": ["dx", "dy", "dz"],
+            }),
+        },
+        ToolInfo {
             name: "subdivide",
             description:
                 "Scale the whole scene up so every voxel becomes factor cubed of them. The way \
@@ -669,10 +727,11 @@ fn dispatch(
                         // Volume growth never consults the face; any of the six
                         // gives the same region.
                         face: Face::PosY,
-                        matches: model.get_in(layer, p[0], p[1], p[2]),
+                        matches: region::Match::Index(model.get_in(layer, p[0], p[1], p[2])),
                         brush: Brush::default(),
                         grounded: false,
                         y_limit: u16::MAX,
+                        within: None,
                         // This layer's own grid, so the region is a shape this
                         // layer actually has.
                         layer: Some(layer),
@@ -731,6 +790,56 @@ fn dispatch(
             Ok(CallResult::text(format!(
                 "added a layer\n{}",
                 layers_json(editor)
+            )))
+        }
+        "select_box" => {
+            let from = corner(args, "from")?;
+            let to = corner(args, "to")?;
+            editor.select_box(from, to);
+            Ok(CallResult::text(selection_text(editor)))
+        }
+        "select_connected" => {
+            let p = point_in(args, editor.model())?;
+            let within = match (args.get("from"), args.get("to")) {
+                (None, None) => None,
+                _ => {
+                    let (lo, hi) = range(args, editor.model())?;
+                    Some(Bounds::new(
+                        [lo[0] as u16, lo[1] as u16, lo[2] as u16],
+                        [
+                            (hi[0] - lo[0] + 1) as u16,
+                            (hi[1] - lo[1] + 1) as u16,
+                            (hi[2] - lo[2] + 1) as u16,
+                        ],
+                    ))
+                }
+            };
+            editor.select_connected(p, within);
+            Ok(CallResult::text(selection_text(editor)))
+        }
+        "describe_selection" => Ok(CallResult::text(selection_text(editor))),
+        "clear_selection" => {
+            editor.clear_selection();
+            Ok(CallResult::text(selection_text(editor)))
+        }
+        "move_selection" => {
+            let delta = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
+            let report = editor.move_selection(delta)?;
+            Ok(CallResult::text(format!(
+                "moved {} voxels by {delta:?}{}\n{}",
+                report.moved,
+                if report.dropped > 0 {
+                    format!(", {} lost off the edge", report.dropped)
+                } else {
+                    String::new()
+                },
+                json!({
+                    "moved": report.moved,
+                    "overwritten": report.overwritten,
+                    "dropped": report.dropped,
+                    "selection": selection_json(editor),
+                    "model_voxels": editor.model().filled_count(),
+                })
             )))
         }
         "subdivide" => {
@@ -1167,6 +1276,30 @@ fn model_path(editor: &Editor) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+fn selection_json(editor: &Editor) -> Value {
+    match &editor.selection {
+        None => json!({"voxels": 0}),
+        Some(sel) => {
+            let (lo, hi) = sel.bounds().unwrap_or(([0; 3], [0; 3]));
+            json!({
+                "voxels": sel.len(),
+                "layer": sel.layer(),
+                "layer_name": editor.model().layers()[sel.layer()].name,
+                "min": lo,
+                "max": hi,
+            })
+        }
+    }
+}
+
+fn selection_text(editor: &Editor) -> String {
+    let j = selection_json(editor);
+    match &editor.selection {
+        None => format!("nothing selected\n{j}"),
+        Some(sel) => format!("{} voxels selected\n{j}", sel.len()),
+    }
 }
 
 fn layer_rows(editor: &Editor) -> Vec<Value> {
