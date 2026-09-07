@@ -23,6 +23,88 @@ use voxel_render::{Mat4, OrbitCamera, Vec3};
 /// yet.
 pub const DEFAULT_SIZE: u16 = 32;
 
+/// Voxels held between calls, so they can be moved rather than only drawn.
+///
+/// # Cells, not a box
+///
+/// A selection is the set of cells it actually covers, because that is what a
+/// transform moves. A box would have to carry the air inside it, and "move this
+/// arm" would then drag a cube of nothing along with the arm and erase whatever
+/// it landed on.
+///
+/// # One layer
+///
+/// The layer is part of the selection, not a lookup at use time. Tools write to
+/// the active layer and nowhere else, and a selection that silently followed the
+/// active layer would move a *different* set of voxels than the one you were
+/// shown. Spanning layers is a later question; naming one is the honest answer
+/// now.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Selection {
+    layer: usize,
+    cells: std::collections::HashSet<[i32; 3]>,
+}
+
+impl Selection {
+    pub fn new(layer: usize, cells: impl IntoIterator<Item = [i32; 3]>) -> Self {
+        Self {
+            layer,
+            cells: cells.into_iter().collect(),
+        }
+    }
+
+    pub fn layer(&self) -> usize {
+        self.layer
+    }
+
+    /// How many voxels are selected. Never zero: `Editor::selection` holds
+    /// `None` rather than an empty selection, so "is anything selected" is one
+    /// question with one answer instead of two that can disagree.
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub fn cells(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
+        self.cells.iter().copied()
+    }
+
+    /// The inclusive box the selection covers, or `None` when it is empty.
+    pub fn bounds(&self) -> Option<([i32; 3], [i32; 3])> {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for c in &self.cells {
+            for a in 0..3 {
+                lo[a] = lo[a].min(c[a]);
+                hi[a] = hi[a].max(c[a]);
+            }
+        }
+        (!self.cells.is_empty()).then_some((lo, hi))
+    }
+
+    fn shifted(&self, delta: [i32; 3]) -> Self {
+        Self {
+            layer: self.layer,
+            cells: self
+                .cells
+                .iter()
+                .map(|c| [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]])
+                .collect(),
+        }
+    }
+}
+
+/// What moving a selection did.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct MoveReport {
+    /// Cells that arrived somewhere inside the scene.
+    pub moved: usize,
+    /// Of those, ones that landed on a voxel that was not part of the
+    /// selection — replaced rather than filled.
+    pub overwritten: usize,
+    /// Cells whose destination was outside the scene, and were lost.
+    pub dropped: usize,
+}
+
 /// A validated, explicitly addressed write; batches may span several layers.
 pub struct CellWrite {
     pub layer: usize,
@@ -134,6 +216,9 @@ pub struct Editor {
     pub mirror: [bool; 3],
     pub show_grid: bool,
     pub show_help: bool,
+    /// Voxels held for a transform, if any. Not part of the document: it is
+    /// never saved, and it does not survive an undo — see [`Editor::undo`].
+    pub selection: Option<Selection>,
     /// Watching somebody else's document rather than holding one.
     ///
     /// `voxeler attach` sets it. The model belongs to a running `voxeler mcp`,
@@ -165,6 +250,7 @@ impl Editor {
             mirror: [false; 3],
             show_grid: true,
             show_help: false,
+            selection: None,
             viewing: false,
             slice: None,
             mesh: FaceMesh::default(),
@@ -491,11 +577,13 @@ impl Editor {
             face: target.face,
             // Building grows over air; erasing and painting grow over the
             // colour under the cursor, so a region stops where the colour does.
-            matches: if self.tool == Tool::Build { 0 } else { target.index },
+            matches: region::Match::Index(if self.tool == Tool::Build { 0 } else { target.index }),
             brush: self.brush,
             grounded: target.is_ground(),
             // An edit must not reach a layer the slice has taken off screen.
             y_limit: self.slice.unwrap_or(u16::MAX),
+            // A click has no box to be held inside; only a selection does.
+            within: None,
             // The composite: a click selects what the user can see, and they
             // can see which layers are stacked and undo if it was not what
             // they meant. See `write_cells`.
@@ -578,6 +666,11 @@ impl Editor {
     }
 
     pub fn undo(&mut self) {
+        // A selection names coordinates, and an undo can change what is at them
+        // arbitrarily — including putting back voxels a move took away. Keeping
+        // it would leave a selection pointing at cells that are no longer the
+        // ones it was made from, which is worse than asking for it again.
+        self.selection = None;
         match self.history.undo(&mut self.model) {
             Some(label) => {
                 self.dirty = true;
@@ -589,6 +682,7 @@ impl Editor {
     }
 
     pub fn redo(&mut self) {
+        self.selection = None;
         match self.history.redo(&mut self.model) {
             Some(label) => {
                 self.dirty = true;
@@ -597,6 +691,150 @@ impl Editor {
             }
             None => self.status = "nothing to redo".into(),
         }
+    }
+
+    // -- selection -------------------------------------------------------
+
+    /// Select the voxels of the active layer inside a box.
+    ///
+    /// The voxels, not the box: air inside it is not selected, so moving the
+    /// result carries the shape and not a cube of nothing around it.
+    pub fn select_box(&mut self, from: [i32; 3], to: [i32; 3]) -> usize {
+        let layer = self.model.active_layer();
+        let (mut lo, mut hi) = ([0i32; 3], [0i32; 3]);
+        for a in 0..3 {
+            lo[a] = from[a].min(to[a]);
+            hi[a] = from[a].max(to[a]);
+        }
+        let mut cells = Vec::new();
+        for z in lo[2]..=hi[2] {
+            for y in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    if self.model.get_in(layer, x, y, z) != 0 {
+                        cells.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        self.set_selection(Selection::new(layer, cells))
+    }
+
+    /// Select the connected piece of the active layer containing a cell.
+    ///
+    /// Connected by *material*, not by colour: an arm is one part whether or
+    /// not the glove on the end of it is a different index, and a selection
+    /// that stopped at the wrist would be the wrong answer.
+    /// `within`, when given, holds the growth inside a box. A part of a figure
+    /// is connected to the rest of it, so connectivity alone can only ever
+    /// answer "the whole figure" — the box is what makes "this arm" sayable.
+    pub fn select_connected(&mut self, at: [i32; 3], within: Option<Bounds>) -> usize {
+        let layer = self.model.active_layer();
+        if self.model.get_in(layer, at[0], at[1], at[2]) == 0 {
+            self.selection = None;
+            self.status = format!("nothing at {at:?} on this layer");
+            return 0;
+        }
+        let cells = region::cells(
+            &self.model,
+            region::Span::Volume,
+            region::Reach {
+                seed: at,
+                // Volume growth never consults the face; any of the six gives
+                // the same region.
+                face: Face::PosY,
+                matches: region::Match::Solid,
+                brush: region::Brush::default(),
+                grounded: false,
+                y_limit: self.slice.unwrap_or(u16::MAX),
+                within,
+                layer: Some(layer),
+            },
+        );
+        self.set_selection(Selection::new(layer, cells))
+    }
+
+    fn set_selection(&mut self, selection: Selection) -> usize {
+        let n = selection.len();
+        self.selection = (n > 0).then_some(selection);
+        self.status = if n > 0 {
+            format!("selected {n} voxels")
+        } else {
+            "selected nothing".into()
+        };
+        n
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.status = "selection cleared".into();
+    }
+
+    /// Move the selected voxels, as one undo step.
+    ///
+    /// The source cells are cleared and the destinations written in one batch,
+    /// clears first — so a move that overlaps itself keeps the voxels that land
+    /// on cells the move also vacated, instead of erasing its own arrival.
+    ///
+    /// The selection follows the voxels, so a move can be repeated or refined.
+    pub fn move_selection(&mut self, delta: [i32; 3]) -> Result<MoveReport, String> {
+        let Some(selection) = self.selection.clone() else {
+            return Err("nothing is selected".into());
+        };
+        if delta == [0, 0, 0] {
+            return Ok(MoveReport::default());
+        }
+        let layer = selection.layer;
+        if layer >= self.model.layer_count() {
+            return Err("the selected layer is gone".into());
+        }
+
+        // Read every colour before anything moves: a cell can be both a source
+        // and a destination, and reading as we went would carry a voxel along
+        // with the move instead of leaving it where it landed.
+        let mut carried: Vec<([i32; 3], u8)> = Vec::with_capacity(selection.len());
+        for c in selection.cells() {
+            carried.push((c, self.model.get_in(layer, c[0], c[1], c[2])));
+        }
+
+        let mut report = MoveReport::default();
+        let source: std::collections::HashSet<[i32; 3]> = selection.cells().collect();
+        let mut writes: Vec<CellWrite> = carried
+            .iter()
+            .map(|(pos, _)| CellWrite {
+                layer,
+                pos: *pos,
+                color: 0,
+            })
+            .collect();
+        for (pos, color) in &carried {
+            let to = [pos[0] + delta[0], pos[1] + delta[1], pos[2] + delta[2]];
+            if !self.model.contains(to[0], to[1], to[2]) {
+                report.dropped += 1;
+                continue;
+            }
+            report.moved += 1;
+            if !source.contains(&to) && self.model.get_in(layer, to[0], to[1], to[2]) != 0 {
+                report.overwritten += 1;
+            }
+            writes.push(CellWrite {
+                layer,
+                pos: to,
+                color: *color,
+            });
+        }
+
+        self.apply_writes("move selection", writes, |_, _| {});
+        self.selection = Some(selection.shifted(delta));
+        self.status = format!(
+            "moved {} voxels{}",
+            report.moved,
+            if report.dropped > 0 {
+                format!(", {} lost off the edge", report.dropped)
+            } else {
+                String::new()
+            }
+        );
+        Ok(report)
     }
 
     /// Scale the whole scene up, so every voxel becomes `factor`³ of them.
@@ -1888,6 +2126,193 @@ mod tests {
         assert_eq!(e.model().get(3, 0, 7), 9, "the whole half it was aimed at");
         assert_eq!(e.model().get(4, 0, 1), 5, "the other colour is a boundary");
         assert_eq!(e.model().filled_count(), 64, "a paint creates nothing");
+    }
+
+    // -- selection -------------------------------------------------------
+
+    /// A box selects the voxels in it, not the box: air inside carries nothing,
+    /// and moving the result must not drag a cube of nothing along.
+    #[test]
+    fn a_box_selects_the_voxels_inside_it_and_not_the_air() {
+        let mut e = editor_with_floor();
+        e.model.set(2, 3, 2, 7);
+        assert_eq!(e.select_box([0, 0, 0], [7, 7, 7]), 65, "the floor and the speck");
+
+        let sel = e.selection.as_ref().unwrap();
+        assert_eq!(sel.layer(), 0);
+        assert_eq!(sel.bounds(), Some(([0, 0, 0], [7, 3, 7])));
+        assert!(sel.cells().all(|c| e.model().get_in(0, c[0], c[1], c[2]) != 0));
+    }
+
+    /// Connected by material, not by colour — a part made of two colours is one
+    /// part, and a selection that stopped at the seam would be the wrong answer.
+    #[test]
+    fn a_connected_selection_crosses_a_colour_seam_and_stops_at_air() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 2..6 {
+            e.model.set(x, 1, 1, if x < 4 { 3 } else { 9 });
+        }
+        e.model.set(12, 1, 1, 3); // a separate piece
+
+        assert_eq!(e.select_connected([2, 1, 1], None), 4, "both colours, one part");
+        assert_eq!(e.selection.as_ref().unwrap().bounds(), Some(([2, 1, 1], [5, 1, 1])));
+
+        // Air is not a part.
+        assert_eq!(e.select_connected([8, 8, 8], None), 0);
+        assert!(e.selection.is_none());
+    }
+
+    /// The motivating case: a limb is attached to the body, so connectivity
+    /// alone answers "the whole figure". The box is what makes "this arm"
+    /// sayable.
+    #[test]
+    fn a_box_holds_a_connected_selection_to_one_limb() {
+        let mut e = Editor::new(VoxelModel::new(24, 24, 24), PathBuf::from("t.vxm"));
+        for z in 10..14 {
+            for y in 4..16 {
+                for x in 10..14 {
+                    e.model.set(x, y, z, 4); // torso
+                }
+            }
+        }
+        for z in 11..13 {
+            for y in 10..16 {
+                for x in 7..10 {
+                    e.model.set(x, y, z, 9); // an arm, touching it
+                }
+            }
+        }
+        let whole = e.select_connected([8, 12, 11], None);
+        assert!(whole > 200, "unbounded, the arm is the whole figure: {whole}");
+
+        let arm = e.select_connected(
+            [8, 12, 11],
+            Some(Bounds::new([7, 0, 0], [3, 24, 24])),
+        );
+        assert_eq!(arm, 3 * 6 * 2, "just the arm");
+        assert_eq!(
+            e.selection.as_ref().unwrap().bounds(),
+            Some(([7, 10, 11], [9, 15, 12]))
+        );
+    }
+
+    #[test]
+    fn moving_a_selection_takes_the_voxels_with_it_in_one_step() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 2..5 {
+            e.model.set(x, 1, 1, 4);
+        }
+        e.select_connected([2, 1, 1], None);
+
+        let r = e.move_selection([0, 5, 0]).unwrap();
+        assert_eq!(r.moved, 3);
+        assert_eq!(r.dropped, 0);
+        assert_eq!(r.overwritten, 0);
+        assert_eq!(e.model().filled_count(), 3, "moved, not copied");
+        for x in 2..5 {
+            assert_eq!(e.model().get(x, 1, 1), 0, "the source is empty");
+            assert_eq!(e.model().get(x, 6, 1), 4);
+        }
+        assert_eq!(e.undo_depth(), 1);
+
+        // The selection follows, so the move can be repeated.
+        assert_eq!(e.selection.as_ref().unwrap().bounds(), Some(([2, 6, 1], [4, 6, 1])));
+        e.move_selection([0, 1, 0]).unwrap();
+        assert_eq!(e.model().get(2, 7, 1), 4);
+    }
+
+    /// The case a naive implementation eats: a move shorter than the selection
+    /// overlaps itself, and reading colours as it went would carry a voxel
+    /// along instead of leaving it where it landed.
+    #[test]
+    fn a_move_that_overlaps_itself_keeps_every_voxel() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        for x in 2..8 {
+            e.model.set(x, 1, 1, (x as u8) + 10);
+        }
+        e.select_box([2, 1, 1], [7, 1, 1]);
+
+        let r = e.move_selection([1, 0, 0]).unwrap();
+        assert_eq!(r.moved, 6);
+        assert_eq!(e.model().filled_count(), 6, "none lost, none duplicated");
+        assert_eq!(e.model().get(2, 1, 1), 0, "the vacated cell");
+        for x in 2..8 {
+            assert_eq!(
+                e.model().get(x + 1, 1, 1),
+                (x as u8) + 10,
+                "colour {x} arrived intact"
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_off_the_edge_loses_what_leaves_and_counts_it() {
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        for x in 0..4 {
+            e.model.set(x, 1, 1, 4);
+        }
+        e.select_box([0, 1, 1], [3, 1, 1]);
+
+        let r = e.move_selection([6, 0, 0]).unwrap();
+        assert_eq!(r.moved, 2, "two fitted");
+        assert_eq!(r.dropped, 2, "two went off the end");
+        assert_eq!(e.model().filled_count(), 2);
+    }
+
+    #[test]
+    fn a_move_onto_occupied_cells_reports_what_it_replaced() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        e.model.set(1, 1, 1, 4);
+        e.model.set(5, 1, 1, 9);
+        e.select_box([1, 1, 1], [1, 1, 1]);
+
+        let r = e.move_selection([4, 0, 0]).unwrap();
+        assert_eq!(r.overwritten, 1);
+        assert_eq!(e.model().get(5, 1, 1), 4, "the mover won");
+        assert_eq!(e.model().filled_count(), 1);
+    }
+
+    /// A selection names coordinates, and an undo changes what is at them.
+    /// Keeping it would leave it pointing at cells it was not made from.
+    #[test]
+    fn undo_puts_the_voxels_back_and_drops_the_selection() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        e.model.set(2, 1, 1, 4);
+        e.select_connected([2, 1, 1], None);
+        e.move_selection([0, 4, 0]).unwrap();
+        assert_eq!(e.model().get(2, 5, 1), 4);
+
+        e.undo();
+        assert_eq!(e.model().get(2, 1, 1), 4, "back where it was");
+        assert_eq!(e.model().get(2, 5, 1), 0);
+        assert!(e.selection.is_none());
+    }
+
+    #[test]
+    fn moving_with_nothing_selected_says_so_and_changes_nothing() {
+        let mut e = editor_with_floor();
+        assert!(e.move_selection([1, 0, 0]).is_err());
+        assert_eq!(e.undo_depth(), 0);
+        // And a move of nowhere is not an undo step either.
+        e.select_box([0, 0, 0], [7, 0, 7]);
+        assert_eq!(e.move_selection([0, 0, 0]).unwrap(), MoveReport::default());
+        assert_eq!(e.undo_depth(), 0);
+    }
+
+    /// The selection belongs to the layer it was made on, so a later change of
+    /// active layer moves the voxels that were shown, not different ones.
+    #[test]
+    fn a_selection_keeps_the_layer_it_was_made_on() {
+        let mut e = editor_with_floor();
+        e.add_layer();
+        e.select_layer(0);
+        e.select_box([0, 0, 0], [7, 0, 7]);
+        assert_eq!(e.selection.as_ref().unwrap().layer(), 0);
+
+        e.select_layer(1);
+        e.move_selection([0, 4, 0]).unwrap();
+        assert_eq!(e.model().get_in(0, 3, 4, 3), 4, "moved on layer 0");
+        assert_eq!(e.model().layers()[1].filled_count(), 0, "layer 1 untouched");
     }
 
     /// Every layer at once, and one `ctrl+Z` puts the whole thing back — scene

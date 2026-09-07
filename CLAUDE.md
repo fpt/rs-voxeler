@@ -103,6 +103,42 @@ Three rules, all in `Editor::continue_stroke` and its neighbours:
   the stroke was empty. A tool acting only on the active layer is a rule; a tool
   that ignores you with no explanation is a bug report.
 
+### A selection is cells, on one layer, and not part of the document
+
+`Editor::selection` is what makes an existing shape something you can pick up
+rather than only draw. Four decisions hold it together, and each has a failure
+mode on the other side:
+
+- **Cells, not a box.** A box would carry the air inside it, and moving "this
+  arm" would drag a cube of nothing along and erase whatever it landed on.
+- **One layer, named at selection time.** Tools write to the active layer; a
+  selection that followed the *current* active layer would move a different set
+  of voxels than the one the user was shown.
+- **Never empty.** `Editor::selection` holds `None` rather than an empty
+  `Selection`, so "is anything selected" is one question with one answer instead
+  of two that can disagree.
+- **Dropped on undo.** A selection names coordinates and an undo changes what is
+  at them — including putting back voxels a move took away. Keeping it would
+  leave it pointing at cells it was not made from.
+
+`move_selection` reads **every colour before anything moves**, then emits the
+clears ahead of the writes in one `apply_writes`. A move shorter than the
+selection overlaps itself, and reading as it went would carry a voxel along
+instead of leaving it where it landed — there is a test that walks a six-cell bar
+one step and checks all six colours arrive.
+
+`region::Match` splits the question a region answers. A *fill* asks about a
+colour and stops where the colour changes, which is what makes it a fill. A
+*selection* asks about material: an arm is one part whether or not the glove on
+the end is a different index.
+
+`region::Reach::within` bounds the growth. Connectivity alone can only ever
+answer "the whole figure", because a limb is attached to its body — this was
+found by driving the real binary, where `select_connected` on an arm returned all
+324 voxels of the figure. The box is checked **during** growth, not applied to
+the result: a flood that spread through cells outside it and was trimmed at the
+end would reach parts the box was meant to keep out.
+
 ### Subdividing, and what a snapshot has to hold
 
 `VoxelModel::subdivide` scales the scene so every voxel becomes `factor`³ of
