@@ -88,6 +88,13 @@ impl Bounds {
     }
 }
 
+/// The edge of a chunk, in voxels.
+///
+/// The unit a rebuild happens in. 16 because a dense one is 4 KiB — cheap to
+/// walk and kind to a cache — where 8 multiplies the bookkeeping and 32 makes
+/// one voxel's worth of work touch thirty-two thousand cells.
+pub const CHUNK: u16 = 16;
+
 /// A whole stack at one moment, and the scene it was sized for.
 ///
 /// What an undo step holds when the change was structural rather than a list of
@@ -249,6 +256,18 @@ pub struct VoxelModel {
     /// and because it is what lets every caller of `set` ignore layers.
     active: usize,
     palette: Palette,
+    /// Which chunks have changed since a consumer last looked.
+    ///
+    /// Face extraction is the expensive thing a change makes necessary — at
+    /// 256³ a full rebuild is ~300 ms — and almost every change is one voxel.
+    /// Marking the chunk it fell in lets that rebuild be proportional to the
+    /// edit rather than to the model.
+    ///
+    /// A bitset over the scene's chunk grid rather than a set of coordinates: a
+    /// fill writes sixteen million cells, and sixteen million hash inserts
+    /// would cost more than the rebuild they were meant to save. At 256³ the
+    /// whole thing is 4 096 bits.
+    dirty: Vec<bool>,
     /// How many cells are visible, kept in step with the layers.
     ///
     /// Counted rather than recounted because the answer is asked for far more
@@ -282,6 +301,7 @@ impl VoxelModel {
             layers: vec![Layer::new("LAYER 1", Bounds::default())],
             active: 0,
             palette: Palette::default(),
+            dirty: vec![true; chunk_count([sx, sy, sz])],
             filled: 0,
         }
     }
@@ -289,6 +309,75 @@ impl VoxelModel {
     /// The scene's range on each axis.
     pub fn size(&self) -> [u16; 3] {
         self.size
+    }
+
+    // -- what has changed -------------------------------------------------
+
+    /// The scene's size in chunks.
+    pub fn chunk_dims(&self) -> [usize; 3] {
+        chunk_dims(self.size)
+    }
+
+    /// Whether a chunk needs rebuilding.
+    pub fn chunk_is_dirty(&self, index: usize) -> bool {
+        self.dirty.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn dirty_chunk_count(&self) -> usize {
+        self.dirty.iter().filter(|d| **d).count()
+    }
+
+    /// Say every chunk is clean. The consumer that rebuilt them calls this —
+    /// the model does not know when anyone has caught up.
+    pub fn clear_dirty(&mut self) {
+        self.dirty.fill(false);
+    }
+
+    /// Mark everything, for a change too broad to attribute to cells.
+    pub fn dirty_all(&mut self) {
+        self.dirty.clear();
+        self.dirty.resize(chunk_count(self.size), true);
+        self.dirty.fill(true);
+    }
+
+    /// Mark the chunk a cell falls in — and, when the cell sits against a
+    /// chunk's face, the chunk on the other side.
+    ///
+    /// A face is emitted for a cell towards its neighbour, so a cell on a
+    /// boundary is part of the answer for the chunk next door as well. Only a
+    /// boundary cell needs that: fourteen of every sixteen along an axis are
+    /// interior and cost one mark.
+    fn mark(&mut self, x: i32, y: i32, z: i32) {
+        let dims = self.chunk_dims();
+        let c = [
+            x as usize / CHUNK as usize,
+            y as usize / CHUNK as usize,
+            z as usize / CHUNK as usize,
+        ];
+        self.mark_chunk(c, dims);
+        let local = [
+            x as u16 % CHUNK,
+            y as u16 % CHUNK,
+            z as u16 % CHUNK,
+        ];
+        for a in 0..3 {
+            if local[a] == 0 && c[a] > 0 {
+                let mut n = c;
+                n[a] -= 1;
+                self.mark_chunk(n, dims);
+            } else if local[a] == CHUNK - 1 && c[a] + 1 < dims[a] {
+                let mut n = c;
+                n[a] += 1;
+                self.mark_chunk(n, dims);
+            }
+        }
+    }
+
+    fn mark_chunk(&mut self, c: [usize; 3], dims: [usize; 3]) {
+        let i = c[0] + c[1] * dims[0] + c[2] * dims[0] * dims[1];
+        if let Some(d) = self.dirty.get_mut(i) {
+            *d = true;
+        }
     }
 
     /// How many voxel cells are actually allocated, across every layer. What
@@ -360,6 +449,7 @@ impl VoxelModel {
             layer.filled = 0;
         }
         self.filled = 0;
+        self.dirty_all();
     }
 
     /// How many cells are not air, as seen. O(1).
@@ -472,6 +562,11 @@ impl VoxelModel {
             (true, false) => self.filled -= 1,
             _ => {}
         }
+        // Even a recolour changes the faces' colour, so the chunk is dirty
+        // whenever the value moved at all.
+        if before != value {
+            self.mark(x, y, z);
+        }
         before
     }
 
@@ -579,6 +674,7 @@ impl VoxelModel {
         self.layers.remove(i);
         self.active = self.active.min(self.layers.len() - 1);
         self.refresh_count();
+        self.dirty_all();
         true
     }
 
@@ -595,6 +691,7 @@ impl VoxelModel {
             self.active = i;
         }
         self.refresh_count();
+        self.dirty_all();
         Some(j)
     }
 
@@ -619,6 +716,7 @@ impl VoxelModel {
         self.layers.remove(i);
         self.active = self.active.min(self.layers.len() - 1);
         self.refresh_count();
+        self.dirty_all();
         true
     }
 
@@ -626,6 +724,7 @@ impl VoxelModel {
         if let Some(l) = self.layers.get_mut(i) {
             l.visible = visible;
             self.refresh_count();
+        self.dirty_all();
         }
     }
 
@@ -664,6 +763,7 @@ impl VoxelModel {
         self.active = snapshot.active.min(snapshot.layers.len() - 1);
         self.layers = snapshot.layers;
         self.refresh_count();
+        self.dirty_all();
     }
 
     /// Scale the whole scene up, so every voxel becomes `factor`³ of them.
@@ -730,6 +830,7 @@ impl VoxelModel {
             self.size[2] * factor,
         ];
         self.refresh_count();
+        self.dirty_all();
         Ok(())
     }
 
@@ -747,6 +848,7 @@ impl VoxelModel {
             self.layers[i].reshape(clamped);
         }
         self.refresh_count();
+        self.dirty_all();
     }
 
     /// The inclusive bounding box of the visible cells, or `None` when empty.
@@ -764,6 +866,20 @@ impl VoxelModel {
         }
         any.then_some((min, max))
     }
+}
+
+/// The scene's size in chunks, rounding up: a scene need not be a multiple of
+/// [`CHUNK`], and the last chunk on an axis is simply short.
+fn chunk_dims(size: [u16; 3]) -> [usize; 3] {
+    [
+        size[0].div_ceil(CHUNK) as usize,
+        size[1].div_ceil(CHUNK) as usize,
+        size[2].div_ceil(CHUNK) as usize,
+    ]
+}
+
+fn chunk_count(size: [u16; 3]) -> usize {
+    chunk_dims(size).iter().product()
 }
 
 #[cfg(test)]

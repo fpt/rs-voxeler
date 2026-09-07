@@ -367,6 +367,41 @@ slab reported "100 added", left the slab untouched, and put a hundred-cell ghost
 on the layer above. `mcp::tools`' `fill` now reads the active layer and refuses
 a seed another layer owns, naming the layer to select instead.
 
+### A rebuild is proportional to the edit, not to the model
+
+Face extraction is what a change makes necessary, a full one at 256³ costs about
+300 ms, and almost every change is one voxel. So the mesh is kept **per chunk**
+(`CHUNK` = 16, a 4 KiB dense one — 8 multiplies the bookkeeping, 32 makes one
+voxel's work touch thirty-two thousand cells), and only the chunks the model
+says have changed are walked again.
+
+`VoxelModel::dirty` is a bitset over the scene's chunk grid, not a set of
+coordinates: a fill writes sixteen million cells, and sixteen million hash
+inserts would cost more than the rebuild they were meant to save. At 256³ the
+whole thing is 4 096 bits.
+
+`set_in` marks the chunk a cell fell in, **and the neighbour across a shared
+face when the cell sits against one** — a face belongs to the cell that emits it,
+so a boundary cell is part of its neighbour's answer too. Fourteen of every
+sixteen cells along an axis are interior and cost one mark. Anything not
+attributable to cells — a slice moving, a layer hidden, a subdivide — calls
+`dirty_all`, and the editor does the same for the slice because the cut is not a
+property of any one chunk.
+
+`Editor::mesh` is the consumer that catches up, so it is where `clear_dirty` is
+called. The model does not know who has looked.
+
+Two things fall out of walking a chunk's cells rather than a layer's:
+
+- **The `owner_at` dedupe is gone.** A chunk walk asks `get`, which is already
+  one value per cell, so an overlap resolves itself.
+- **A chunk no layer reaches is free**, which is what keeps a sparse scene cheap
+  — but the test has to ask whether the layer is *empty* as well as where its box
+  is. A box is a high-water mark: a cleared layer keeps its size until someone
+  trims it, and without that test a cleared 256³ scene swept every cell it used
+  to have to find nothing. It did, briefly: 19 ms became 40 ms before the check
+  went in.
+
 ### Counts are maintained, not walked
 
 `VoxelModel::filled_count` and `Layer::filled_count` are O(1) fields kept in
@@ -838,7 +873,8 @@ rs-voxeler/
   `MAX_PIXELS` (1.4 M) and upscales; if that is being hit, the cost is the
   rasterizer, and greedy meshing is the lever, not the cap.
 - **The editor feels slow on a large *scene*.** Different cost, and measure
-  before guessing. At 256³ the remaining ones are face extraction (~300 ms per
-  rebuild, which is chunked dirty tracking's job — see the sparse-chunk issue)
-  and the undo history, which stores an `Edit` per changed cell and so costs
-  ~170 MB for a fill of the whole scene. Neither is a lookup problem any more.
+  before guessing. At 256³ what is left is `occupied_bounds` — an O(filled) walk
+  that `frame_model` calls, and every `screenshot` frames — and the undo history,
+  which stores an `Edit` per changed cell and so costs ~170 MB for a fill of the
+  whole scene. Extraction is no longer among them unless something called
+  `dirty_all`.

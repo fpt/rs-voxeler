@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use voxel_core::region::{self, Brush, BrushShape, Span, MAX_BRUSH};
 use voxel_core::{format, Bounds, Face, History, RayHit, Stroke, VoxelModel};
-use voxel_render::mesh::{extract, ExtractOptions, FaceMesh};
+use voxel_render::mesh::{extract_dirty, ExtractOptions, FaceMesh};
 use voxel_render::{Mat4, OrbitCamera, Vec3};
 
 /// The default edge length for a new model.
@@ -356,12 +356,19 @@ impl Editor {
     /// The extracted surface, rebuilt only when something has changed it.
     pub fn mesh(&mut self) -> &FaceMesh {
         if self.mesh_dirty {
-            self.mesh = extract(
+            // Only the chunks the model says have changed. One voxel placed is
+            // one chunk rebuilt — and its neighbour, when the voxel sat against
+            // a chunk's face — rather than the whole model.
+            extract_dirty(
                 &self.model,
                 ExtractOptions {
                     y_limit: self.slice.unwrap_or(u16::MAX),
                 },
+                &mut self.mesh,
             );
+            // This is the consumer that has caught up, so this is where the
+            // marks are cleared.
+            self.model.clear_dirty();
             self.mesh_dirty = false;
         }
         &self.mesh
@@ -1504,6 +1511,10 @@ impl Editor {
         if self.slice == Some(sy) {
             self.slice = None;
         }
+        // The cut is not a property of any one chunk: moving it changes which
+        // faces exist throughout, so nothing that was built for the old one
+        // still stands.
+        self.model.dirty_all();
         self.invalidate_mesh();
         self.status = match self.slice {
             Some(s) => format!("slice below y={s}"),
@@ -2215,7 +2226,7 @@ mod tests {
         assert!(full.voxel[1] >= 3, "the unsliced pick must be above the cut");
 
         e.set_slice(Some(3));
-        assert!(e.mesh().quads.iter().all(|q| q.voxel[1] < 3));
+        assert!(e.mesh().quads().all(|q| q.voxel[1] < 3));
         let sliced = e.target_at(160.0, 120.0, 320, 240).unwrap();
         assert_eq!(sliced.voxel[1], 2, "should pick the top of the slice");
     }
@@ -3139,7 +3150,7 @@ mod tests {
     fn hiding_a_layer_takes_it_out_of_the_mesh_and_off_the_pick() {
         let mut e = editor_with_floor();
         e.toggle_layer_visible();
-        assert!(e.mesh().quads.is_empty(), "a hidden layer draws nothing");
+        assert!(e.mesh().is_empty(), "a hidden layer draws nothing");
         e.tool = Tool::Erase;
         assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
         assert!(e.is_dirty(), "which layers are hidden is part of the model");
