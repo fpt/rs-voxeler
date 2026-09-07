@@ -1,0 +1,70 @@
+# What `make check` runs, on every push and pull request.
+#
+# Deliberately the same two commands the Makefile names, rather than a second
+# definition of "is this good" that drifts from the one people run locally.
+#
+# `cargo fmt --check` is *not* here: the tree is not rustfmt-clean, and the
+# comments in it are hand-wrapped to sit under their code. Reformatting is a
+# decision to take on purpose, not a thing to discover from a red build.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to a branch makes the first run irrelevant.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace costs nothing until something panics, and then it is the whole
+  # of what a CI log is for.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # winit and softbuffer need these to build on Linux. The runner image
+      # ships a Rust toolchain, so there is no toolchain action to keep pinned.
+      - name: Install window-system headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev pkg-config
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Versions
+        run: cargo --version && cargo clippy --version
+
+      - name: Test
+        run: make test
+
+      - name: Lint
+        run: make lint
+
+      # The one end-to-end check a headless runner can make: load a model,
+      # extract its faces, rasterise them and write a PNG. `--thumbnail` exists
+      # partly for this — it is how the renderer gets checked on a machine with
+      # no display.
+      - name: Render a thumbnail
+        run: |
+          cd crates && cargo build
+          cd ..
+          ./crates/target/debug/voxeler models/robot.vxm --thumbnail /tmp/robot.png
+          test -s /tmp/robot.png
