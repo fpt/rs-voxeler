@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use voxel_core::VoxelModel;
 
-use super::tools::{self, Root};
+use super::tools::{self, Roots};
 use super::wire::{CallParams, CallResult, Request, Response, PARSE_ERROR};
 use super::ToolHost;
 use crate::editor::Editor;
@@ -83,7 +83,7 @@ impl Shared {
 /// Runs tool calls directly, holding the lock only for the call itself.
 struct Direct {
     shared: Shared,
-    root: Root,
+    root: Roots,
 }
 
 impl ToolHost for Direct {
@@ -93,13 +93,17 @@ impl ToolHost for Direct {
         live.bump();
         result
     }
+
+    fn instructions(&self) -> String {
+        self.root.instructions()
+    }
 }
 
 /// Serve on stdin/stdout until the input closes.
 ///
 /// `shared` is handed in rather than made here so the caller can also give it to
 /// the attach listener — the two are the same editor, which is the whole point.
-pub fn serve_stdio(shared: Shared, root: Root) {
+pub fn serve_stdio(shared: Shared, root: Roots) {
     let host = Direct {
         shared,
         root: root.clone(),
@@ -174,7 +178,7 @@ mod tests {
                 VoxelModel::new(8, 8, 8),
                 PathBuf::from("t.vxm"),
             )),
-            root: Root::new(std::env::temp_dir()),
+            root: Roots::new([std::env::temp_dir()]),
         }
     }
 
