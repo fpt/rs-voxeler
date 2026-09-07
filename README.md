@@ -23,6 +23,14 @@ cd crates && cargo build --release
 | `voxel-render` | a software rasterizer: face extraction, orbit camera, z-buffer, flat shading, PNG output |
 | `voxeler` | the editor: a window, four tools across four reaches, layers, a palette you can click, and an MCP server |
 
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how it is put together, and
+  why each load-bearing decision is the shape it is, with the measurements that
+  settled the ones measurement settled.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — building, testing, measuring,
+  and the mistakes this codebase has already made once.
+
 ## Using the editor
 
 ```bash
@@ -174,11 +182,13 @@ symmetrically.
 
 ## Driving it from an agent
 
-The repository includes a reusable modeling skill at
-[`skills/voxeler-modeling/SKILL.md`](skills/voxeler-modeling/SKILL.md), covering
-reference-based modeling, layered batch edits and verified previews. Ask your
-agent to read it for an asset task, or install the `voxeler-modeling` directory
-in your agent's skill directory for discovery.
+The repository includes two reusable skills:
+[`skills/voxeler-modeling`](skills/voxeler-modeling/SKILL.md) for building a
+model from scratch — reference-based modeling, layered batch edits and verified
+previews — and [`skills/voxeler-editing`](skills/voxeler-editing/SKILL.md) for
+changing one that already exists. Ask your agent to read the one that fits the
+task, or install either directory in your agent's skill directory for
+discovery.
 
 Two transports, because they answer different questions.
 

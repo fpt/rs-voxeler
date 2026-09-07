@@ -44,6 +44,17 @@ Three rules make the box invisible in ordinary use:
   starting size, not a wall.
 - **Writing air outside it does not grow it.** An erase that missed has nothing
   to record, and it is the one way a box could grow without gaining anything.
+- **Growing is a copy, never a recount.** A box that only grew holds the same
+  cells in the same order, so a row of x copies whole with `copy_from_slice`,
+  `filled` stands, and each axis' plane counts are the old ones shifted by
+  however far that origin moved. The general path — the one a trim or a scene
+  resize needs, where cells can be dropped — walks every cell of the box doing a
+  division and two remainders. Filling a 256³ scene grows the box about 768
+  times, so that walk ran over 2.1 billion cells: five seconds, and the whole of
+  why a bulk fill was slow. It is 319 ms now. Measured, and the reason the
+  policy did **not** change — growing geometrically would have bought the last
+  2.4× by making every box up to 1.5× too big on each axis, which is the
+  guarantee this design exists to make.
 - **It shrinks only when asked** (`trim_layer`), *except* when the layer becomes
   empty, which gives the box back at once. The high-water mark exists so that
   erasing and redrawing in one spot does not reallocate every stroke, and an
@@ -788,7 +799,8 @@ rs-voxeler/
 │   ├── edit.rs            Stroke + History
 │   ├── raycast.rs         Amanatides–Woo grid traversal
 │   ├── region.rs          how far one edit reaches: brush, run, flood
-│   └── format/            .vxm (ours) and .vox (MagicaVoxel)
+│   ├── format/            .vxm (ours) and .vox (MagicaVoxel)
+│   └── examples/          write-cost.rs — what a write costs, by shape
 ├── crates/voxel-render/   the software rasterizer, editor-free
 │   ├── math.rs            Vec3/Vec4/Mat4
 │   ├── camera.rs          orbit camera + pick ray
@@ -804,7 +816,8 @@ rs-voxeler/
 │   ├── hud.rs             palette strip, status line, help card
 │   └── app.rs             winit events in, a blitted framebuffer out
 ├── models/                sample models
-└── docs/
+├── skills/                voxeler-modeling, voxeler-editing
+└── docs/                  ARCHITECTURE.md, DEVELOPMENT.md
 ```
 
 ## Testing notes
@@ -887,8 +900,8 @@ rs-voxeler/
   `MAX_PIXELS` (1.4 M) and upscales; if that is being hit, the cost is the
   rasterizer, and greedy meshing is the lever, not the cap.
 - **The editor feels slow on a large *scene*.** Different cost, and measure
-  before guessing. At 256³ what is left is a bulk *fill* — dominated by a layer's
-  box growing one cell at a time, which reshapes and copies on every write that
-  falls outside it — and the undo history, which stores an `Edit` per changed
-  cell and so costs ~170 MB for a fill of the whole scene. Neither lookups nor
-  extraction are among them any more.
+  before guessing. At 256³ what is left is the undo history, which stores an
+  `Edit` per changed cell and so costs ~170 MB for a fill of the whole scene.
+  Lookups, extraction and box growth are no longer among them: a full 256³ fill
+  is 319 ms against the 134 ms it costs with the box declared up front, and the
+  remaining 2.4× is memcpy traffic that only a looser box would remove.
