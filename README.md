@@ -1,7 +1,8 @@
-# furnance
+# rs-voxeler
 
 A voxel model editor and software renderer in Rust — the 3D successor to
-[`rs-kessel`](../rs-kessel), and a Rust rewrite of the ideas in `voxeler`.
+[`rs-kessel`](../rs-kessel), and a Rust rewrite of the ideas in the Python
+`voxeler`.
 
 The first milestone is deliberately small: **build a model in your own editor,
 save it, load it back, and see it rendered.** No VM, no scene graph, no game

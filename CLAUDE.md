@@ -1,4 +1,4 @@
-# Furnance — Developer Guide
+# rs-voxeler — Developer Guide
 
 ## Overview
 
@@ -195,7 +195,7 @@ what you meant.
 ## Project Structure
 
 ```text
-furnance/
+rs-voxeler/
 ├── crates/voxel-core/     the model, host- and render-free
 │   ├── model.rs           the dense grid
 │   ├── palette.rs         256 colours; 0 is air
