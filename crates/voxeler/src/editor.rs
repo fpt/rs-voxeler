@@ -94,6 +94,15 @@ struct Drag {
     /// the rest of the drag: its first placement fills the active layer, which
     /// would otherwise close the plane out from under the remaining moves.
     on_plane: bool,
+    /// What each cell this stroke has touched held **before** it did.
+    ///
+    /// A drag has to keep aiming at the model it started on. Placing a voxel
+    /// puts a new face under the pointer, and the next mouse event — the jitter
+    /// of the click itself is enough — would build against that, so one click
+    /// laid down a voxel per event. Erasing has the mirror of it: the hole it
+    /// opens lets the next event reach the wall behind. Casting through this
+    /// map makes the stroke's own work invisible to its own aim.
+    before: std::collections::HashMap<[i32; 3], u8>,
 }
 
 pub struct Editor {
@@ -249,13 +258,18 @@ impl Editor {
         let origin = [origin.x - offset.x, origin.y - offset.y, origin.z - offset.z];
         let dir = [dir.x, dir.y, dir.z];
 
-        let hit = voxel_core::raycast::cast(&self.model, origin, dir, self.camera.far);
+        // While a stroke is in progress the ray must not see what that stroke
+        // has done, or a drag re-aims at its own work — see `Drag::before`.
+        let empty = std::collections::HashMap::new();
+        let before = self.drag.as_ref().map_or(&empty, |d| &d.before);
+        let mask = |cell: [i32; 3]| before.get(&cell).copied();
+        let hit = voxel_core::raycast::cast_masked(&self.model, origin, dir, self.camera.far, &mask);
         // A slice hides the layers above the cut, and a ray must not pick a
         // voxel that is not on screen. Re-cast from just under the cut instead,
         // so clicking through the opening reaches the cross-section.
         let hit = match (hit, self.slice) {
             (Some(h), Some(limit)) if h.voxel[1] >= limit as i32 => {
-                self.cast_below_slice(origin, dir, limit)
+                self.cast_below_slice(origin, dir, limit, &mask)
             }
             (h, _) => h,
         };
@@ -356,7 +370,13 @@ impl Editor {
     /// is a second traversal that skips cells by height, which duplicates the
     /// traversal logic for one caller. A slice click is a user action at human
     /// speed, so the copy costs nothing anyone can perceive.
-    fn cast_below_slice(&self, origin: [f32; 3], dir: [f32; 3], limit: u16) -> Option<RayHit> {
+    fn cast_below_slice(
+        &self,
+        origin: [f32; 3],
+        dir: [f32; 3],
+        limit: u16,
+        mask: &dyn Fn([i32; 3]) -> Option<u8>,
+    ) -> Option<RayHit> {
         let mut sliced = self.model.clone();
         let [sx, sy, sz] = sliced.size();
         for y in limit..sy {
@@ -366,7 +386,7 @@ impl Editor {
                 }
             }
         }
-        voxel_core::raycast::cast(&sliced, origin, dir, self.camera.far)
+        voxel_core::raycast::cast_masked(&sliced, origin, dir, self.camera.far, mask)
     }
 
     // -- editing ---------------------------------------------------------
@@ -397,6 +417,7 @@ impl Editor {
                 .model
                 .owner_at(target.voxel[0], target.voxel[1], target.voxel[2]),
             on_plane: target.is_ground(),
+            before: std::collections::HashMap::new(),
         });
         self.continue_stroke(target);
     }
@@ -446,6 +467,10 @@ impl Editor {
             if (self.model.get_in(layer, x, y, z) != 0) != wants_solid {
                 continue;
             }
+            // The composite, not the layer: what the *ray* would have found
+            // here before this stroke ran.
+            let was = self.model.get(x, y, z);
+            drag.before.entry([x, y, z]).or_insert(was);
             drag.stroke.set(&mut self.model, x, y, z, value);
         }
         self.invalidate_mesh();
@@ -1221,6 +1246,118 @@ mod tests {
         let t = e.target_at(160.0, 120.0, 320, 240).expect("should hit");
         assert_eq!(t.face, Face::PosY);
         assert_eq!(t.cell, [t.voxel[0], 1, t.voxel[2]]);
+    }
+
+    /// A stroke must keep aiming at the model it started on.
+    ///
+    /// The bug, reported from use: one click added two voxels. Placing one puts
+    /// a new face under the pointer, and the next mouse event — a click emits
+    /// one of its own — built against *that*, so a click laid down a voxel per
+    /// event. The plane pin did not catch it because the new face was a side
+    /// face, which puts the next cell on the same plane.
+    #[test]
+    fn a_click_places_one_voxel_however_many_events_it_takes() {
+        for (label, pitch) in [("3/4 view", 0.6f32), ("low", 0.35), ("high", 1.0)] {
+            let mut model = VoxelModel::new(16, 16, 16);
+            for z in 0..16 {
+                for x in 0..16 {
+                    model.set(x, 0, z, 4);
+                }
+            }
+            let mut e = Editor::new(model, PathBuf::from("t.vxm"));
+            e.camera.yaw = 0.7;
+            e.camera.pitch = pitch;
+            let before = e.model().filled_count();
+
+            let Some(t) = e.target_at(160.0, 120.0, 320, 240) else { continue };
+            e.begin_stroke(t);
+            // The same pixel, several times: no movement at all, which is the
+            // most a click can honestly claim.
+            for _ in 0..4 {
+                if let Some(t) = e.target_at(160.0, 120.0, 320, 240) {
+                    e.continue_stroke(t);
+                }
+            }
+            e.end_stroke();
+            assert_eq!(
+                e.model().filled_count(),
+                before + 1,
+                "{label}: one click placed {} voxels",
+                e.model().filled_count() - before
+            );
+        }
+    }
+
+    /// The mirror of it: an erase opens a hole, and the next event must not
+    /// reach the wall behind through it.
+    #[test]
+    fn a_click_erases_one_voxel_and_does_not_dig() {
+        let mut model = VoxelModel::new(16, 16, 16);
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    model.set(x, y, z, 4);
+                }
+            }
+        }
+        let mut e = Editor::new(model, PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.7;
+        e.camera.pitch = 0.6;
+        e.tool = Tool::Erase;
+        let before = e.model().filled_count();
+
+        let t = e.target_at(160.0, 120.0, 320, 240).unwrap();
+        e.begin_stroke(t);
+        for _ in 0..4 {
+            if let Some(t) = e.target_at(160.0, 120.0, 320, 240) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+        assert_eq!(
+            e.model().filled_count(),
+            before - 1,
+            "one click erased {} voxels",
+            before - e.model().filled_count()
+        );
+    }
+
+    /// And the same on bare work plane, where a new layer starts.
+    #[test]
+    fn a_click_on_the_work_plane_places_one_voxel() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        e.camera.yaw = 0.7;
+        e.camera.pitch = 0.6;
+        let t = e.target_at(160.0, 120.0, 320, 240).expect("the plane");
+        e.begin_stroke(t);
+        for _ in 0..4 {
+            if let Some(t) = e.target_at(160.0, 120.0, 320, 240) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), 1, "one click on the plane");
+    }
+
+    /// A drag that genuinely travels still draws. The fix must not turn every
+    /// stroke into a single voxel.
+    #[test]
+    fn a_drag_that_moves_still_draws_a_run() {
+        let mut e = editor_with_floor();
+        let start = e.target_at(160.0, 120.0, 320, 240).unwrap();
+        e.begin_stroke(start);
+        for px in (60..260).step_by(4) {
+            if let Some(t) = e.target_at(px as f32, 120.0, 320, 240) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+        assert!(
+            e.model().filled_count() > 64 + 3,
+            "a real drag placed only {}",
+            e.model().filled_count() - 64
+        );
+        assert_eq!(e.undo_depth(), 1);
     }
 
     #[test]

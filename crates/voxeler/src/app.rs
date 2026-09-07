@@ -51,6 +51,10 @@ pub struct App {
     gesture: Gesture,
     last_drag: (f32, f32),
     modifiers: ModifiersState,
+    /// Where the button went down, and whether the pointer has since travelled
+    /// far enough for this to be a drag rather than a click. See [`DEAD_ZONE`].
+    press_at: (f32, f32),
+    dragging: bool,
     shown_title: String,
     /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
     ///
@@ -105,6 +109,8 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         gesture: Gesture::None,
         last_drag: (0.0, 0.0),
         modifiers: ModifiersState::empty(),
+        press_at: (0.0, 0.0),
+        dragging: false,
         shown_title: String::new(),
         bridge,
         viewer: None,
@@ -223,6 +229,8 @@ impl App {
         }
 
         self.last_drag = (x, y);
+        self.press_at = (x, y);
+        self.dragging = false;
         // A viewer holds somebody else's document. The camera is still yours,
         // so orbit and pan stay; the left button stops being a tool.
         if self.editor.viewing {
@@ -275,7 +283,12 @@ impl App {
             }
             Gesture::Editing => {
                 self.update_hover();
-                if let Some(target) = self.hover {
+                // A click is not a drag. Pressing a button emits a move or two
+                // of its own, and near the horizon one pixel of the work plane
+                // can be a whole cell away — so without a dead zone a click
+                // lands a voxel where it was aimed and then another beside it.
+                self.dragging |= !is_click(self.press_at, (x, y));
+                if let (true, Some(target)) = (self.dragging, self.hover) {
                     self.editor.continue_stroke(target);
                     self.update_hover();
                 }
@@ -561,6 +574,17 @@ fn blit(dst: &mut [u32], dst_w: u32, dst_h: u32, src: &Framebuffer, scale: u32) 
     }
 }
 
+/// How far the pointer may travel between press and release and still be a
+/// click. Framebuffer pixels, so it is the same physical distance whatever the
+/// display's density.
+const DEAD_ZONE: f32 = 3.0;
+
+/// Whether a press that has reached `to` is still a click rather than a drag.
+fn is_click(from: (f32, f32), to: (f32, f32)) -> bool {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    dx * dx + dy * dy <= DEAD_ZONE * DEAD_ZONE
+}
+
 /// Open a read-only window following a running `voxeler mcp`.
 pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
     let event_loop = EventLoop::<Wake>::with_user_event()
@@ -593,6 +617,8 @@ pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
         gesture: Gesture::None,
         last_drag: (0.0, 0.0),
         modifiers: ModifiersState::empty(),
+        press_at: (0.0, 0.0),
+        dragging: false,
         shown_title: String::new(),
         bridge: None,
         viewer: Some(viewer),
@@ -614,6 +640,19 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A press emits a move or two of its own, and near the horizon one pixel
+    /// of the work plane can be a whole cell away. Without a dead zone a click
+    /// lands a voxel where it was aimed and then another beside it.
+    #[test]
+    fn a_press_that_barely_moves_is_still_a_click() {
+        let from = (100.0, 100.0);
+        assert!(is_click(from, from));
+        assert!(is_click(from, (101.0, 100.0)));
+        assert!(is_click(from, (102.0, 102.0)), "under three pixels diagonally");
+        assert!(!is_click(from, (104.0, 100.0)));
+        assert!(!is_click(from, (100.0, 96.0)), "backwards counts too");
+    }
 
     #[test]
     fn the_blit_repeats_the_last_pixel_rather_than_reading_past_the_buffer() {

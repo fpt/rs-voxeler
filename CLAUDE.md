@@ -374,6 +374,29 @@ dragging across a floor grows a staircase toward the camera. Build pins the
 stroke to the axis and coordinate of its first placement; erase and paint do
 not, because they do not grow the surface they are aimed at.
 
+### A stroke aims at the model it started on
+
+The plane pin only ever covered half the problem, and the other half shipped:
+**one click added two voxels.** Placing a voxel puts a new *side* face under the
+pointer, and a side face's adjacent cell is on the same plane, so the pin waved
+it through — and a press emits a move or two of its own, so the very next event
+built again. Erasing has the mirror of it: the hole it opens lets the next event
+reach the wall behind, and one click erased four.
+
+`Drag::before` records what each touched cell held before the stroke touched it,
+and `raycast::cast_masked` casts through that map, so a stroke's own work is
+invisible to its own aim. A mask rather than a snapshot: the touched cells are a
+handful, where cloning the scene on every mouse-down would be a copy per click.
+
+Two rules, not one, because they fail differently:
+
+- **The mask** stops a stroke re-targeting onto itself. It is what makes a click
+  one voxel however many events the platform emits for it.
+- **`app::is_click`'s dead zone** stops a click becoming a drag at all. It is
+  needed *as well*, because near the horizon one pixel of the work plane really
+  is a whole cell away — that second placement is geometrically correct and
+  still not what anyone meant by clicking.
+
 ### What a tool does and how far it reaches are separate
 
 `Tool` says add, remove or recolour; `Span` (`voxel-core/src/region.rs`) says
@@ -629,6 +652,9 @@ rs-voxeler/
 - **A click on empty space does nothing.** That is `plane_is_open`: the active
   layer has something in it, so the work plane is closed. `A` starts a layer
   that can be placed anywhere.
+- **One click does two edits.** The stroke is re-targeting onto its own work.
+  Check that `target_at` is going through `cast_masked` with `Drag::before`, and
+  that `continue_stroke` is not being reached inside `app::is_click`'s dead zone.
 - **A click does nothing.** Check `over_panel` first — a HUD rectangle that
   claims more than it draws eats clicks with no feedback at all. After that,
   check whether `target_at` is returning `None`: for everything but build, no

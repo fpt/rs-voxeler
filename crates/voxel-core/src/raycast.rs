@@ -115,6 +115,29 @@ pub fn cast(
     dir: [f32; 3],
     max_distance: f32,
 ) -> Option<RayHit> {
+    cast_masked(model, origin, dir, max_distance, &|_| None)
+}
+
+/// The same, against a model with some cells standing in for others.
+///
+/// `mask` may answer for any cell, and its answer is used in place of what the
+/// model holds. It exists for one caller: a drag in progress must aim at the
+/// model **as it was when the stroke began**, or it re-targets onto its own
+/// work. Placing a voxel puts a new face under the pointer, and the very next
+/// mouse event — a click's own jitter is enough — would build against that,
+/// putting a second voxel down for one click. Erasing has the mirror of the
+/// same problem: it opens a hole and the next event digs through it.
+///
+/// A mask rather than a snapshot of the grid: the cells a stroke has touched
+/// are a handful, and cloning the model on every mouse-down to cast against it
+/// would be a copy of the whole scene per click.
+pub fn cast_masked(
+    model: &VoxelModel,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    max_distance: f32,
+    mask: &dyn Fn([i32; 3]) -> Option<u8>,
+) -> Option<RayHit> {
     let size = model.size();
     let bounds = [size[0] as f32, size[1] as f32, size[2] as f32];
 
@@ -157,7 +180,7 @@ pub fn cast(
     let mut face = entry_face;
     let mut distance = t_enter;
     loop {
-        let index = model.get(cell[0], cell[1], cell[2]);
+        let index = mask(cell).unwrap_or_else(|| model.get(cell[0], cell[1], cell[2]));
         if index != 0 {
             return Some(RayHit {
                 voxel: cell,
