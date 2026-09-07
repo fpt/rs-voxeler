@@ -13,11 +13,16 @@
 //! window. It is how a model gets an icon, and how the renderer can be checked
 //! on a machine that has no display at all.
 //!
-//! `--mcp [PORT]` additionally serves the editor to an AI agent over MCP's
-//! SSE transport, on loopback. The window still opens — that is the point of
-//! choosing SSE over stdio: the agent builds and the user watches.
+//! Two transports serve an AI agent, because they answer different questions:
+//!
+//! - `voxeler mcp [DIR]` is a **stdio** server, headless, rooted at `DIR`. The
+//!   agent starts it, so "is it running?" never comes up — and `voxeler attach`
+//!   opens a window onto it whenever a person wants to look.
+//! - `voxeler FILE --mcp [PORT]` serves **SSE** from a window that is already
+//!   open, for when you were editing first and want an agent to join you.
 
 mod app;
+mod attach;
 mod editor;
 mod mcp;
 mod hud;
@@ -48,7 +53,21 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args = Args::parse(std::env::args().skip(1))?;
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // A leading subcommand, before the flag parser sees it. `voxeler mcp` and
+    // `voxeler attach` take a *directory*; everything else takes a file, and
+    // splitting them here keeps one parser from having to mean both.
+    match argv.first().map(String::as_str) {
+        Some("mcp") => return serve_mcp(&argv[1..]),
+        Some("attach") => return attach_to_session(&argv[1..]),
+        _ => {}
+    }
+    if argv.first().is_some_and(|a| a == "--") {
+        // The escape hatch for a file genuinely named `mcp`.
+        argv.remove(0);
+    }
+
+    let args = Args::parse(argv.into_iter())?;
     if args.help {
         println!("{USAGE}");
         return Ok(());
@@ -76,6 +95,84 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// `voxeler mcp [DIR]` — the headless stdio server.
+///
+/// The model starts empty and unnamed: an agent's first move is `new_model` or
+/// `open_model`, and inventing a file for it to overwrite would be a worse
+/// default than no file at all.
+fn serve_mcp(args: &[String]) -> Result<(), String> {
+    let dir = match args.first().map(String::as_str) {
+        Some("-h") | Some("--help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some(d) => PathBuf::from(d),
+        None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
+    };
+    if !dir.is_dir() {
+        return Err(format!("{} is not a directory", dir.display()));
+    }
+    let root = mcp::Root::new(&dir);
+
+    let editor = editor::Editor::new(editor::new_model(DEFAULT_SIZE), root.path().join("untitled.vxm"));
+    let shared = mcp::stdio::Shared::new(editor);
+
+    // Held until this returns, so the session file goes away when the server
+    // does. A failure is reported and ignored: the attach listener is a
+    // convenience, and an agent's session must not die because a port was busy.
+    let _attach = match attach::server::start(shared.clone(), root.path()) {
+        Ok(server) => {
+            eprintln!(
+                "voxeler mcp: attach with `voxeler attach {}`",
+                root.display()
+            );
+            Some(server)
+        }
+        Err(e) => {
+            eprintln!("voxeler mcp: no attach listener ({e}); tools still work");
+            None
+        }
+    };
+    mcp::serve_stdio(shared, root);
+    Ok(())
+}
+
+/// `voxeler attach [DIR]` — a window onto a running server.
+fn attach_to_session(args: &[String]) -> Result<(), String> {
+    let wanted = match args.first().map(String::as_str) {
+        Some("-h") | Some("--help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some(d) => Some(PathBuf::from(d)),
+        None => None,
+    };
+    match mcp::session::discover(wanted.as_deref()) {
+        mcp::session::Discovery::Found(session) => {
+            eprintln!("voxeler: attaching to {} (pid {})", session.root, session.pid);
+            app::attach(&session)
+        }
+        mcp::session::Discovery::None => Err(match &wanted {
+            Some(d) => format!(
+                "no voxeler mcp session at {} — start one with `voxeler mcp {}`",
+                d.display(),
+                d.display()
+            ),
+            None => "no voxeler mcp session is running — start one with `voxeler mcp`".into(),
+        }),
+        // Naming one is the only way to resolve this, so the message is the
+        // list of names rather than an apology.
+        mcp::session::Discovery::Ambiguous(sessions) => Err(format!(
+            "several sessions are running; name the one you mean:\n{}",
+            sessions
+                .iter()
+                .map(|s| format!("    voxeler attach {}", s.root))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+    }
+}
+
 /// Render one framed view of the model to a PNG and exit.
 fn thumbnail(
     model: voxel_core::VoxelModel,
@@ -100,7 +197,9 @@ const USAGE: &str = "\
 voxeler — a voxel model editor
 
 USAGE:
-    voxeler [FILE] [--size N]
+    voxeler [FILE] [--size N] [--mcp [PORT]]
+    voxeler mcp [DIR]           serve an agent over stdio, headless
+    voxeler attach [DIR]        open a window onto a running `voxeler mcp`
 
 ARGS:
     FILE        model to open or create (default: model.vxm)

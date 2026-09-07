@@ -58,9 +58,11 @@ pub struct App {
     /// from an agent lands between two frames like every other edit — and the
     /// editor stays the single-threaded thing the rest of this program assumes.
     bridge: Option<mcp::Bridge>,
+    /// The session being watched, when this window is `voxeler attach`.
+    viewer: Option<crate::attach::client::Attached>,
 }
 
-/// What the MCP server sends to wake the event loop. Carries nothing: the
+/// What a background thread sends to wake the event loop. Carries nothing: the
 /// message *is* "come and look at the queue".
 struct Wake;
 
@@ -84,7 +86,7 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
                     let _ = p.send_event(Wake);
                 }
             });
-            let (bridge, addr) = mcp::serve(port, wake)
+            let (bridge, addr) = mcp::serve_sse(port, wake)
                 .map_err(|e| format!("mcp: cannot listen on 127.0.0.1:{port}: {e}"))?;
             eprintln!("voxeler: mcp sse at http://{addr}/sse");
             Some(bridge)
@@ -105,6 +107,7 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         modifiers: ModifiersState::empty(),
         shown_title: String::new(),
         bridge,
+        viewer: None,
     };
     event_loop
         .run_app(&mut app)
@@ -160,6 +163,11 @@ impl App {
     /// it is one grid walk — and doing it eagerly is what keeps the highlight
     /// in step with the model after an edit.
     fn update_hover(&mut self) {
+        if self.editor.viewing {
+            // No tool, so no cell a click would land on, so nothing to outline.
+            self.hover = None;
+            return;
+        }
         self.hover = match self.cursor {
             Some((x, y)) if !hud::over_panel(self.fb.width(), self.editor.model().layer_count(), x, y) => {
                 self.editor
@@ -185,7 +193,9 @@ impl App {
         };
 
         view::render(&mut self.fb, &mut self.editor, self.hover);
-        hud::draw_tools(&mut self.fb, &self.editor);
+        if !self.editor.viewing {
+            hud::draw_tools(&mut self.fb, &self.editor);
+        }
         hud::draw(&mut self.fb, &self.editor);
 
         blit(&mut buffer, size.width, size.height, &self.fb, self.scale);
@@ -213,6 +223,17 @@ impl App {
         }
 
         self.last_drag = (x, y);
+        // A viewer holds somebody else's document. The camera is still yours,
+        // so orbit and pan stay; the left button stops being a tool.
+        if self.editor.viewing {
+            self.gesture = match button {
+                MouseButton::Left if self.modifiers.shift_key() => Gesture::Pan,
+                MouseButton::Left | MouseButton::Right => Gesture::Orbit,
+                MouseButton::Middle => Gesture::Pan,
+                _ => Gesture::None,
+            };
+            return;
+        }
         self.gesture = match button {
             // Alt+left orbits, matching what a three-button mouse does on its
             // right button — a laptop trackpad has no comfortable right drag.
@@ -284,7 +305,34 @@ impl App {
         }
     }
 
+    /// The keys a viewer keeps: the camera, the grid, the slice and the help
+    /// card. Everything else edits a document this window does not own, and a
+    /// key that silently did nothing would read as a broken editor.
+    fn on_viewer_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        if self.ctrl() {
+            if code == KeyCode::KeyQ {
+                event_loop.exit();
+            }
+            return;
+        }
+        match code {
+            KeyCode::KeyG => self.editor.show_grid = !self.editor.show_grid,
+            KeyCode::KeyH => self.editor.show_help = !self.editor.show_help,
+            KeyCode::KeyF => self.editor.frame_model(),
+            KeyCode::KeyR => self.editor.reset_view(),
+            KeyCode::Comma => self.editor.nudge_slice(-1),
+            KeyCode::Period => self.editor.nudge_slice(1),
+            KeyCode::Backslash => self.editor.set_slice(None),
+            KeyCode::Escape if self.editor.show_help => self.editor.show_help = false,
+            _ => return,
+        }
+        self.update_hover();
+    }
+
     fn on_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        if self.editor.viewing {
+            return self.on_viewer_key(code, event_loop);
+        }
         if self.ctrl() {
             match code {
                 KeyCode::KeyZ if self.modifiers.shift_key() => self.editor.redo(),
@@ -356,9 +404,17 @@ impl ApplicationHandler<Wake> for App {
     /// resolved against the model, so an edit from outside invalidates it just
     /// as one from the mouse does.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: Wake) {
-        let Some(bridge) = self.bridge.take() else { return };
-        let ran = bridge.drain(&mut self.editor);
-        self.bridge = Some(bridge);
+        let mut ran = false;
+        if let Some(bridge) = self.bridge.take() {
+            ran |= bridge.drain(&mut self.editor);
+            self.bridge = Some(bridge);
+        }
+        // An attached session has sent a newer model. Only the newest is taken:
+        // a viewer that fell behind should catch up, not replay.
+        if let Some(model) = self.viewer.as_ref().and_then(|v| v.latest()) {
+            self.editor.show(model);
+            ran = true;
+        }
         if ran {
             self.update_hover();
             // `request_redraw` also refreshes the title, which is where the
@@ -502,6 +558,47 @@ fn blit(dst: &mut [u32], dst_w: u32, dst_h: u32, src: &Framebuffer, scale: u32) 
             dst[dst_row + x as usize] = colors[src_row + sx as usize];
         }
     }
+}
+
+/// Open a read-only window following a running `voxeler mcp`.
+pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
+    let event_loop = EventLoop::<Wake>::with_user_event()
+        .build()
+        .map_err(|e| format!("event loop: {e}"))?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = std::sync::Mutex::new(event_loop.create_proxy());
+    let wake = std::sync::Arc::new(move || {
+        if let Ok(p) = proxy.lock() {
+            let _ = p.send_event(Wake);
+        }
+    });
+    let (viewer, model) = crate::attach::client::connect(session, wake)?;
+
+    // The path is the session's root rather than a file: a viewer holds no
+    // document, and a title naming one would invite `ctrl+S`.
+    let mut editor = Editor::new(model, PathBuf::from(&session.root));
+    editor.viewing = true;
+    editor.set_status(format!("attached to {}", viewer.label));
+
+    let mut app = App {
+        editor,
+        window: None,
+        surface: None,
+        fb: Framebuffer::new(1, 1),
+        scale: 1,
+        cursor: None,
+        hover: None,
+        gesture: Gesture::None,
+        last_drag: (0.0, 0.0),
+        modifiers: ModifiersState::empty(),
+        shown_title: String::new(),
+        bridge: None,
+        viewer: Some(viewer),
+    };
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| format!("event loop: {e}"))
 }
 
 /// Open a window on `editor`. Split out so `main` reads as a pipeline.

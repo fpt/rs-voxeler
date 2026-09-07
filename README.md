@@ -27,6 +27,8 @@ cd crates && cargo build --release
 
 ```bash
 voxeler [FILE] [--size N] [--mcp [PORT]]
+voxeler mcp [DIR]                 serve an agent over stdio, headless
+voxeler attach [DIR]              open a window onto a running `voxeler mcp`
 voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
 
@@ -131,20 +133,38 @@ symmetrically.
 
 ## Driving it from an agent
 
-```bash
-voxeler robot.vxm --mcp          # window opens, and 127.0.0.1:8730 starts listening
+Two transports, because they answer different questions.
+
+**`voxeler mcp` — stdio, headless.** The agent starts it, so "is the server
+running?" never comes up. It is rooted at a directory, and that is the only part
+of the filesystem its `open`/`save` tools can reach:
+
+```json
+{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp", "/path/to/models"] } } }
 ```
 
-`--mcp` serves the editor over MCP's SSE transport while the window stays open.
-That is the whole reason it is SSE and not stdio: an agent builds, and you watch
-it happen and say "no, not like that". Register it with any MCP client:
+**`voxeler attach` — a window onto that session.** The stdio server is headless,
+so this is how a person joins and watches the model being built:
+
+```bash
+voxeler attach                # the session rooted here, or the only one running
+voxeler attach ~/models       # a particular one
+```
+
+It is a viewer, not a second editor: the camera is yours — orbit, pan, zoom, `F`
+to frame, `,` `.` `\` to slice, `G` for the grid — and the keyboard is the
+agent's. There is one document and one undo history, and they live in the
+server. If nothing is running, it says so and how to start one.
+
+**`voxeler FILE --mcp [PORT]` — SSE, from a window you already have open.** For
+when you were editing first and want an agent to join *you*:
 
 ```json
 { "mcpServers": { "voxeler": { "type": "sse", "url": "http://127.0.0.1:8730/sse" } } }
 ```
 
-The listener binds loopback only — it hands arbitrary control of your document
-to whoever connects.
+Both listeners bind loopback only — they hand control of your document to
+whoever connects.
 
 | tool | what it does |
 | --- | --- |
@@ -155,6 +175,22 @@ to whoever connects.
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
 | `add_layer`, `select_layer`, `set_layer_visible` | the layer stack |
+| `screenshot` | render the model to a PNG and return it as an image |
+| `undo`, `redo` | take back whole tool calls |
+| `new_model`, `open_model`, `save_model`, `list_models` | files, inside the root |
+
+`screenshot` is the one that shows rather than counts — a voxel total cannot
+tell you the arm is on backwards. It takes `yaw` and `pitch` in degrees and
+frames the model's contents, so it fills the picture whatever the volume's size,
+and it puts the camera back where it found it.
+
+One tool call is **one undo step**, so `undo` takes back a whole fill however
+many voxels it moved. The history is shared with whoever has the window.
+
+The file tools resolve paths **inside the root and refuse to leave it** — no
+`..`, no absolute paths, checked before anything touches the disk. Under
+`--mcp`, where you opened the document yourself, the root reaches nothing at
+all and they are refused outright.
 
 Coordinates are model space — `0..size` on each axis, +Y up, the same
 coordinates the file stores.
@@ -177,8 +213,8 @@ Tools write to the active layer and only to it — `fill` refuses a cell another
 layer owns rather than copying that layer's shape onto this one, and says which
 layer to select instead.
 
-Not exposed: saving, deleting or merging layers, and the camera. An agent should
-not be able to overwrite your file, and the view is yours.
+Not exposed: deleting or merging layers, undo, and the camera. The view is
+yours in both modes.
 
 ## Where this is going
 
