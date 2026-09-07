@@ -101,30 +101,49 @@ fn run() -> Result<(), String> {
 /// `open_model`, and inventing a file for it to overwrite would be a worse
 /// default than no file at all.
 fn serve_mcp(args: &[String]) -> Result<(), String> {
-    let dir = match args.first().map(String::as_str) {
-        Some("-h") | Some("--help") => {
-            println!("{USAGE}");
-            return Ok(());
-        }
-        Some(d) => PathBuf::from(d),
-        None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
-    };
-    if !dir.is_dir() {
-        return Err(format!("{} is not a directory", dir.display()));
+    if args.first().is_some_and(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return Ok(());
     }
-    let root = mcp::Root::new(&dir);
 
-    let editor = editor::Editor::new(editor::new_model(DEFAULT_SIZE), root.path().join("untitled.vxm"));
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        let dir = PathBuf::from(arg);
+        if !dir.is_dir() {
+            return Err(format!("{} is not a directory", dir.display()));
+        }
+        dirs.push(dir);
+    }
+    if dirs.is_empty() {
+        let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
+        // A desktop MCP client spawns its servers with whatever working
+        // directory the app happened to have, which is often the filesystem
+        // root. Falling back to that would quietly hand an agent every file on
+        // the machine, so the implicit case refuses it — while an explicit
+        // `voxeler mcp /` still means what it says.
+        if cwd.parent().is_none() {
+            return Err(
+                "no directory given and the working directory is the filesystem root — \
+                 name the directory your models live in, e.g. `voxeler mcp ~/models`"
+                    .into(),
+            );
+        }
+        dirs.push(cwd);
+    }
+    let root = mcp::Roots::new(dirs);
+    let primary = root.primary().expect("at least one directory").to_path_buf();
+
+    let editor = editor::Editor::new(editor::new_model(DEFAULT_SIZE), primary.join("untitled.vxm"));
     let shared = mcp::stdio::Shared::new(editor);
 
     // Held until this returns, so the session file goes away when the server
     // does. A failure is reported and ignored: the attach listener is a
     // convenience, and an agent's session must not die because a port was busy.
-    let _attach = match attach::server::start(shared.clone(), root.path()) {
+    let _attach = match attach::server::start(shared.clone(), &primary) {
         Ok(server) => {
             eprintln!(
                 "voxeler mcp: attach with `voxeler attach {}`",
-                root.display()
+                primary.display()
             );
             Some(server)
         }
@@ -199,7 +218,7 @@ voxeler — a voxel model editor
 
 USAGE:
     voxeler [FILE] [--size N] [--mcp [PORT]]
-    voxeler mcp [DIR]           serve an agent over stdio, headless
+    voxeler mcp [DIR...]        serve an agent over stdio, headless
     voxeler attach [DIR]        open a window onto a running `voxeler mcp`
 
 ARGS:
@@ -211,6 +230,12 @@ OPTIONS:
                         ignored when FILE exists -- a saved model keeps its own
     --mcp [PORT]        also serve the editor to an AI agent over MCP/SSE on
                         127.0.0.1:PORT (default: 8730). The window still opens
+
+`voxeler mcp` takes the directories its file tools may read and write. Name them
+when a desktop MCP client starts the server for you, or its working directory --
+and so where a bare file name lands -- is anyone's guess. Paths given to the
+tools may be absolute inside those directories, or relative to the first.
+
     --thumbnail OUT     render one view to OUT.png and exit, no window
     --width N           thumbnail width  (default: 512)
     --height N          thumbnail height (default: 512)

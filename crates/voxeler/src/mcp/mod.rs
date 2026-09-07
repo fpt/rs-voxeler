@@ -35,7 +35,7 @@ mod tools;
 mod wire;
 
 pub use stdio::serve_stdio;
-pub use tools::Root;
+pub use tools::Roots;
 
 use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
@@ -285,6 +285,17 @@ impl ToolHost for Context {
 /// [`dispatch`] is where that sameness lives.
 pub trait ToolHost: Send + Sync {
     fn call(&self, call: CallParams) -> CallResult;
+
+    /// What the agent is told at `initialize` — which directories this server
+    /// reads and writes under.
+    ///
+    /// A desktop MCP client spawns its servers with whatever working directory
+    /// the app happened to have, so "somewhere under the working directory" is
+    /// no answer at all. Saying it here means the agent knows before it tries,
+    /// rather than after a refused save.
+    fn instructions(&self) -> String {
+        String::new()
+    }
 }
 
 /// Dispatch one JSON-RPC method. `None` for a notification, which by the
@@ -299,6 +310,7 @@ pub fn dispatch(req: Request, host: &dyn ToolHost) -> Option<Response> {
             "protocolVersion": wire::negotiate_version(req.params.as_ref()),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": crate::NAME, "version": crate::VERSION},
+            "instructions": host.instructions(),
         })),
         // Clients ping to check the session is alive. An empty result is the
         // whole of the answer.

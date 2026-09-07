@@ -173,19 +173,45 @@ a connection that says nothing, so `protocol::read_hello` returns `Ok(None)` for
 a peer that hangs up before speaking. Treating that as an error made the server
 log a failure every time anyone ran `voxeler attach`.
 
-### The file tools are confined to a root
+### The file tools are confined to a set of directories
 
-`mcp::Root` resolves `open`/`save` paths inside one directory and refuses to
-leave it. The check is **lexical** — `..` components and absolute paths are
-rejected before anything touches the filesystem — because a check made by
-canonicalising the result has already followed whatever symlink was there. Every
-`..` is refused rather than only the escaping ones: `a/../b` is harmless and
-`../b` is not, and telling them apart after the fact is exactly the reasoning
-that goes wrong.
+`mcp::Roots` resolves `open`/`save` paths inside the directories `voxeler mcp`
+was given, and refuses to leave them. An MCP server is driven by a model reading
+content nobody vetted, so this is a boundary rather than a convenience.
 
-An MCP server is driven by a model reading content nobody vetted. Under `--mcp`
-the root is empty and the file tools reach nothing at all: you opened that
-document yourself, and an agent there has no business opening another.
+**Absolute paths are accepted, and that is the point.** They were refused at
+first, on the reasoning that a relative path under a known root is unambiguous.
+It is not: a desktop MCP client spawns its servers with whatever working
+directory the *app* had, so neither the user nor the agent can say where a bare
+file name lands. Reported from use. Three things follow:
+
+- The roots are named in the `initialize` **instructions**, so the agent is told
+  where it may write before it tries rather than after a refused save.
+- A relative path resolves against the *first* root; an absolute one may be in
+  any of them.
+- `voxeler mcp` with no argument refuses to root at the filesystem root, which
+  is what a desktop client's working directory often is. Explicit is still
+  allowed — `voxeler mcp /` means what it says.
+
+Two rules on the check itself, and both are load-bearing:
+
+- **`..` is refused lexically**, before anything touches the filesystem, and
+  *every* `..` rather than only the escaping ones. `a/../b` is harmless and
+  `../b` is not, and telling them apart after the fact is exactly the reasoning
+  that goes wrong.
+- **An absolute path is checked against its canonical form**, via
+  `canonical_enough` — which canonicalises the deepest ancestor that exists and
+  puts the rest back, because `save_model` names a file that does not exist yet.
+  A prefix test on the name alone would be satisfied by a symlink inside a root
+  pointing anywhere at all.
+- **A symlink anywhere below a root is refused outright**, on top of both. It
+  would survive the canonical test when it points inside, and it can be
+  repointed outside between the check and the write. Nothing about a voxel model
+  needs to be reached through a link, so the cheapest sound rule is to decline
+  them — and `list_models` skips them when it recurses for the same reason.
+
+Under `--mcp` the roots are empty and the file tools reach nothing: you opened
+that document yourself, and an agent there has no business opening another.
 
 ### The agent and the user share one editor, through a queue
 
@@ -665,6 +691,9 @@ rs-voxeler/
 - **An MCP tool call hangs, then times out.** The event loop is not draining.
   Either the window is gone, or the `EventLoopProxy` wake did not fire —
   `ControlFlow::Wait` means nothing runs until something wakes it.
+- **An agent cannot find where to save.** It is not being told: check that
+  `ToolHost::instructions` is reaching `initialize`, and that `voxeler mcp` was
+  given the directories rather than left to inherit a working directory.
 - **An MCP client connects and then nothing works.** Check the `endpoint` event
   is absolute and that `POST /messages` is served as well as `/message`; both
   spellings are in the wild, and serving one silently breaks the other's clients.
