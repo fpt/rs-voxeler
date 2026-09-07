@@ -44,8 +44,13 @@ Three rules make the box invisible in ordinary use:
   starting size, not a wall.
 - **Writing air outside it does not grow it.** An erase that missed has nothing
   to record, and it is the one way a box could grow without gaining anything.
-- **It shrinks only when asked** (`trim_layer`). Erasing and redrawing in one
-  spot would otherwise reallocate the layer on every stroke.
+- **It shrinks only when asked** (`trim_layer`), *except* when the layer becomes
+  empty, which gives the box back at once. The high-water mark exists so that
+  erasing and redrawing in one spot does not reallocate every stroke, and an
+  empty layer has nothing to churn — where holding its old extent is pure waste.
+  Measured: a new model seeds one voxel at the scene's centre, so erasing the
+  seed and then building near the floor used to keep a box spanning both, 26×
+  the size of the work and 487 MB against 35 MB at 256³.
 
 The **composite cache is gone**, and had to be: it was scene-sized, which is
 precisely the allocation this design exists to avoid. `get` now walks the layers

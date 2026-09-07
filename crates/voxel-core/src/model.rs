@@ -644,6 +644,14 @@ impl VoxelModel {
         ];
         let before = std::mem::replace(&mut l.voxels[i], value);
         l.note(local, before, value);
+        // A box is a high-water mark so that erasing and redrawing in one spot
+        // does not reallocate the layer every stroke. An *empty* layer has
+        // nothing to churn, and holding its old extent is pure waste: seeding a
+        // model at the centre of a 256³ scene and then building near the floor
+        // kept a box 26 times the size of the work.
+        if l.filled == 0 && !l.bounds.is_empty() {
+            l.reshape(Bounds::default());
+        }
         let seen_after = self.get(x, y, z) != 0;
         match (seen_before, seen_after) {
             (false, true) => self.filled += 1,
@@ -1134,14 +1142,49 @@ mod tests {
         assert!(!m.trim_layer(0), "and trimming twice changes nothing");
     }
 
+    /// An empty layer gives its box back without being asked. The high-water
+    /// mark exists so erasing and redrawing in one spot does not reallocate
+    /// every stroke, and an empty layer has nothing to churn.
     #[test]
-    fn trimming_an_emptied_layer_leaves_it_costing_nothing() {
+    fn an_emptied_layer_gives_its_box_back_at_once() {
         let mut m = VoxelModel::new(32, 32, 32);
         m.set(4, 4, 4, 1);
+        m.set(20, 20, 20, 1);
+        assert_eq!(m.layer_bounds(0).cells(), 17 * 17 * 17);
+
         m.set(4, 4, 4, 0);
-        m.trim_layer(0);
-        assert_eq!(m.layer_bounds(0), Bounds::default());
+        assert_eq!(
+            m.layer_bounds(0).cells(),
+            17 * 17 * 17,
+            "one cell gone is not empty, and the mark stands"
+        );
+        m.set(20, 20, 20, 0);
+        assert_eq!(m.layer_bounds(0), Bounds::default(), "the last one is");
         assert_eq!(m.allocated_cells(), 0);
+        assert!(!m.trim_layer(0), "and there is nothing left to trim");
+
+        m.set(30, 30, 30, 1);
+        assert_eq!(m.layer_bounds(0), Bounds::new([30, 30, 30], [1, 1, 1]));
+    }
+
+    /// The everyday shape of it: a new model seeds one voxel at the centre, and
+    /// building near the floor after erasing it should not carry the centre.
+    #[test]
+    fn erasing_a_seed_does_not_leave_its_box_behind() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        m.set(32, 32, 32, 1);
+        m.set(32, 32, 32, 0);
+        for z in 0..64 {
+            for x in 0..64 {
+                m.set(x, 0, z, 4);
+            }
+        }
+        assert_eq!(m.filled_count(), 64 * 64);
+        assert_eq!(
+            m.allocated_cells(),
+            64 * 64,
+            "the floor, and not a column up to where the seed was"
+        );
     }
 
     /// A box that would drop voxels is refused rather than silently losing
