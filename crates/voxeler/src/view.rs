@@ -1,5 +1,6 @@
 //! Drawing one frame of the editor: backdrop, ground grid, model, gizmos.
 
+use voxel_core::Span;
 use voxel_render::raster::{self, Light, Scene};
 use voxel_render::{Framebuffer, Vec3};
 
@@ -166,12 +167,24 @@ fn draw_target(
         raster::fill_polygon(fb, scene, &face, fill, 0.0);
     }
 
+    // The cell the tool writes to, grown to the brush's extent. A region span
+    // is left as the single seed cell: outlining a flood fill would mean
+    // running it on every pointer move, and drawing a thousand boxes for the
+    // answer. The span's name in the tool row is the honest signal there, and
+    // the voxel count in the status line is the confirmation afterwards.
+    let r = if editor.span == Span::Voxel {
+        editor.brush.radius as f32
+    } else {
+        0.0
+    };
     let [x, y, z] = target.cell;
     let min = Vec3 {
-        x: offset.x + x as f32,
-        y: offset.y + y as f32,
-        z: offset.z + z as f32,
+        x: offset.x + x as f32 - r,
+        y: offset.y + y as f32 - r,
+        z: offset.z + z as f32 - r,
     } - Vec3::splat(LIFT);
-    let max = min + Vec3::splat(1.0 + LIFT * 2.0);
+    // A box even for a ball brush: it is the extent that matters when you are
+    // aiming, and an outline traced around a sphere of voxels is a thicket.
+    let max = min + Vec3::splat(1.0 + r * 2.0 + LIFT * 2.0);
     raster::draw_box(fb, scene, min, max, outline, 0.0);
 }

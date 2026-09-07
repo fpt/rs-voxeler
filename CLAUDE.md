@@ -85,9 +85,9 @@ The volume spans ±size/2 on every axis, and the **work plane** — the grid you
 see, `Editor::ground_y` — runs through the middle of it rather than along the
 bottom. A model is an object, not a scene: there is no reason for its ground to
 be at the floor of the box, and a centred plane means the model grows either way
-and `M` mirrors about a plane you can actually see. A new model's seed voxel
-sits *on* that plane at the centre, so the first thing you see and the surface
-you build on are the same thing.
+and the `Y` mirror reflects about a plane you can actually see. A new model's
+seed voxel sits *on* that plane at the centre, so the first thing you see and
+the surface you build on are the same thing.
 
 The grid draws a line every `GRID_STEP` (4) voxels, picked out every
 `GRID_COARSE_STEP` (16), plus the volume's own edge whether or not the step
@@ -139,6 +139,60 @@ dragging across a floor grows a staircase toward the camera. Build pins the
 stroke to the axis and coordinate of its first placement; erase and paint do
 not, because they do not grow the surface they are aimed at.
 
+### What a tool does and how far it reaches are separate
+
+`Tool` says add, remove or recolour; `Span` (`voxel-core/src/region.rs`) says
+one cell, a run, a face, or a connected part. They are independent, so the four
+tools and four spans are twelve useful operations from one flood fill rather
+than twelve tools each carrying their own copy of it — "fill this face" and
+"recolour this face" are the *same* set of cells reached with different intent.
+Erase gets the three reaches for free, which is the sign the factoring is the
+right one.
+
+A region is **bounded by colour**: plane and volume grow over cells holding the
+same palette index as the one under the cursor. Build starts on air and floods
+air; erase and paint start on a voxel and stop where the colour changes. On a
+single-colour model that is identical to "every connected voxel", so the rule
+costs nothing there and is what makes a multi-colour model editable.
+
+Two asymmetries in `region.rs` are deliberate and easy to "fix" wrongly:
+
+- **A plane region tests different neighbours for build than for erase.** Build
+  grows over air and needs the cell *behind* each one to be solid, or a fill
+  spreads across the whole empty layer instead of across the face clicked.
+  Erase and paint grow over the material and need the cell *in front* to be
+  clear, or the region reaches buried voxels that share the layer. The material
+  is on opposite sides of the region in the two cases, so one test cannot serve
+  both.
+- **The slice is applied twice, two different ways.** A hidden layer is excluded
+  from a region (`joins` asks `model.get`), *and* reads as air to the neighbour
+  tests (`on_face` asks `visible`). Only the first, and a build floods into
+  layers that are not on screen; only the second, and the top of a
+  cross-section is not a face a region can grow along, so clicking it fills one
+  cell.
+
+`region::cells` returns *candidates*, not writes. Whether a cell is actually
+touched is the tool's rule — build fills air and never repaints, erase and
+paint act on material and never create it — applied in `Editor::continue_stroke`.
+With a single cell that rule holds by construction; a brush covers cells the ray
+never touched, and a reflection lands wherever the model happens to be, so it
+has to be stated.
+
+### Mirroring reflects the edit, not the model
+
+`Editor::mirror` is three independent planes, each through the middle of its
+axis; two give four copies of a stroke and three give eight. What is reflected
+is the set of cells the edit *wrote*, so nothing is touched that the stroke did
+not reach. Turning mirroring on does not symmetrise what is already there, and a
+deliberately lopsided model stays lopsided while you work on it symmetrically —
+which is the whole point, and the reason this is not implemented as a
+"symmetrise" command over the grid.
+
+For the same reason a mirrored fill reflects the region it found rather than
+re-running the flood from the reflected seed: re-seeding would let an asymmetric
+neighbourhood on the far side produce an edit of a completely different size
+from the one that was asked for.
+
 ## Key patterns
 
 - **Out of bounds reads as air.** `VoxelModel::get` returns 0 outside the grid,
@@ -148,7 +202,23 @@ not, because they do not grow the surface they are aimed at.
   ones, with no special case.
 - **A no-op write is not an undo step.** `Stroke::set` drops a write that
   changes nothing, so a drag re-painting one voxel forty times produces one
-  entry and a click that changed nothing does not consume an undo.
+  entry and a click that changed nothing does not consume an undo. That is also
+  what makes a cell lying *on* a mirror plane cost an iteration rather than a
+  duplicate entry, at any number of active planes.
+- **A fill is a click; a brush is a drag.** A region span applies once and
+  `continue_stroke` returns early afterwards. Re-flooding as the pointer moves
+  would re-seed several times a frame and turn one intended fill into a
+  wandering pile of them.
+- **A brush is sized by radius, so it is always odd-edged.** An even edge has to
+  round its centre to one side, and the side it rounded to shows up as a
+  half-voxel drift every time the brush is resized mid-model. `Brush::covers`
+  measures a ball to `(r + ½)²` rather than `r²`: at radius 1 the latter gives a
+  plus sign, which is not what anyone drawing with a ball brush expects.
+- **A region is not previewed.** Outlining a flood fill means running it on
+  every pointer move and drawing a box per cell for the answer. The span's name
+  in the tool row is the signal beforehand; the cell count `end_stroke` puts in
+  the status line is the confirmation after. A brush *is* previewed, because its
+  extent is a box already known.
 - **A slice hides layers from the mesh *and* the pick.** Treating hidden layers
   as air in the extractor is what puts a lid on the cross-section; re-casting
   against a sliced copy is what stops a click reaching a voxel that is not on
@@ -201,6 +271,7 @@ rs-voxeler/
 │   ├── palette.rs         256 colours; 0 is air
 │   ├── edit.rs            Stroke + History
 │   ├── raycast.rs         Amanatides–Woo grid traversal
+│   ├── region.rs          how far one edit reaches: brush, run, flood
 │   └── format/            .vxm (ours) and .vox (MagicaVoxel)
 ├── crates/voxel-render/   the software rasterizer, editor-free
 │   ├── math.rs            Vec3/Vec4/Mat4
@@ -244,6 +315,15 @@ rs-voxeler/
 - **A `.vox` from MagicaVoxel opens mirrored.** The axis change lost its
   negation. Fix it in `format::vox` and nowhere else — that swap is meant to
   live at the format boundary only.
+- **A fill changes one cell, or nothing.** The seed did not match what the
+  region is made of. Check `Reach::matches` — build passes 0 and everything else
+  passes the colour under the cursor — and then `on_face`, which is where a
+  plane span drops cells that do not show the face that was clicked. On the work
+  plane, `Reach::grounded` is what stops the answer being exactly one cell.
+- **A fill reaches voxels that are not on screen.** The slice is not being
+  passed down, or `joins` has been changed to ask `visible` instead of
+  `model.get` — a hidden layer must be unreachable *and* read as air, and the
+  two are different tests on purpose.
 - **A click does nothing.** Check `over_panel` first — a HUD rectangle that
   claims more than it draws eats clicks with no feedback at all. After that,
   check whether `target_at` is returning `None`: for everything but build, no

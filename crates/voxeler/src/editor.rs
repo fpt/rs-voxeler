@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use voxel_core::region::{self, Brush, BrushShape, Span, MAX_BRUSH};
 use voxel_core::{format, Face, History, RayHit, Stroke, VoxelModel};
 use voxel_render::mesh::{extract, ExtractOptions, FaceMesh};
 use voxel_render::{Mat4, OrbitCamera, Vec3};
@@ -94,9 +95,18 @@ pub struct Editor {
 
     pub camera: OrbitCamera,
     pub tool: Tool,
+    /// How far the tool reaches from the cell it was aimed at.
+    pub span: Span,
+    /// The shape stamped around that cell when the span is [`Span::Voxel`].
+    pub brush: Brush,
     pub color: u8,
-    /// Mirror every edit across the middle of the X axis.
-    pub mirror_x: bool,
+    /// Reflect every edit across the middle of each axis it is set for.
+    ///
+    /// This mirrors the *edit*, not the model. Nothing is written that the edit
+    /// did not touch, so a model that is deliberately asymmetric stays that way
+    /// — turning mirroring on does not go back and symmetrise what is already
+    /// there, it only means the next stroke lands on both sides.
+    pub mirror: [bool; 3],
     pub show_grid: bool,
     pub show_help: bool,
     /// Hide everything at or above this Y. `None` shows the whole model.
@@ -113,8 +123,10 @@ impl Editor {
         let mut editor = Self {
             camera: OrbitCamera::default(),
             tool: Tool::Build,
+            span: Span::default(),
+            brush: Brush::default(),
             color: 1,
-            mirror_x: false,
+            mirror: [false; 3],
             show_grid: true,
             show_help: false,
             slice: None,
@@ -166,7 +178,7 @@ impl Editor {
     /// and the volume is symmetric about it. A model is an object, not a scene:
     /// there is no reason for its ground to be at the bottom of the box, and
     /// putting it in the middle means you can grow the model either way and
-    /// `M` mirrors about a plane you can actually see.
+    /// the `Y` mirror reflects about a plane you can actually see.
     pub fn ground_y(&self) -> i32 {
         self.model.size()[1] as i32 / 2
     }
@@ -340,6 +352,13 @@ impl Editor {
         if drag.last_cell == Some(target.cell) {
             return;
         }
+        // A region span is a click, not a stroke. It already reached everything
+        // connected to the cell it was aimed at, so re-running it as the pointer
+        // moves would re-flood from a new seed several times a frame and turn
+        // one intended fill into a wandering pile of them.
+        if self.span != Span::Voxel && drag.last_cell.is_some() {
+            return;
+        }
         if let Some((axis, coord)) = drag.plane {
             if target.cell[axis] != coord {
                 return;
@@ -351,20 +370,84 @@ impl Editor {
             Tool::Pick => return,
         };
 
-        let [x, y, z] = target.cell;
-        let mirror = self.mirror_x.then(|| self.model.size()[0] as i32 - 1 - x);
+        // Resolved before the stroke is borrowed: the span reads the model, and
+        // writing through the stroke needs it mutably.
+        let cells = self.write_cells(target);
+        // Build fills air and never repaints; erase and paint act on material
+        // and never create it. With a single cell that rule is already true by
+        // construction, but a brush covers cells the ray never touched and a
+        // reflection lands wherever the model happens to be, so it has to be
+        // stated rather than assumed.
+        let wants_solid = self.tool != Tool::Build;
         let Some(drag) = &mut self.drag else { return };
         drag.last_cell = Some(target.cell);
-        drag.stroke.set(&mut self.model, x, y, z, value);
-        if let Some(mx) = mirror {
-            drag.stroke.set(&mut self.model, mx, y, z, value);
+        for [x, y, z] in cells {
+            if self.model.is_solid(x, y, z) != wants_solid {
+                continue;
+            }
+            drag.stroke.set(&mut self.model, x, y, z, value);
         }
         self.invalidate_mesh();
+    }
+
+    /// Every cell this application of the tool may write to: the span around
+    /// the target, and each of its reflections.
+    fn write_cells(&self, target: Target) -> Vec<[i32; 3]> {
+        let reach = region::Reach {
+            seed: target.cell,
+            face: target.face,
+            // Building grows over air; erasing and painting grow over the
+            // colour under the cursor, so a region stops where the colour does.
+            matches: if self.tool == Tool::Build { 0 } else { target.index },
+            brush: self.brush,
+            grounded: target.is_ground(),
+            // An edit must not reach a layer the slice has taken off screen.
+            y_limit: self.slice.unwrap_or(u16::MAX),
+        };
+        let cells = region::cells(&self.model, self.span, reach);
+        if self.mirror == [false; 3] {
+            return cells;
+        }
+        let mut out = Vec::with_capacity(cells.len() * self.mirror_count());
+        for cell in cells {
+            self.reflect_into(cell, &mut out);
+        }
+        out
+    }
+
+    fn mirror_count(&self) -> usize {
+        1 << self.mirror.iter().filter(|m| **m).count()
+    }
+
+    /// A cell and every reflection of it across the active mirror planes.
+    ///
+    /// Two axes give four cells and three give eight. A cell lying *on* a mirror
+    /// plane is its own reflection, and the duplicate is left in: `Stroke::set`
+    /// drops a write that changes nothing, so the second one costs an iteration
+    /// rather than an extra entry in the undo step.
+    fn reflect_into(&self, cell: [i32; 3], out: &mut Vec<[i32; 3]>) {
+        let size = self.model.size();
+        let start = out.len();
+        out.push(cell);
+        for axis in 0..3 {
+            if !self.mirror[axis] {
+                continue;
+            }
+            for i in start..out.len() {
+                let mut p = out[i];
+                p[axis] = size[axis] as i32 - 1 - p[axis];
+                out.push(p);
+            }
+        }
     }
 
     /// Finish the drag, committing it as one undo step.
     pub fn end_stroke(&mut self) {
         let Some(drag) = self.drag.take() else { return };
+        // How many cells the edit actually changed, which for a fill is the
+        // only feedback there is: a span is not previewed before the click, so
+        // the count is what tells a fill of nine from a fill of nine hundred.
+        let changed = drag.stroke.len();
         let label = if self.history.push(drag.stroke) {
             self.dirty = true;
             Some(self.tool.name())
@@ -372,7 +455,10 @@ impl Editor {
             None
         };
         if let Some(label) = label {
-            self.status = format!("{} ({} voxels)", label, self.model.filled_count());
+            self.status = format!(
+                "{label} {changed} cells, {} voxels",
+                self.model.filled_count()
+            );
         }
     }
 
@@ -497,6 +583,60 @@ impl Editor {
         self.set_slice(Some((current + delta).clamp(1, sy as i32) as u16));
     }
 
+    /// Which mirror planes are on, as `"X"`, `"XZ"` and so on, or `None`.
+    pub fn mirror_axes(&self) -> Option<String> {
+        let s: String = ["X", "Y", "Z"]
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.mirror[*i])
+            .map(|(_, a)| *a)
+            .collect();
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// Toggle mirroring across one axis: 0 = x, 1 = y, 2 = z.
+    pub fn toggle_mirror(&mut self, axis: usize) {
+        self.mirror[axis] = !self.mirror[axis];
+        self.status = match self.mirror_axes() {
+            Some(axes) => format!("mirror {axes}"),
+            None => "mirror off".into(),
+        };
+    }
+
+    pub fn set_span(&mut self, span: Span) {
+        self.span = span;
+        self.status = match span {
+            Span::Voxel if self.brush.radius > 0 => {
+                let e = self.brush.edge();
+                format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase())
+            }
+            _ => format!("span {}", span.name().to_lowercase()),
+        };
+    }
+
+    /// Grow or shrink the brush, clamped to a single cell at one end and
+    /// [`MAX_BRUSH`] at the other.
+    ///
+    /// Resizing also selects [`Span::Voxel`]: the brush is that span's shape and
+    /// has no meaning under the others, so a size key that left a plane fill
+    /// selected would appear to do nothing at all.
+    pub fn nudge_brush(&mut self, delta: i32) {
+        self.brush.radius = (self.brush.radius as i32 + delta).clamp(0, MAX_BRUSH as i32) as u8;
+        self.span = Span::Voxel;
+        let e = self.brush.edge();
+        self.status = format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase());
+    }
+
+    pub fn toggle_brush_shape(&mut self) {
+        self.brush.shape = match self.brush.shape {
+            BrushShape::Cube => BrushShape::Sphere,
+            BrushShape::Sphere => BrushShape::Cube,
+        };
+        self.span = Span::Voxel;
+        let e = self.brush.edge();
+        self.status = format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase());
+    }
+
     /// Step the palette index, wrapping within the paintable range 1..=255.
     pub fn nudge_color(&mut self, delta: i32) {
         let next = (self.color as i32 - 1 + delta).rem_euclid(255) + 1;
@@ -563,8 +703,14 @@ impl Editor {
             self.model.filled_count(),
             self.tool.name(),
         );
-        if self.mirror_x {
-            s.push_str("  MIRROR");
+        if self.span != Span::Voxel {
+            s.push_str(&format!("/{}", self.span.name()));
+        } else if self.brush.radius > 0 {
+            let e = self.brush.edge();
+            s.push_str(&format!("  {} {e}x{e}x{e}", self.brush.shape.name()));
+        }
+        if let Some(axes) = self.mirror_axes() {
+            s.push_str(&format!("  MIRROR {axes}"));
         }
         if let Some(cut) = self.slice {
             s.push_str(&format!("  SLICE {cut}"));
@@ -797,7 +943,7 @@ mod tests {
     #[test]
     fn mirroring_places_the_reflected_voxel_too() {
         let mut e = editor_with_floor();
-        e.mirror_x = true;
+        e.mirror[0] = true;
         let t = e.target_at(120.0, 100.0, 320, 240).unwrap();
         e.begin_stroke(t);
         e.end_stroke();
@@ -821,7 +967,7 @@ mod tests {
         let mut e = Editor::new(model, PathBuf::from("t.vxm"));
         e.camera.yaw = 0.0;
         e.camera.pitch = 1.4;
-        e.mirror_x = true;
+        e.mirror[0] = true;
 
         let before = e.model().filled_count();
         // Straight down the middle: x == 3 is the mirror axis of a 7-wide grid.
@@ -955,6 +1101,218 @@ mod tests {
         let reloaded = format::load(&dir.join("m.vxm")).unwrap();
         assert_eq!(reloaded.filled_count(), e.model().filled_count());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A target aimed straight at a cell, without going through the camera.
+    /// The span tests care about which cells an edit reaches, and routing that
+    /// through a pixel coordinate would only make the fixture harder to read.
+    fn hit(voxel: [i32; 3], index: u8) -> Target {
+        Target {
+            voxel,
+            face: Face::PosY,
+            index,
+            cell: voxel,
+        }
+    }
+
+    fn build_on(voxel: [i32; 3], index: u8) -> Target {
+        Target {
+            cell: [voxel[0], voxel[1] + 1, voxel[2]],
+            ..hit(voxel, index)
+        }
+    }
+
+    #[test]
+    fn an_axis_fill_extrudes_to_the_far_wall() {
+        let mut e = editor_with_floor();
+        e.span = Span::Axis;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+
+        for y in 1..8 {
+            assert_eq!(e.model().get(3, y, 3), e.color, "y={y}");
+        }
+        assert_eq!(e.model().filled_count(), 64 + 7);
+        assert_eq!(e.undo_depth(), 1, "a fill is one undo step");
+    }
+
+    #[test]
+    fn a_plane_fill_covers_the_whole_face_and_undoes_in_one_step() {
+        let mut e = editor_with_floor();
+        e.span = Span::Plane;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().filled_count(), 128, "a second layer over the floor");
+        assert!(e.model().iter_filled().all(|(p, _)| p[1] < 2));
+        e.undo();
+        assert_eq!(e.model().filled_count(), 64);
+    }
+
+    /// The bounded-by-colour rule, seen from the editor: a continuous paint
+    /// recolours the part it was aimed at and stops at the seam.
+    #[test]
+    fn a_volume_paint_stops_where_the_colour_does() {
+        let mut e = editor_with_floor();
+        for z in 0..8 {
+            for x in 4..8 {
+                e.model.set(x, 0, z, 5);
+            }
+        }
+        e.tool = Tool::Paint;
+        e.span = Span::Volume;
+        e.color = 9;
+        e.begin_stroke(hit([1, 0, 1], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().get(1, 0, 1), 9);
+        assert_eq!(e.model().get(3, 0, 7), 9, "the whole half it was aimed at");
+        assert_eq!(e.model().get(4, 0, 1), 5, "the other colour is a boundary");
+        assert_eq!(e.model().filled_count(), 64, "a paint creates nothing");
+    }
+
+    /// A fill is a click, not a stroke. Dragging on after one must not re-flood
+    /// from wherever the pointer has reached.
+    #[test]
+    fn a_region_span_applies_once_however_far_the_pointer_travels() {
+        let mut e = editor_with_floor();
+        e.span = Span::Plane;
+        let start = e.target_at(160.0, 120.0, 320, 240).unwrap();
+        e.begin_stroke(start);
+        let after_the_click = e.model().filled_count();
+
+        for px in (60..260).step_by(4) {
+            if let Some(t) = e.target_at(px as f32, 120.0, 320, 240) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+
+        assert_eq!(e.model().filled_count(), after_the_click);
+        assert_eq!(e.undo_depth(), 1);
+    }
+
+    /// A brush covers cells the ray never touched, which is where "a build only
+    /// fills air" stops being true by construction and has to be enforced.
+    #[test]
+    fn a_brush_build_fills_the_air_it_covers_and_repaints_nothing() {
+        let mut e = editor_with_floor();
+        e.brush = Brush {
+            radius: 1,
+            shape: BrushShape::Cube,
+        };
+        e.color = 6;
+        e.begin_stroke(build_on([3, 0, 3], 4));
+        e.end_stroke();
+
+        // A 3³ centred at y = 1 covers nine cells of the floor and eighteen of
+        // the air above it.
+        assert_eq!(e.model().filled_count(), 64 + 18);
+        assert_eq!(e.model().get(2, 2, 2), 6);
+        assert_eq!(e.model().get(3, 0, 3), 4, "the floor under the brush is not repainted");
+        assert_eq!(e.undo_depth(), 1);
+    }
+
+    /// And the other half of that rule: an erase clears material without
+    /// leaving anything behind in the air it also covered.
+    #[test]
+    fn a_brush_erase_clears_material_and_creates_none() {
+        let mut e = editor_with_floor();
+        e.tool = Tool::Erase;
+        e.brush = Brush {
+            radius: 1,
+            shape: BrushShape::Cube,
+        };
+        e.begin_stroke(hit([3, 0, 3], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().filled_count(), 64 - 9);
+        assert_eq!(e.model().get(3, 0, 3), 0);
+    }
+
+    /// The point of mirroring: it reflects the *edit*, not the model. A model
+    /// that is deliberately asymmetric has to come through a mirrored stroke
+    /// with its asymmetry intact.
+    #[test]
+    fn mirroring_reflects_the_edit_and_leaves_the_rest_of_the_model_alone() {
+        let mut e = editor_with_floor();
+        // A lump on one side, with nothing facing it across the mirror plane.
+        e.model.set(6, 1, 6, 7);
+        e.mirror[0] = true;
+        e.color = 3;
+
+        e.begin_stroke(build_on([1, 0, 1], 4));
+        e.end_stroke();
+
+        assert_eq!(e.model().get(1, 1, 1), 3);
+        assert_eq!(e.model().get(6, 1, 1), 3, "the reflection of the edit");
+        assert_eq!(e.model().get(6, 1, 6), 7, "the lump is untouched");
+        assert_eq!(
+            e.model().get(1, 1, 6),
+            0,
+            "mirroring does not go back and symmetrise what was already there"
+        );
+    }
+
+    #[test]
+    fn two_mirror_planes_write_the_four_corners_of_one_edit() {
+        let mut e = editor_with_floor();
+        e.mirror = [true, false, true];
+        e.color = 5;
+        e.begin_stroke(build_on([2, 0, 1], 4));
+        e.end_stroke();
+
+        for (x, z) in [(2, 1), (5, 1), (2, 6), (5, 6)] {
+            assert_eq!(e.model().get(x, 1, z), 5, "at ({x}, {z})");
+        }
+        assert_eq!(e.model().filled_count(), 64 + 4);
+        assert_eq!(e.undo_depth(), 1, "one edit, however many times it lands");
+    }
+
+    /// Mirroring composes with a span rather than replacing it: the region is
+    /// found once, and the whole region is what gets reflected.
+    #[test]
+    fn a_mirrored_fill_reflects_every_cell_the_span_reached() {
+        let mut e = editor_with_floor();
+        e.span = Span::Axis;
+        e.mirror[0] = true;
+        e.begin_stroke(build_on([1, 0, 1], 4));
+        e.end_stroke();
+
+        for y in 1..8 {
+            assert_eq!(e.model().get(1, y, 1), e.color, "y={y}");
+            assert_eq!(e.model().get(6, y, 1), e.color, "reflected, y={y}");
+        }
+        assert_eq!(e.model().filled_count(), 64 + 14);
+    }
+
+    #[test]
+    fn resizing_the_brush_clamps_and_selects_the_span_it_belongs_to() {
+        let mut e = editor_with_floor();
+        e.span = Span::Volume;
+        e.nudge_brush(1);
+        assert_eq!(e.brush.radius, 1);
+        assert_eq!(e.brush.edge(), 3);
+        assert_eq!(e.span, Span::Voxel, "the brush is the voxel span's shape");
+
+        e.nudge_brush(-5);
+        assert_eq!(e.brush.radius, 0, "a brush never shrinks past one cell");
+        for _ in 0..20 {
+            e.nudge_brush(1);
+        }
+        assert_eq!(e.brush.radius, MAX_BRUSH);
+    }
+
+    #[test]
+    fn the_summary_names_the_span_and_the_mirror_planes() {
+        let mut e = editor_with_floor();
+        assert!(!e.summary().contains("MIRROR"));
+        e.span = Span::Plane;
+        e.toggle_mirror(0);
+        e.toggle_mirror(2);
+        let s = e.summary();
+        assert!(s.contains("BUILD/PLANE"), "{s}");
+        assert!(s.contains("MIRROR XZ"), "{s}");
     }
 
     #[test]
