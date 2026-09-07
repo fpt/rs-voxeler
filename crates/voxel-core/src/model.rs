@@ -17,6 +17,52 @@ pub const MAX_DIM: u16 = 256;
 /// no longer much of a statement about memory.
 pub const MAX_LAYERS: usize = 16;
 
+/// How many objects a scene may hold, the root included.
+///
+/// Larger than [`MAX_LAYERS`] because an object costs a name and a parent index
+/// rather than a grid: a robot with a body, two arms, two legs and a head is
+/// six objects sharing far fewer layers, and the tree is the cheap half.
+pub const MAX_OBJECTS: usize = 64;
+
+/// What a thing *is*, where a layer says how pixels combine.
+///
+/// Layers were doing both jobs and they are not the same job. A layer has a
+/// grid, a box, a stack position and a visibility — that is compositing, and it
+/// works. But it was also the only way to say "this is the left arm", and for
+/// that it is the wrong shape: a flat list of sixteen with no way to say one
+/// thing is *part of* another.
+///
+/// An object owns a name, a visibility and a parent. Layers name the object
+/// they belong to, and every scene has a root at index 0 that cannot be removed
+/// or reparented — so "no object" and "the whole scene" are the same answer
+/// rather than two that can disagree.
+///
+/// # There is no transform here
+///
+/// A translation is applied to the layers' `Bounds::origin` the moment it is
+/// asked for, not stored and composed on every read. Layer boxes stay in scene
+/// coordinates, so `get`, the raycaster and the extractor need to know nothing
+/// about objects at all — and the move itself costs a `u16` per axis per layer
+/// rather than a re-voxelisation. A stored transform would put a matrix in the
+/// middle of the hottest read in the codebase to buy a thing nobody asked for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Object {
+    pub name: String,
+    pub visible: bool,
+    /// The object this is part of. `None` only for the root.
+    pub parent: Option<usize>,
+}
+
+impl Object {
+    pub fn new(name: impl Into<String>, parent: Option<usize>) -> Self {
+        Self {
+            name: name.into(),
+            visible: true,
+            parent,
+        }
+    }
+}
+
 /// Where a layer sits in the scene, and how big it is.
 ///
 /// A zero on any axis means empty, and an empty box allocates nothing — which is
@@ -103,6 +149,7 @@ pub const CHUNK: u16 = 16;
 pub struct Snapshot {
     pub size: [u16; 3],
     pub layers: Vec<Layer>,
+    pub objects: Vec<Object>,
     pub active: usize,
 }
 
@@ -124,6 +171,16 @@ pub struct Snapshot {
 pub struct Layer {
     pub name: String,
     pub visible: bool,
+    /// Which [`Object`] this layer is part of. 0 is the root, so a layer that
+    /// was never assigned still has a real answer.
+    pub object: usize,
+    /// `visible`, and every object above it visible too.
+    ///
+    /// Cached rather than walked, for the reason every other tally here is:
+    /// compositing asks this once per layer per lookup, and walking to the root
+    /// each time would put the depth of the tree inside `get`. The one place it
+    /// moves is [`VoxelModel::refresh_shown`].
+    shown: bool,
     bounds: Bounds,
     voxels: Vec<u8>,
     /// How many of this layer's own cells are not air, kept in step with
@@ -158,6 +215,8 @@ impl Layer {
             ],
             bounds,
             filled: 0,
+            object: 0,
+            shown: true,
         }
     }
 
@@ -208,6 +267,24 @@ impl Layer {
 
     pub fn bounds(&self) -> Bounds {
         self.bounds
+    }
+
+    /// Whether this layer reaches the screen: its own flag, and every object
+    /// above it. Compositing asks this, never `visible` — hiding an object has
+    /// to hide the layers inside it.
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// Move the whole box, carrying its contents. Nothing is re-voxelised and
+    /// no tally moves: the same cells are filled, at new scene coordinates.
+    fn translate(&mut self, delta: [i32; 3]) {
+        if self.bounds.is_empty() {
+            return;
+        }
+        for (o, d) in self.bounds.origin.iter_mut().zip(delta) {
+            *o = (*o as i32 + d) as u16;
+        }
     }
 
     /// This layer's own index at a *scene* coordinate, 0 outside its box.
@@ -395,6 +472,14 @@ impl Layer {
 pub struct VoxelModel {
     size: [u16; 3],
     layers: Vec<Layer>,
+    /// The object tree, as a flat arena with parent indices. Index 0 is the
+    /// root and always exists.
+    ///
+    /// An arena rather than nested `Vec<Object>` children, because every
+    /// structural change here is already snapshot-based: a flat list clones,
+    /// compares and serialises without a recursive walk, and the tree shape is
+    /// one `parent` field rather than a second structure to keep in agreement.
+    objects: Vec<Object>,
     /// The layer [`VoxelModel::set`] writes to.
     ///
     /// On the model rather than in the editor because it is a property of the
@@ -445,6 +530,7 @@ impl VoxelModel {
         Self {
             size: [sx, sy, sz],
             layers: vec![Layer::new("LAYER 1", Bounds::default())],
+            objects: vec![Object::new("SCENE", None)],
             active: 0,
             palette: Palette::default(),
             dirty: vec![true; chunk_count([sx, sy, sz])],
@@ -566,7 +652,7 @@ impl VoxelModel {
         self.layers
             .iter()
             .rev()
-            .filter(|l| l.visible)
+            .filter(|l| l.shown)
             .map(|l| l.at(x, y, z))
             .find(|v| *v != 0)
             .unwrap_or(0)
@@ -623,7 +709,7 @@ impl VoxelModel {
         self.layers
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.visible)
+            .filter(|(_, l)| l.shown)
             .flat_map(move |(n, layer)| {
                 layer.iter_filled().filter_map(move |(p, v)| {
                     let (x, y, z) = (p[0] as i32, p[1] as i32, p[2] as i32);
@@ -771,7 +857,7 @@ impl VoxelModel {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, l)| l.visible && l.at(x, y, z) != 0)
+            .find(|(_, l)| l.shown && l.at(x, y, z) != 0)
             .map(|(n, _)| n)
     }
 
@@ -793,7 +879,13 @@ impl VoxelModel {
             return None;
         }
         let i = (at + 1).min(self.layers.len());
-        self.layers.insert(i, Layer::new(name, self.clamp(bounds)));
+        let mut layer = Layer::new(name, self.clamp(bounds));
+        // Beside a layer means inside the same object: adding a second layer to
+        // an arm should give that arm two layers, not put one of them at the
+        // root for the user to file afterwards.
+        layer.object = self.layers.get(at).map_or(0, |l| l.object);
+        layer.shown = self.object_shown(layer.object);
+        self.layers.insert(i, layer);
         if self.active >= i {
             self.active += 1;
         }
@@ -869,6 +961,7 @@ impl VoxelModel {
         self.layers[i - 1].visible = true;
         self.layers.remove(i);
         self.active = self.active.min(self.layers.len() - 1);
+        self.refresh_shown();
         self.refresh_count();
         self.dirty_all();
         true
@@ -877,8 +970,9 @@ impl VoxelModel {
     pub fn set_layer_visible(&mut self, i: usize, visible: bool) {
         if let Some(l) = self.layers.get_mut(i) {
             l.visible = visible;
+            self.refresh_shown();
             self.refresh_count();
-        self.dirty_all();
+            self.dirty_all();
         }
     }
 
@@ -886,6 +980,280 @@ impl VoxelModel {
         if let Some(l) = self.layers.get_mut(i) {
             l.name = name.into();
         }
+    }
+
+    // -- objects ----------------------------------------------------------
+
+    pub fn objects(&self) -> &[Object] {
+        &self.objects
+    }
+
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// An object and everything under it, parents before children.
+    ///
+    /// The order matters to a caller drawing a tree; it costs nothing here
+    /// because the arena is already in creation order and a child is always
+    /// added after its parent.
+    pub fn subtree(&self, root: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        if root >= self.objects.len() {
+            return out;
+        }
+        out.push(root);
+        for i in 0..self.objects.len() {
+            let mut at = self.objects[i].parent;
+            let mut depth = 0;
+            while let Some(p) = at {
+                if p == root {
+                    out.push(i);
+                    break;
+                }
+                // Bounded rather than trusting: `reparent_object` refuses a
+                // cycle and `decode` breaks one, but a walk that can loop
+                // forever should not depend on both being right.
+                depth += 1;
+                if depth > self.objects.len() {
+                    break;
+                }
+                at = self.objects[p].parent;
+            }
+        }
+        out
+    }
+
+    /// The layers belonging to an object, not counting its children's.
+    pub fn object_layers(&self, object: usize) -> Vec<usize> {
+        (0..self.layers.len())
+            .filter(|n| self.layers[*n].object == object)
+            .collect()
+    }
+
+    /// Whether an object and every object above it is visible.
+    fn object_shown(&self, object: usize) -> bool {
+        let mut at = Some(object);
+        let mut depth = 0;
+        while let Some(i) = at {
+            let Some(o) = self.objects.get(i) else {
+                return true;
+            };
+            if !o.visible {
+                return false;
+            }
+            depth += 1;
+            if depth > self.objects.len() {
+                return true;
+            }
+            at = o.parent;
+        }
+        true
+    }
+
+    /// Recompute every layer's `shown` from its own flag and its object chain.
+    ///
+    /// The single place that cache moves, for the reason [`Layer::note`] is the
+    /// single place a tally moves: two paths updating it is two chances for one
+    /// of them to be forgotten.
+    fn refresh_shown(&mut self) {
+        let lit: Vec<bool> = (0..self.objects.len())
+            .map(|o| self.object_shown(o))
+            .collect();
+        for l in &mut self.layers {
+            l.shown = l.visible && lit.get(l.object).copied().unwrap_or(true);
+        }
+    }
+
+    /// Replace the whole tree at once, for a loader.
+    ///
+    /// Validated rather than trusted: a file is not a caller. The root must be
+    /// index 0 with no parent, every parent must exist, and no chain may loop —
+    /// a cycle read off a disk would make the visibility walk and every tree
+    /// draw run forever, so it is refused here rather than survived everywhere
+    /// else.
+    pub fn set_objects(&mut self, objects: Vec<Object>) -> bool {
+        if objects.is_empty() || objects.len() > MAX_OBJECTS || objects[0].parent.is_some() {
+            return false;
+        }
+        for (i, o) in objects.iter().enumerate() {
+            if o.parent.is_some_and(|p| p >= objects.len() || p == i) {
+                return false;
+            }
+        }
+        for i in 0..objects.len() {
+            let mut at = objects[i].parent;
+            let mut depth = 0;
+            while let Some(p) = at {
+                depth += 1;
+                if depth > objects.len() {
+                    return false;
+                }
+                at = objects[p].parent;
+            }
+        }
+        // A layer pointing past the end of the new tree belongs at the root:
+        // dropping it would lose work over a bookkeeping detail.
+        for l in &mut self.layers {
+            if l.object >= objects.len() {
+                l.object = 0;
+            }
+        }
+        self.objects = objects;
+        self.refresh_shown();
+        self.refresh_count();
+        self.dirty_all();
+        true
+    }
+
+    /// Add an object under `parent`. `None` past [`MAX_OBJECTS`] or when the
+    /// parent does not exist.
+    pub fn add_object(&mut self, parent: usize, name: impl Into<String>) -> Option<usize> {
+        if self.objects.len() >= MAX_OBJECTS || parent >= self.objects.len() {
+            return None;
+        }
+        self.objects.push(Object::new(name, Some(parent)));
+        let i = self.objects.len() - 1;
+        self.refresh_shown();
+        Some(i)
+    }
+
+    /// Remove an object. Its children and its layers move up to its parent
+    /// rather than going with it: an object is a label, and removing a label
+    /// must not remove the work. Refused for the root.
+    pub fn remove_object(&mut self, i: usize) -> bool {
+        if i == 0 || i >= self.objects.len() {
+            return false;
+        }
+        let parent = self.objects[i].parent.unwrap_or(0);
+        for o in &mut self.objects {
+            if o.parent == Some(i) {
+                o.parent = Some(parent);
+            }
+        }
+        for l in &mut self.layers {
+            if l.object == i {
+                l.object = parent;
+            }
+        }
+        self.objects.remove(i);
+        // Removing renumbers everything above it, the same hazard a removed
+        // layer is — and the reason a snapshot has to carry the whole tree.
+        for o in &mut self.objects {
+            match o.parent {
+                Some(p) if p > i => o.parent = Some(p - 1),
+                _ => {}
+            }
+        }
+        for l in &mut self.layers {
+            if l.object > i {
+                l.object -= 1;
+            }
+        }
+        // A layer that was inside a hidden object and has just moved up to a
+        // visible parent is on screen now, so this changes the composite even
+        // though no cell was written.
+        self.refresh_shown();
+        self.refresh_count();
+        self.dirty_all();
+        true
+    }
+
+    pub fn rename_object(&mut self, i: usize, name: impl Into<String>) {
+        if let Some(o) = self.objects.get_mut(i) {
+            o.name = name.into();
+        }
+    }
+
+    pub fn set_object_visible(&mut self, i: usize, visible: bool) {
+        if let Some(o) = self.objects.get_mut(i) {
+            o.visible = visible;
+            self.refresh_shown();
+            self.refresh_count();
+            self.dirty_all();
+        }
+    }
+
+    /// Make `i` part of `parent`. Refused for the root, and refused when
+    /// `parent` is `i` or anything under it — an object cannot be part of
+    /// itself at any depth, and a cycle would make the visibility walk and
+    /// every tree draw loop forever.
+    pub fn reparent_object(&mut self, i: usize, parent: usize) -> bool {
+        if i == 0 || i >= self.objects.len() || parent >= self.objects.len() {
+            return false;
+        }
+        if self.subtree(i).contains(&parent) {
+            return false;
+        }
+        self.objects[i].parent = Some(parent);
+        self.refresh_shown();
+        self.refresh_count();
+        self.dirty_all();
+        true
+    }
+
+    /// Put a layer in an object.
+    pub fn set_layer_object(&mut self, layer: usize, object: usize) -> bool {
+        if layer >= self.layers.len() || object >= self.objects.len() {
+            return false;
+        }
+        self.layers[layer].object = object;
+        self.refresh_shown();
+        self.refresh_count();
+        self.dirty_all();
+        true
+    }
+
+    /// Move an object and everything under it, in whole voxels.
+    ///
+    /// This is where `Bounds` does the work: a layer's box already carries an
+    /// origin in scene space, so moving a part is a change to three `u16`s per
+    /// layer. Nothing is re-voxelised and no tally moves — the same cells are
+    /// filled, at new coordinates — so the cost is the tree walk rather than
+    /// the contents.
+    ///
+    /// **All or nothing.** A move that pushed one arm out of the scene and
+    /// left the rest would be worse than one that did not happen, so the whole
+    /// subtree is checked before any of it moves. Reports how many layers moved.
+    pub fn move_object(&mut self, i: usize, delta: [i32; 3]) -> Result<usize, String> {
+        if i >= self.objects.len() {
+            return Err(format!("there is no object {i}"));
+        }
+        let subtree = self.subtree(i);
+        let moving: Vec<usize> = (0..self.layers.len())
+            .filter(|n| subtree.contains(&self.layers[*n].object))
+            .filter(|n| !self.layers[*n].bounds.is_empty())
+            .collect();
+
+        for &n in &moving {
+            let b = self.layers[n].bounds;
+            let end = b.end();
+            for a in 0..3 {
+                let lo = b.origin[a] as i32 + delta[a];
+                let hi = end[a] + delta[a];
+                if lo < 0 || hi > self.size[a] as i32 {
+                    return Err(format!(
+                        "that move would put layer {n} outside the scene on \
+                         {} — it spans {}..{} and the scene is 0..{}",
+                        ["x", "y", "z"][a],
+                        lo,
+                        hi,
+                        self.size[a]
+                    ));
+                }
+            }
+        }
+
+        if delta != [0, 0, 0] {
+            for &n in &moving {
+                self.layers[n].translate(delta);
+            }
+            // Two layers that overlapped may not any more, so what is visible
+            // can change even though no cell was written.
+            self.refresh_count();
+            self.dirty_all();
+        }
+        Ok(moving.len())
     }
 
     /// The whole stack, for a history entry to hold onto.
@@ -904,6 +1272,7 @@ impl VoxelModel {
         Snapshot {
             size: self.size,
             layers: self.layers.clone(),
+            objects: self.objects.clone(),
             active: self.active,
         }
     }
@@ -916,6 +1285,13 @@ impl VoxelModel {
         self.size = snapshot.size;
         self.active = snapshot.active.min(snapshot.layers.len() - 1);
         self.layers = snapshot.layers;
+        // Objects renumber when one is removed, exactly the way layers do, so a
+        // snapshot that restored the stack without the tree would put every
+        // layer in the wrong part of it.
+        if !snapshot.objects.is_empty() {
+            self.objects = snapshot.objects;
+        }
+        self.refresh_shown();
         self.refresh_count();
         self.dirty_all();
     }
@@ -1017,7 +1393,7 @@ impl VoxelModel {
         let mut min = [u16::MAX; 3];
         let mut max = [0u16; 3];
         let mut any = false;
-        for layer in self.layers.iter().filter(|l| l.visible) {
+        for layer in self.layers.iter().filter(|l| l.shown) {
             let b = layer.occupied();
             if b.is_empty() {
                 continue;
@@ -1442,6 +1818,177 @@ mod tests {
         }
         assert_eq!(m.layer_count(), MAX_LAYERS);
         assert!(m.add_layer(0, "one too many").is_none());
+    }
+
+    // -- objects ----------------------------------------------------------
+
+    /// A scene always has a root, and it is not removable or reparentable —
+    /// otherwise "no object" and "the whole scene" become two answers that can
+    /// disagree.
+    #[test]
+    fn the_root_object_is_always_there_and_cannot_be_taken_away() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        assert_eq!(m.object_count(), 1);
+        assert_eq!(m.objects()[0].parent, None);
+        assert_eq!(m.layers()[0].object, 0, "a layer starts at the root");
+
+        assert!(!m.remove_object(0));
+        let arm = m.add_object(0, "ARM").unwrap();
+        assert!(!m.reparent_object(0, arm), "the root has no parent to gain");
+    }
+
+    /// Hiding an object hides the layers inside it, at any depth, and showing
+    /// it again does not resurrect a layer the user had hidden themselves.
+    #[test]
+    fn hiding_an_object_hides_what_is_under_it_without_forgetting_the_layers_own_flag() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let robot = m.add_object(0, "ROBOT").unwrap();
+        let arm = m.add_object(robot, "ARM").unwrap();
+        let hand = m.add_layer(0, "HAND").unwrap();
+        m.set_layer_object(hand, arm);
+        m.set_in(hand, 4, 4, 4, 7);
+        assert_eq!(m.get(4, 4, 4), 7);
+        assert_eq!(m.filled_count(), 1);
+
+        // Two levels up, so this is the chain and not just the parent.
+        m.set_object_visible(robot, false);
+        assert_eq!(m.get(4, 4, 4), 0, "the layer is inside a hidden object");
+        assert_eq!(m.filled_count(), 0);
+        assert!(m.layers()[hand].visible, "but its own flag never moved");
+        assert!(!m.layers()[hand].shown());
+
+        // Hide the layer itself as well, then show the object again.
+        m.set_layer_visible(hand, false);
+        m.set_object_visible(robot, true);
+        assert_eq!(m.get(4, 4, 4), 0, "the layer is still hidden on its own");
+        m.set_layer_visible(hand, true);
+        assert_eq!(m.get(4, 4, 4), 7);
+    }
+
+    /// The cached `shown` is the one thing here that can silently drift, so it
+    /// is checked against a walk up the tree after every operation that can
+    /// change it.
+    #[test]
+    fn the_shown_flags_never_drift_from_a_walk_up_the_tree() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let a = m.add_object(0, "A").unwrap();
+        let b = m.add_object(a, "B").unwrap();
+        let c = m.add_object(0, "C").unwrap();
+        for n in 0..3 {
+            let l = m.add_layer(n, format!("L{n}")).unwrap();
+            m.set_layer_object(l, [a, b, c][n]);
+            m.set_in(l, n as i32, 1, 1, 3);
+        }
+
+        let check = |m: &VoxelModel, note: &str| {
+            for (n, l) in m.layers().iter().enumerate() {
+                let mut walk = l.visible;
+                let mut at = Some(l.object);
+                while let Some(i) = at {
+                    walk &= m.objects()[i].visible;
+                    at = m.objects()[i].parent;
+                }
+                assert_eq!(l.shown(), walk, "layer {n} after {note}");
+            }
+            assert_eq!(m.filled_count(), m.recount(), "count after {note}");
+        };
+
+        check(&m, "setup");
+        m.set_object_visible(b, false);
+        check(&m, "hiding a leaf object");
+        m.set_object_visible(a, false);
+        check(&m, "hiding its parent too");
+        m.reparent_object(b, c);
+        check(&m, "reparenting out of a hidden object");
+        m.set_layer_visible(0, false);
+        check(&m, "hiding a layer");
+        m.remove_object(a);
+        check(&m, "removing an object");
+        m.add_layer(0, "extra");
+        check(&m, "adding a layer");
+        m.restore_layers(m.layer_snapshot());
+        check(&m, "restoring a snapshot");
+    }
+
+    /// Removing an object is removing a label. The work inside it moves up to
+    /// the parent — a delete that took the geometry with it would be a very
+    /// expensive way to rename something.
+    #[test]
+    fn removing_an_object_keeps_its_children_and_its_layers() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let robot = m.add_object(0, "ROBOT").unwrap();
+        let arm = m.add_object(robot, "ARM").unwrap();
+        let hand = m.add_object(arm, "HAND").unwrap();
+        let l = m.add_layer(0, "SKIN").unwrap();
+        m.set_layer_object(l, arm);
+        m.set_in(l, 2, 2, 2, 5);
+
+        assert!(m.remove_object(arm));
+        assert_eq!(m.get(2, 2, 2), 5, "the voxels are untouched");
+        // Removing `arm` renumbers everything above it, `hand` included.
+        assert_eq!(m.objects()[hand - 1].name, "HAND");
+        assert_eq!(m.objects()[hand - 1].parent, Some(robot), "the child moved up");
+        assert_eq!(m.layers()[l].object, robot, "and so did the layer");
+    }
+
+    /// An object cannot be made part of itself at any depth. A cycle would make
+    /// the visibility walk and every tree draw loop forever.
+    #[test]
+    fn an_object_cannot_be_reparented_into_its_own_subtree() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let a = m.add_object(0, "A").unwrap();
+        let b = m.add_object(a, "B").unwrap();
+        let c = m.add_object(b, "C").unwrap();
+
+        assert!(!m.reparent_object(a, a), "not into itself");
+        assert!(!m.reparent_object(a, b), "not into its child");
+        assert!(!m.reparent_object(a, c), "nor its grandchild");
+        assert!(m.reparent_object(c, 0), "but out is always fine");
+        assert!(m.reparent_object(a, c), "and now that is no longer a cycle");
+    }
+
+    /// Moving an object moves its layers' boxes and nothing else: the same
+    /// cells are filled, at new coordinates, with no re-voxelisation.
+    #[test]
+    fn moving_an_object_carries_its_subtree_and_costs_no_reallocation() {
+        let mut m = VoxelModel::new(32, 32, 32);
+        let robot = m.add_object(0, "ROBOT").unwrap();
+        let arm = m.add_object(robot, "ARM").unwrap();
+        let body = m.add_layer(m.layer_count() - 1, "BODY").unwrap();
+        let hand = m.add_layer(m.layer_count() - 1, "HAND").unwrap();
+        m.set_layer_object(body, robot);
+        m.set_layer_object(hand, arm);
+        m.set_in(body, 4, 4, 4, 1);
+        m.set_in(hand, 6, 4, 4, 2);
+        let allocated = m.allocated_cells();
+
+        assert_eq!(m.move_object(robot, [3, 0, 1]), Ok(2), "both layers moved");
+        assert_eq!(m.get(7, 4, 5), 1, "the body went with it");
+        assert_eq!(m.get(9, 4, 5), 2, "and so did the child object's layer");
+        assert_eq!(m.get(4, 4, 4), 0, "nothing was left behind");
+        assert_eq!(m.allocated_cells(), allocated, "and nothing was reallocated");
+        assert_eq!(m.filled_count(), 2);
+    }
+
+    /// All or nothing. A move that put one arm outside the scene and left the
+    /// rest where it was would be worse than one that did not happen.
+    #[test]
+    fn a_move_that_would_leave_the_scene_moves_nothing() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let o = m.add_object(0, "PART").unwrap();
+        let near = m.add_layer(m.layer_count() - 1, "NEAR").unwrap();
+        let far = m.add_layer(m.layer_count() - 1, "FAR").unwrap();
+        m.set_layer_object(near, o);
+        m.set_layer_object(far, o);
+        m.set_in(near, 1, 1, 1, 1);
+        m.set_in(far, 15, 1, 1, 2);
+
+        assert!(m.move_object(o, [3, 0, 0]).is_err(), "FAR would go past 16");
+        assert_eq!(m.get(1, 1, 1), 1, "so NEAR did not move either");
+        assert_eq!(m.get(15, 1, 1), 2);
+        assert_eq!(m.move_object(o, [-1, 0, 0]), Ok(2), "the other way fits");
+        assert_eq!(m.get(0, 1, 1), 1);
+        assert_eq!(m.get(14, 1, 1), 2);
     }
 
     /// A growing box takes the copy-only path, which moves every cell's local

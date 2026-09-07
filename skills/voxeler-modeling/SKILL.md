@@ -63,6 +63,19 @@ sticking out at its sides.
 - Each layer allocates its own bounding box, not the whole scene. Boxes grow
   with writes; `trim_layer` releases unused extents after erasing. Widely
   separated parts on one layer still allocate the space between them.
+- Name the parts with **objects**. A layer says how pixels combine; an object
+  says what a thing is, and objects nest. `create_object` then
+  `set_layer_object` puts a layer inside one; `list_objects` shows the tree with
+  a `path` per row. The tree is saved in the file, so a later session — yours or
+  the user's — can still tell the left arm from the right.
+- `move_object` moves a part and everything under it by whole voxels, in one
+  undo step, without re-creating anything. Use it to reposition a finished limb
+  rather than erasing and redrawing it. It is all or nothing: if any part would
+  leave the scene the move is refused and names the layer and axis.
+- `set_object_visible` hides a whole part at once. Layers keep their own
+  switches, so showing the object again restores what was shown before. A layer
+  row whose report carries `"shown": false` while `"visible"` is true is inside
+  a hidden object — that is why it is not in the voxel count.
 - `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid` and `line`
   operations. Top-level `layer`/`color` supply defaults; individual operations
   override them. Explicit layer arguments do not change the active selection.

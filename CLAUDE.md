@@ -75,6 +75,56 @@ Where two layers overlap, the cell belongs to whoever is on top (`owner_at`) and
 only that layer emits it — otherwise a shared cell meshes twice and the lower
 copy z-fights the upper one.
 
+### An object is what a thing is; a layer is how pixels combine
+
+Layers were doing two jobs. One of them — a grid, a box, a stack order, a
+visibility — is compositing, and it works. The other was "this is the left arm",
+and for that a flat list of sixteen with no way to say one thing is *part of*
+another is the wrong shape.
+
+`Object` is a name, a visibility and a parent. Layers name the object they
+belong to, every scene has a **root at index 0** that cannot be removed or
+reparented — so "no object" and "the whole scene" are one answer rather than two
+that can disagree — and the tree is a flat arena with parent indices rather than
+nested children, because every structural change here is already
+snapshot-based: a flat list clones, compares and serialises with no recursive
+walk, and the shape is one `parent` field rather than a second structure to keep
+in agreement.
+
+Four rules:
+
+- **There is no transform on an object.** `move_object` applies a translation to
+  its layers' `Bounds::origin` at the moment it is asked, rather than storing one
+  to compose on every read. Layer boxes stay in scene coordinates, so `get`, the
+  raycaster and the extractor need to know nothing about objects at all — and the
+  move costs three `u16` per layer instead of a re-voxelisation. A stored
+  transform would put a matrix inside the hottest read in the codebase to buy
+  something nobody asked for.
+- **A move is all or nothing.** The whole subtree is checked against the scene
+  before any of it moves; half a robot moved and half left behind is worse than a
+  move that did not happen, and the refusal names the layer and the axis because
+  an agent cannot see the scene edge.
+- **Removing an object removes a label, never the work.** Its children and its
+  layers move up to its parent. It also changes what is on screen — a layer that
+  was inside a hidden object is not any more — so it recounts, which the drift
+  test caught and nothing else would have.
+- **A cycle is refused in both directions.** `reparent_object` refuses a parent
+  that is `i` or under it; `set_objects` refuses a file whose chain loops. A file
+  is not a caller, and a cycle would make the visibility walk and every tree draw
+  run forever.
+
+`Layer::shown` is `visible` **and every object above it visible**, cached and
+recomputed by `refresh_shown` — the single place it moves, for the reason
+`Layer::note` is the single place a tally moves. Compositing asks `shown`, never
+`visible`: walking to the root per lookup would put the depth of the tree inside
+`get`. The layer's own flag never changes when an object hides it, so showing
+the object again restores exactly what was shown before.
+
+The layer panel draws three states for that reason — filled for on screen,
+hollow with a pip for "switched on, hidden by an object", hollow for switched
+off here. Filled would be a lie about the screen; plain hollow would make `V`
+look broken.
+
 ### A layer is a grid of its own
 
 Layers composite top down: `VoxelModel::get` returns the topmost *visible*
@@ -217,7 +267,17 @@ the shape than the one on screen.
 
 ### Structural changes store the stack whole
 
-`History` holds a `Change`, which is either cells or layers. A cell edit names
+`History` holds a `Change`, which is either cells or layers. A layer snapshot
+carries the **object tree** as well as the stack and the scene size: removing an
+object renumbers the ones above it exactly the way removing a layer does, so a
+snapshot that put the stack back without the tree would leave every layer filed
+under the wrong part of it.
+
+Object *visibility* is outside the history for the same reason layer visibility
+is — it is toggled constantly while working, and undo would spend its first few
+presses turning things back on. It still dirties the document.
+
+ A cell edit names
 the layer it landed on (`Edit::layer`), and removing or reordering a layer
 renumbers the ones around it — so every edit already on the stack would start
 pointing at the wrong grid. `History::restructure` therefore snapshots the whole
@@ -738,13 +798,17 @@ from the one that was asked for.
 - **A missing file is not an error.** `voxeler robot.vxm` in an empty directory
   starts a model. Refusing would mean the tool could only open what some other
   tool had already made.
-- **The file stores each layer, not the composite.** `.vxm` is `VXM3`: a scene
-  range, a layer count, the active layer, then per layer its flags, name, origin,
-  size and own sparse voxel list. Coordinates are relative to the layer's origin,
-  so one byte covers a layer anywhere in the scene. `VXM2` (layers, no boxes) and
-  `VXM1` (no layers) still load, and are **trimmed** on the way in — an old file
-  gains the smaller shape by being opened. A file already on disk is not free to
-  rewrite itself.
+- **The file stores each layer, not the composite.** `.vxm` is `VXM4`: a scene
+  range, the object table, a layer count, the active layer, then per layer its
+  flags, its object, name, origin, size and own sparse voxel list. Coordinates
+  are relative to the layer's origin, so one byte covers a layer anywhere in the
+  scene. An object's parent is stored as `parent + 1`, so the root's "no parent"
+  is a zero rather than a sentinel that could be read as object 0. `VXM3` (no
+  objects), `VXM2` (layers, no boxes) and `VXM1` (no layers) all still load — an
+  older file arrives as a single root object holding every layer, and the two
+  oldest are additionally **trimmed** on the way in, so they gain the smaller
+  shape by being opened. A file already on disk is not free to rewrite itself.
+  That rule has now held four times.
 - **An export is a flatten.** `.vox` has nowhere to put a stack, so `ctrl+E`
   writes the composite as one model and the status line says how many layers
   went into it. Doing otherwise means the nTRN/nGRP/nSHP scene graph a
@@ -859,8 +923,12 @@ rs-voxeler/
   is the rule, not a bug: tools write to the active layer. Select the layer the
   message names, or `V` to hide it and reach what is under it.
 - **A layer is drawn that should be hidden, or vice versa.** `get` and
-  `owner_at` both filter on `visible`; a path that reads `Layer::at` directly
-  skips that filter.
+  `owner_at` filter on `Layer::shown`, not on `visible` — a layer inside a
+  hidden object is on screen if some path asks the wrong one. A path that reads
+  `Layer::at` directly skips both.
+- **A layer is switched on and still not drawn.** An object above it is hidden.
+  `list_objects` says which, and the layer panel draws a hollow box with a pip
+  for exactly this case.
 - **A voxel written to a layer vanishes.** It landed outside the scene's range —
   `set_in` refuses those — or the box was set with `set_layer_bounds` to
   something that cut it off. `set_layer_bounds` refuses a box that would drop

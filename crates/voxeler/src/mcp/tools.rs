@@ -303,6 +303,10 @@ pub fn list() -> Vec<ToolInfo> {
         "description": "A layer, by its index (0 is the bottom of the stack) or by its name.",
         "type": ["integer", "string"]
     });
+    let object = json!({
+        "description": "An object, by its index (0 is the scene root) or by its name.",
+        "type": ["integer", "string"]
+    });
 
     let mut tools = vec![
         ToolInfo {
@@ -701,6 +705,102 @@ pub fn list() -> Vec<ToolInfo> {
                 "required": ["layer", "visible"],
             }),
         },
+        ToolInfo {
+            name: "list_objects",
+            description:
+                "The object tree: what each part of the scene is, and which layers belong to it. \
+                 An object says what a thing IS (\"left arm\"); a layer says how pixels combine. \
+                 Every scene has a root at index 0 that holds anything not filed elsewhere.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "create_object",
+            description:
+                "Add a named object under `parent` (the scene root by default). Objects cost \
+                 nothing until layers are put in them with `set_layer_object` — create one per \
+                 part you want to be able to name, hide or move as a unit.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "parent": object},
+                "required": ["name"],
+            }),
+        },
+        ToolInfo {
+            name: "delete_object",
+            description:
+                "Remove an object. Its child objects and its layers move up to its parent rather \
+                 than being deleted — this removes a label, never the work under it. The scene \
+                 root cannot be removed.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"object": object},
+                "required": ["object"],
+            }),
+        },
+        ToolInfo {
+            name: "rename_object",
+            description: "Give an object a new name.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"object": object, "name": {"type": "string"}},
+                "required": ["object", "name"],
+            }),
+        },
+        ToolInfo {
+            name: "reparent_object",
+            description:
+                "Make an object part of another one. Refused if that would put the object inside \
+                 itself at any depth. The scene root cannot be reparented.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"object": object, "parent": object},
+                "required": ["object", "parent"],
+            }),
+        },
+        ToolInfo {
+            name: "set_object_visible",
+            description:
+                "Show or hide an object, and with it every layer inside it and inside its \
+                 children. The layers keep their own visibility: showing the object again \
+                 restores exactly what was shown before.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"object": object, "visible": {"type": "boolean"}},
+                "required": ["object", "visible"],
+            }),
+        },
+        ToolInfo {
+            name: "set_layer_object",
+            description:
+                "Put a layer in an object. This is how a layer becomes part of a named thing — \
+                 a body and its paint can be two layers of one object.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"layer": layer, "object": object},
+                "required": ["layer", "object"],
+            }),
+        },
+        ToolInfo {
+            name: "move_object",
+            description:
+                "Move an object and everything under it by whole voxels. The voxels are not \
+                 re-created: each layer's box slides, so this is cheap however much the object \
+                 holds. All or nothing — if any part would leave the scene, nothing moves and \
+                 the reason says which layer and which axis.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "object": object,
+                    "by": {
+                        "type": "array", "items": {"type": "integer"},
+                        "minItems": 3, "maxItems": 3,
+                        "description": "How far to move, as [dx, dy, dz] in voxels. Negative is \
+                                        allowed; +Y is up."
+                    },
+                },
+                "required": ["object", "by"],
+            }),
+        },
     ];
     tools.extend(modeling::schemas());
     tools
@@ -1005,6 +1105,97 @@ fn dispatch(
                 if visible { "shown" } else { "hidden" },
                 layers_json(editor)
             )))
+        }
+        "list_objects" => Ok(CallResult::text(objects_json(editor).to_string())),
+        "create_object" => {
+            let parent = match args.get("parent") {
+                None | Some(Value::Null) => 0,
+                _ => object_arg(editor, args, "parent")?,
+            };
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("create_object needs `name`")?
+                .to_string();
+            if !editor.add_object(parent, &name) {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "added object {}\n{}",
+                editor.model().object_count() - 1,
+                objects_json(editor)
+            )))
+        }
+        "delete_object" => {
+            let i = object_arg(editor, args, "object")?;
+            if !editor.remove_object(i) {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "removed it; its layers and children moved up\n{}",
+                objects_json(editor)
+            )))
+        }
+        "rename_object" => {
+            let i = object_arg(editor, args, "object")?;
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("rename_object needs `name`")?
+                .to_string();
+            editor.rename_object(i, &name);
+            Ok(CallResult::text(format!(
+                "object {i} is now {name}\n{}",
+                objects_json(editor)
+            )))
+        }
+        "reparent_object" => {
+            let i = object_arg(editor, args, "object")?;
+            let parent = object_arg(editor, args, "parent")?;
+            if !editor.reparent_object(i, parent) {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "object {i} is now part of {parent}\n{}",
+                objects_json(editor)
+            )))
+        }
+        "set_object_visible" => {
+            let i = object_arg(editor, args, "object")?;
+            let visible = args
+                .get("visible")
+                .and_then(Value::as_bool)
+                .ok_or("set_object_visible needs `visible`")?;
+            editor.set_object_visible(i, visible);
+            Ok(CallResult::text(format!(
+                "object {i} is now {}\n{}",
+                if visible { "shown" } else { "hidden" },
+                objects_json(editor)
+            )))
+        }
+        "set_layer_object" => {
+            let layer = layer_arg(editor, args)?;
+            let object = object_arg(editor, args, "object")?;
+            if !editor.set_layer_object(layer, object) {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "layer {layer} is part of object {object}\n{}",
+                objects_json(editor)
+            )))
+        }
+        "move_object" => {
+            let i = object_arg(editor, args, "object")?;
+            let by = corner(args, "by")?;
+            let moved = editor.move_object(i, by)?;
+            // One JSON object after the line of text, the way every other tool
+            // reports: two would make the result unparseable to anything that
+            // reads the first one it finds.
+            let mut report = objects_json(editor);
+            report["moved_layers"] = json!(moved);
+            report["by"] = json!(by);
+            report["voxels"] = json!(editor.model().filled_count());
+            Ok(CallResult::text(format!("moved an object\n{report}")))
         }
         "screenshot" => screenshot(editor, root, args),
         "undo" | "redo" => {
@@ -1343,8 +1534,15 @@ fn describe(editor: &Editor) -> String {
     let bounds = model
         .occupied_bounds()
         .map(|(lo, hi)| json!({"min": lo, "max": hi}));
+    // A plain scene has one root object and this is a single short row; a
+    // scene with parts needs it, because a layer row's `object` is an index and
+    // an index with no table is not an answer.
+    let parts = match model.object_count() {
+        1 => String::new(),
+        n => format!(", {n} objects"),
+    };
     format!(
-        "{sx}x{sy}x{sz}, {} voxels, {} layers\n{}",
+        "{sx}x{sy}x{sz}, {} voxels, {} layers{parts}\n{}",
         model.filled_count(),
         model.layer_count(),
         json!({
@@ -1359,6 +1557,7 @@ fn describe(editor: &Editor) -> String {
             "color_rgb": rgb_of(editor, editor.color),
             "active_layer": editor.active_layer(),
             "layers": layer_rows(editor),
+            "objects": object_rows(editor),
             "path": model_path(editor),
             "unsaved": editor.is_dirty(),
             "note": "basic edits write to the active layer; apply_edits, put_ellipsoid and put_line accept explicit layers; palette edits affect all uses of an index",
@@ -1450,21 +1649,102 @@ fn layer_rows(editor: &Editor) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(i, l)| {
-            json!({
+            let mut row = json!({
                 "index": i,
                 "name": l.name,
                 "visible": l.visible,
+                "shown": l.shown(),
+                "object": l.object,
                 "voxels": l.filled_count(),
                 "origin": l.bounds().origin,
                 "size": l.bounds().size,
                 "active": i == editor.active_layer(),
-            })
+            });
+            // `shown` is dropped when it agrees with `visible`, which is nearly
+            // always. Present, it is the answer to the one question the rest of
+            // the row cannot settle: this layer is switched on and still not
+            // drawn, because an object above it is hidden.
+            if l.shown() == l.visible {
+                row.as_object_mut().expect("a row is an object").remove("shown");
+            }
+            row
         })
         .collect()
 }
 
 fn layers_json(editor: &Editor) -> Value {
     json!({"active_layer": editor.active_layer(), "layers": layer_rows(editor)})
+}
+
+/// The object tree, flat, with a `path` per row.
+///
+/// Flat because that is how it is held, and a path because an agent reading a
+/// list of parent indices has to reconstruct the shape itself. "ROBOT/LEFT ARM"
+/// says where a thing is in one field.
+fn objects_json(editor: &Editor) -> Value {
+    json!({"objects": object_rows(editor), "layers": layer_rows(editor)})
+}
+
+/// One row per object, in arena order.
+fn object_rows(editor: &Editor) -> Vec<Value> {
+    let model = editor.model();
+    let path = |mut i: usize| {
+        let mut parts = Vec::new();
+        for _ in 0..model.object_count() {
+            let Some(o) = model.objects().get(i) else { break };
+            parts.push(o.name.clone());
+            match o.parent {
+                Some(p) => i = p,
+                None => break,
+            }
+        }
+        parts.reverse();
+        parts.join("/")
+    };
+    model
+        .objects()
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            json!({
+                "index": i,
+                "name": o.name,
+                "path": path(i),
+                "parent": o.parent,
+                "visible": o.visible,
+                "layers": model.object_layers(i),
+            })
+        })
+        .collect()
+}
+
+/// An object named by index or by name, like [`layer_arg`].
+fn object_arg(editor: &Editor, args: &Value, key: &str) -> Result<usize, String> {
+    let v = args.get(key).ok_or_else(|| format!("missing `{key}`"))?;
+    let count = editor.model().object_count();
+    if let Some(i) = v.as_u64() {
+        return (i as usize)
+            .lt(&count)
+            .then_some(i as usize)
+            .ok_or_else(|| format!("object {i} does not exist; there are {count}"));
+    }
+    let name = v
+        .as_str()
+        .ok_or_else(|| format!("`{key}` must be an index or a name"))?;
+    editor
+        .model()
+        .objects()
+        .iter()
+        .position(|o| o.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let known: Vec<&str> = editor
+                .model()
+                .objects()
+                .iter()
+                .map(|o| o.name.as_str())
+                .collect();
+            format!("no object called {name:?}; there is {}", known.join(", "))
+        })
 }
 
 fn rgb_of(editor: &Editor, index: u8) -> [u8; 3] {
@@ -1687,6 +1967,136 @@ mod tests {
 
     fn run(e: &mut Editor, name: &str, args: Value) -> CallResult {
         call(e, name, &args)
+    }
+
+    // -- objects ----------------------------------------------------------
+
+    /// The tree an agent actually builds: a robot with an arm, layers filed
+    /// into each, and a path per row so the shape can be read without
+    /// reconstructing it from parent indices.
+    #[test]
+    fn objects_group_layers_and_report_where_each_one_sits() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "ROBOT"}));
+        run(&mut e, "create_object", json!({"name": "LEFT ARM", "parent": "ROBOT"}));
+        run(&mut e, "add_layer", json!({"name": "SKIN"}));
+        run(&mut e, "set_layer_object", json!({"layer": "SKIN", "object": "LEFT ARM"}));
+
+        let j = json_of(&run(&mut e, "list_objects", json!({})));
+        assert_eq!(j["objects"][0]["path"], "SCENE");
+        assert_eq!(j["objects"][2]["path"], "SCENE/ROBOT/LEFT ARM");
+        assert_eq!(j["objects"][2]["parent"], 1);
+        assert_eq!(j["objects"][2]["layers"], json!([1]), "SKIN is in the arm");
+        assert_eq!(j["objects"][0]["layers"], json!([0]), "and layer 0 is at the root");
+        assert_eq!(j["layers"][1]["object"], 2);
+    }
+
+    /// Hiding an object hides the layers inside it — and the report says so,
+    /// because a layer whose own flag is on but which is not drawn is exactly
+    /// the thing an agent cannot see and would otherwise keep drawing into.
+    #[test]
+    fn hiding_an_object_hides_its_layers_and_the_report_explains_why() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "SWORD"}));
+        run(&mut e, "add_layer", json!({"name": "BLADE"}));
+        run(&mut e, "set_layer_object", json!({"layer": "BLADE", "object": "SWORD"}));
+        run(&mut e, "put_voxel", json!({"x": 2, "y": 2, "z": 2, "color": 5}));
+        assert_eq!(e.model().filled_count(), 1);
+
+        run(&mut e, "set_object_visible", json!({"object": "SWORD", "visible": false}));
+        assert_eq!(e.model().filled_count(), 0, "it is not on screen");
+        assert_eq!(e.model().get_in(1, 2, 2, 2), 5, "but it is still there");
+
+        let j = json_of(&run(&mut e, "list_objects", json!({})));
+        assert_eq!(j["layers"][1]["visible"], true, "the layer's own flag");
+        assert_eq!(j["layers"][1]["shown"], false, "and why it is not drawn");
+        assert_eq!(j["layers"][0]["shown"], Value::Null, "quiet when they agree");
+    }
+
+    /// Moving an object carries its children's layers, costs no reallocation,
+    /// and is one undo step for the lot.
+    #[test]
+    fn moving_an_object_carries_its_subtree_and_undoes_in_one_step() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        run(&mut e, "create_object", json!({"name": "ROBOT"}));
+        run(&mut e, "create_object", json!({"name": "ARM", "parent": "ROBOT"}));
+        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "ROBOT"}));
+        run(&mut e, "put_rect", json!({"from": [4,4,4], "to": [5,5,5], "color": 1}));
+        run(&mut e, "add_layer", json!({"name": "HAND"}));
+        run(&mut e, "set_layer_object", json!({"layer": "HAND", "object": "ARM"}));
+        run(&mut e, "put_voxel", json!({"x": 8, "y": 4, "z": 4, "color": 2}));
+        let allocated = e.model().allocated_cells();
+
+        let j = json_of(&run(&mut e, "move_object", json!({"object": "ROBOT", "by": [2, 1, 0]})));
+        assert_eq!(j["moved_layers"], 2);
+        assert_eq!(e.model().get(6, 5, 4), 1, "the body moved");
+        assert_eq!(e.model().get(10, 5, 4), 2, "and the child object's layer too");
+        assert_eq!(e.model().get(4, 4, 4), 0, "nothing stayed behind");
+        assert_eq!(e.model().allocated_cells(), allocated, "no reallocation");
+
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().get(4, 4, 4), 1, "one step put all of it back");
+        assert_eq!(e.model().get(8, 4, 4), 2);
+    }
+
+    /// All or nothing, and the refusal has to say which layer and which axis —
+    /// an agent cannot see the scene edge.
+    #[test]
+    fn a_move_that_would_leave_the_scene_is_refused_with_a_reason() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "PART"}));
+        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "PART"}));
+        run(&mut e, "put_voxel", json!({"x": 7, "y": 1, "z": 1, "color": 3}));
+
+        let r = run(&mut e, "move_object", json!({"object": "PART", "by": [4, 0, 0]}));
+        assert_eq!(r.is_error, Some(true));
+        let why = text_of(&r);
+        assert!(why.contains("outside the scene"), "{why}");
+        assert!(why.contains('x'), "and which axis: {why}");
+        assert_eq!(e.model().get(7, 1, 1), 3, "and nothing moved");
+    }
+
+    /// Creating and removing objects is undoable, and removing one keeps the
+    /// work that was inside it.
+    #[test]
+    fn objects_undo_and_deleting_one_keeps_its_layers() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "TREE"}));
+        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "TREE"}));
+        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 6}));
+
+        run(&mut e, "delete_object", json!({"object": "TREE"}));
+        assert_eq!(e.model().object_count(), 1, "the label is gone");
+        assert_eq!(e.model().get(1, 1, 1), 6, "the voxel is not");
+        assert_eq!(e.model().layers()[0].object, 0, "the layer moved up");
+
+        run(&mut e, "undo", json!({}));
+        assert_eq!(e.model().object_count(), 2, "and undo brings the label back");
+        assert_eq!(e.model().objects()[1].name, "TREE");
+        assert_eq!(e.model().layers()[0].object, 1, "with the layer back inside it");
+    }
+
+    /// A cycle is refused, and the message is one an agent can act on.
+    #[test]
+    fn an_object_cannot_be_reparented_into_its_own_subtree() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "A"}));
+        run(&mut e, "create_object", json!({"name": "B", "parent": "A"}));
+        let r = run(&mut e, "reparent_object", json!({"object": "A", "parent": "B"}));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("cannot be part of itself"), "{}", text_of(&r));
+        assert_eq!(e.model().objects()[1].parent, Some(0), "and nothing moved");
+    }
+
+    /// Naming an object that does not exist has to list the ones that do.
+    #[test]
+    fn an_unknown_object_name_lists_the_known_ones() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "ROBOT"}));
+        let r = run(&mut e, "set_object_visible", json!({"object": "ROBT", "visible": false}));
+        assert_eq!(r.is_error, Some(true));
+        let why = text_of(&r);
+        assert!(why.contains("ROBOT"), "{why}");
     }
 
     #[test]

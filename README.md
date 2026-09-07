@@ -249,6 +249,9 @@ whoever connects.
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
 | `set_palette_color` | change an index's RGB across all layers, with undo/redo |
 | `add_layer`, `select_layer`, `set_layer_visible`, `trim_layer` | the layer stack and its boxes |
+| `list_objects`, `create_object`, `rename_object`, `delete_object` | the scene tree: what each part *is* |
+| `set_layer_object`, `reparent_object`, `set_object_visible` | put layers in parts, parts in parts, and hide either |
+| `move_object` | move a part and everything under it, one undo step |
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
 | `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
@@ -267,6 +270,34 @@ and it puts the camera back where it found it.
 
 One tool call is **one undo step**, so `undo` takes back a whole fill however
 many voxels it moved. The history is shared with whoever has the window.
+
+## Objects: naming the parts
+
+A layer says how pixels combine; an **object** says what a thing is. Objects
+nest, layers belong to one, and every scene has a root holding anything you have
+not filed elsewhere.
+
+```text
+SCENE
+ ├── ROBOT              hide this and the whole robot goes
+ │    ├── BODY          layers: BASE, PAINT
+ │    └── LEFT ARM      layers: SKIN
+ └── SWORD              layers: BLADE
+```
+
+Hiding an object hides every layer inside it without touching their own
+switches, so showing it again restores exactly what was shown before. The layer
+panel draws that third state as a hollow box with a dot in it: switched on, but
+something above it is hidden.
+
+`move_object` moves a part and everything under it by whole voxels. Nothing is
+re-created — each layer's box slides — so moving a finished robot costs the same
+as moving an empty one. It is all or nothing: if any part of the subtree would
+leave the scene, nothing moves and the message says which layer and which axis.
+
+The tree is saved in the file, so the next session still knows what the parts
+are. That is what makes an agent's edits semantic: "make the left arm longer" is
+an object, not a coordinate hunt.
 
 ## Selecting and moving
 

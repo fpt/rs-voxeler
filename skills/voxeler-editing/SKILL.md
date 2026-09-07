@@ -95,12 +95,31 @@ is how you copy a part onto a layer of its own. What lands is left selected.
 The clipboard survives `undo` — undo puts the model back, not the clipboard — so
 a paste you undid can be pasted again.
 
-## Layers and palette
+## Objects, layers and palette
 
 ```
+list_objects / create_object / rename_object / delete_object
+set_layer_object / reparent_object / set_object_visible / move_object
 select_layer / add_layer / set_layer_visible / trim_layer
 set_color / find_color / set_palette_color
 ```
+
+`list_objects` is how you find out what a model's parts are called before
+changing one. An object says what a thing is; a layer says how pixels combine.
+If the model has no objects yet, naming the parts you touch is a courtesy to the
+next session.
+
+`move_object` repositions a part and everything under it in one undo step
+without re-creating a voxel — reach for it before erasing and redrawing a limb
+somewhere else. It is refused outright if any part of the subtree would leave
+the scene.
+
+`delete_object` removes a label, not the work: children and layers move up to
+its parent.
+
+A layer reported with `"shown": false` while `"visible"` is true is inside a
+hidden object. That is why it is not on screen and not in the voxel count, and
+`set_layer_visible` will not bring it back — `set_object_visible` will.
 
 Editing tools write to the active layer only. If a change appears to do nothing,
 the voxels probably belong to another layer: the report will name it.

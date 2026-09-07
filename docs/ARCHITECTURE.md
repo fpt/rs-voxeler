@@ -70,6 +70,58 @@ over `model.size()` is now the thing to be suspicious of.
 
 Where two layers overlap, the cell belongs to whoever is on top (`owner_at`).
 
+### An object is what a thing is; a layer is how pixels combine
+
+A layer does compositing — a grid, a box, a stack order, a visibility — and does
+it well. It was also the only way to say "this is the left arm", and for that a
+flat list of sixteen with no way to say one thing is *part of* another is the
+wrong shape.
+
+```text
+Scene
+ ├── robot
+ │    ├── body      (layers: base, paint)
+ │    └── left_arm  (layers: skin)
+ └── sword          (layers: blade)
+```
+
+An `Object` is a name, a visibility and a parent, held in a **flat arena** with
+parent indices rather than as nested children. Every structural change here is
+already snapshot-based, and a flat list clones, compares and serialises with no
+recursive walk; the tree shape is one field rather than a second structure to
+keep in agreement with the first. Index 0 is a root that cannot be removed or
+reparented, so "no object" and "the whole scene" are one answer.
+
+**There is no transform on an object.** `move_object` applies its translation to
+the layers' `Bounds::origin` at the moment it is asked. Layer boxes stay in scene
+coordinates, so `get`, the raycaster and the extractor need to know nothing about
+objects at all, and moving a part costs three `u16` per layer rather than a
+re-voxelisation — the tree walk is the expensive half. A stored transform would
+put a matrix inside the hottest read in the codebase to buy a generality nobody
+asked for; when rotation arrives it should bake, the way `rotate_selection`
+already does.
+
+Three more rules, each with a failure mode on the other side:
+
+- **A move is all or nothing.** The whole subtree is checked against the scene
+  before any of it moves — half a robot moved and half left standing is worse
+  than a move that did not happen — and the refusal names the layer and the axis,
+  because an agent cannot see the scene edge.
+- **Removing an object removes a label, never the work.** Its children and its
+  layers move up to its parent. That also changes what is on screen, since a
+  layer inside a hidden object is not any more, so it recounts. The drift test
+  caught that and nothing else would have.
+- **A cycle is refused in both directions.** `reparent_object` refuses a parent
+  that is the object itself or anything under it; `set_objects` refuses a file
+  whose chain loops. A file is not a caller.
+
+`Layer::shown` is the layer's own flag **and** every object above it, cached and
+recomputed by `refresh_shown` — the single place it moves, for the reason
+`Layer::note` is the single place a tally moves. Compositing asks `shown`, never
+`visible`, because walking to the root per lookup would put the depth of the tree
+inside `get`. The layer's own flag is untouched, so showing an object again
+restores exactly what was shown before.
+
 ### A layer is a grid of its own
 
 Layers composite top down: `get` returns the topmost *visible* layer's index at
@@ -178,7 +230,10 @@ are both needed because they fail differently:
 the layer it landed on, and removing or reordering a layer renumbers the ones
 around it — so every edit already on the stack would start pointing at the wrong
 grid. `History::restructure` therefore snapshots the whole layer stack either
-side of the change. It costs a copy of the model per structural step, which
+side of the change, the **object tree** included: removing an object renumbers
+objects exactly the way removing a layer renumbers layers, and a snapshot that
+restored the stack without the tree would file every layer under the wrong part
+of it. It costs a copy of the model per structural step, which
 happens a handful of times a session; the alternative is stable layer ids and a
 resurrection path for a deleted one, which is a great deal of machinery for the
 same guarantee.
@@ -274,12 +329,16 @@ briefly: **19 ms became 40 ms** before the check went in, and 6 ms after.
 extraction wants a neighbour lookup to be a load, and both are O(1) on a dense
 array. The *file* is sparse, because a model is mostly air.
 
-`.vxm` is `VXM3`: a scene range, a layer count, the active layer, then per layer
-its flags, name, origin, size and own sparse voxel list. Coordinates are relative
-to the layer's origin, so one byte covers a layer anywhere in the scene. `VXM2`
-(layers, no boxes) and `VXM1` (no layers) still load and are **trimmed** on the
-way in — an old file gains the smaller shape by being opened, and a file already
-on disk is not free to rewrite itself.
+`.vxm` is `VXM4`: a scene range, the object table, a layer count, the active
+layer, then per layer its flags, its object, name, origin, size and own sparse
+voxel list. Coordinates are relative to the layer's origin, so one byte covers a
+layer anywhere in the scene; an object's parent is stored as `parent + 1`, so the
+root's "no parent" is a zero rather than a sentinel that could be read as object
+0. `VXM3` (no objects), `VXM2` (layers, no boxes) and `VXM1` (no layers) all
+still load — an older file arrives as a single root object holding every layer,
+and the two oldest are additionally **trimmed** on the way in, so they gain the
+smaller shape by being opened. A file already on disk is not free to rewrite
+itself, and that rule has now held four times.
 
 **Y is up, and `.vox` is not.** MagicaVoxel is Z-up, so `format::vox` converts —
 and the conversion is a **rotation**, `(x, y, z) → (x, z, sy-1-y)`, not a swap.
