@@ -3335,15 +3335,27 @@ mod tests {
         let mut e = editor_with_floor();
         assert_eq!(e.model().allocated_cells(), 64, "the 8x1x8 floor");
 
+        // A *partial* erase, clearing the five columns nearest -X. Erasing the
+        // lot is the one case that hands the box back on its own, so it would
+        // not show what a trim is for.
         e.tool = Tool::Erase;
-        e.span = Span::Plane;
-        e.begin_stroke(hit([3, 0, 3], 4));
+        e.span = Span::Voxel;
+        e.brush = Brush {
+            radius: 4,
+            shape: BrushShape::Cube,
+        };
+        e.begin_stroke(hit([0, 0, 3], 4));
         e.end_stroke();
-        assert_eq!(e.model().filled_count(), 0);
-        assert_eq!(e.model().allocated_cells(), 64, "the box stays put");
+        assert_eq!(e.model().filled_count(), 24, "the three columns left");
+        assert_eq!(
+            e.model().allocated_cells(),
+            64,
+            "the box stays put while there is still work in it"
+        );
 
         e.trim_layer();
-        assert_eq!(e.model().allocated_cells(), 0);
+        assert_eq!(e.model().allocated_cells(), 24, "the trim gives the rest back");
+        assert_eq!(e.model().filled_count(), 24, "and loses no voxel doing it");
         assert!(e.is_dirty());
         assert_eq!(e.undo_depth(), 1, "a trim moves no voxels, so it is no undo step");
     }

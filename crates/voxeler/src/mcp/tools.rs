@@ -2008,15 +2008,18 @@ mod tests {
     fn trim_layer_reports_the_space_it_gave_back() {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
         run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,15], "color": 4}));
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,15], "color": 0}));
-        run(&mut e, "put_voxel", json!({"x": 3, "y": 3, "z": 3, "color": 4}));
+        // Two partial erases, leaving the far corner column standing. A layer
+        // emptied outright hands its box back by itself, so a trim there would
+        // have nothing left to report.
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [11,15,15], "color": 0}));
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,11], "color": 0}));
 
         let j = json_of(&run(&mut e, "trim_layer", json!({})));
-        assert_eq!(j["cells_before"], 4096);
-        assert_eq!(j["cells_after"], 1);
-        assert_eq!(j["origin"], json!([3, 3, 3]));
-        assert_eq!(j["allocated_cells"], 1);
-        assert_eq!(e.model().get(3, 3, 3), 4, "and the voxel is still there");
+        assert_eq!(j["cells_before"], 4096, "the box the erases left standing");
+        assert_eq!(j["cells_after"], 4 * 16 * 4);
+        assert_eq!(j["origin"], json!([12, 0, 12]));
+        assert_eq!(j["allocated_cells"], 4 * 16 * 4);
+        assert_eq!(e.model().get(12, 0, 12), 4, "and the voxels are still there");
     }
 
     #[test]
