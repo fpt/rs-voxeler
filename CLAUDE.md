@@ -253,6 +253,33 @@ Three rules the MCP surface depends on:
   is looking at, and moving it would be reaching through the screen. The base64
   is hand-rolled next to the PNG writer, for the same reason.
 
+### Shapes are stated; regions are found
+
+`voxel-core/src/shape.rs` answers "which cells does a ball of radius 3 cover",
+and `region.rs` answers "which cells are connected to the one you pointed at".
+They look similar and are not: a shape has no reference to the model at all,
+where a region grows over whatever is already there. One is a stamp, the other a
+selection.
+
+**`in_ball` is the single definition of "radius"** — `(r + ½)²`, measured to the
+far side of the centre cell — and `region::Brush` asks it too. The ball brush
+and `put_sphere` have to mean the same thing by the same word, and two copies of
+that formula would eventually not. Note it reads differently in two dimensions
+than in three: a corner is only √2 away, so the smallest disc is a 3×3 where the
+smallest ball drops its eight corners.
+
+A cylinder takes its axis from its **ends** rather than from a parameter: an
+even height has no centre cell, and "from here to there" is what a caller
+placing a trunk already knows. Ends differing on more than one axis return
+`None` rather than being projected onto an axis, which would put the shape
+somewhere nobody asked for.
+
+`tools::stamp` **clips** a shape to the scene where `put_rect` refuses a box
+outside it. The two are not inconsistent: a dome half sunk into the ground or a
+pillar out of the top is a thing to want, where a box named outside the volume is
+usually a mistake. The report carries `clipped` either way, so an agent that
+meant the whole shape can see it did not get it.
+
 ### A region can be read from one layer or from the composite
 
 `Reach::layer` is `None` for the composite and `Some(n)` for one layer's own
@@ -588,6 +615,7 @@ rs-voxeler/
 │   ├── edit.rs            Stroke + History
 │   ├── raycast.rs         Amanatides–Woo grid traversal
 │   ├── region.rs          how far one edit reaches: brush, run, flood
+│   ├── shape.rs           stated solids: ball, cylinder, shell
 │   └── format/            .vxm (ours) and .vox (MagicaVoxel)
 ├── crates/voxel-render/   the software rasterizer, editor-free
 │   ├── math.rs            Vec3/Vec4/Mat4

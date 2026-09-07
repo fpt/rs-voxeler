@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 use voxel_core::region::{self, Brush, Reach, Span};
-use voxel_core::{Bounds, Face, VoxelModel};
+use voxel_core::{shape, Bounds, Face, VoxelModel};
 
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
@@ -295,6 +295,46 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "put_sphere",
+            description:
+                "Fill a ball on the active layer. `radius` is measured to the far side of the \
+                 centre cell, so 0 is one voxel and 3 is seven across — the same radius the \
+                 editor's ball brush uses. `hollow` keeps only the surface, which is how you get \
+                 a dome or a bubble. A colour of 0 carves the ball out instead.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "center": coord("The centre"),
+                    "radius": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "hollow": {"type": "boolean", "description":
+                        "Keep only the surface, one voxel thick. Default false."},
+                    "color": color,
+                },
+                "required": ["center", "radius"],
+            }),
+        },
+        ToolInfo {
+            name: "put_cylinder",
+            description:
+                "Fill a cylinder on the active layer, between the centres of its two end caps. \
+                 The ends must differ on at most one axis — that axis is the cylinder's — so \
+                 [8,0,8] to [8,20,8] is an upright trunk twenty-one voxels tall. Give the same \
+                 point twice for a disc one voxel thick. `hollow` makes it a capped tube; a \
+                 colour of 0 bores it out instead.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": coord("The centre of one end cap"),
+                    "to": coord("The centre of the other, differing on at most one axis"),
+                    "radius": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "hollow": {"type": "boolean", "description":
+                        "Keep only the surface, one voxel thick. Default false."},
+                    "color": color,
+                },
+                "required": ["from", "to", "radius"],
+            }),
+        },
+        ToolInfo {
             name: "paint",
             description:
                 "Recolour the voxels inside a box on the active layer, creating none: air stays \
@@ -524,7 +564,7 @@ fn dispatch(
     match name {
         "describe_model" => Ok(CallResult::text(describe(editor, root))),
         "put_voxel" => {
-            let p = point_in(args, editor.model())?;
+            let p = point_in(args, editor.model(), "")?;
             let color = color_arg(editor, args)?;
             edit(editor, "mcp put", color, move |_, _| vec![p])
         }
@@ -532,6 +572,27 @@ fn dispatch(
             let (lo, hi) = range(args, editor.model())?;
             let color = color_arg(editor, args)?;
             edit(editor, "mcp rect", color, move |_, _| box_cells(lo, hi))
+        }
+        "put_sphere" => {
+            let center = point_in(args, editor.model(), "center")?;
+            let radius = radius_arg(args)?;
+            let color = color_arg(editor, args)?;
+            let hollow = flag(args, "hollow")?;
+            stamp(editor, "mcp sphere", color, shape::sphere(center, radius), hollow)
+        }
+        "put_cylinder" => {
+            let from = corner(args, "from")?;
+            let to = corner(args, "to")?;
+            let radius = radius_arg(args)?;
+            let color = color_arg(editor, args)?;
+            let hollow = flag(args, "hollow")?;
+            let cells = shape::cylinder(from, to, radius).ok_or_else(|| {
+                format!(
+                    "{from:?} and {to:?} differ on more than one axis; a cylinder is \
+                     axis-aligned, so its ends share two of their three coordinates"
+                )
+            })?;
+            stamp(editor, "mcp cylinder", color, cells, hollow)
         }
         "paint" => {
             let (lo, hi) = range(args, editor.model())?;
@@ -549,7 +610,7 @@ fn dispatch(
             })
         }
         "fill" => {
-            let p = point_in(args, editor.model())?;
+            let p = point_in(args, editor.model(), "")?;
             let color = color_arg(editor, args)?;
             let active = editor.active_layer();
             // A fill reads a grid to decide its region and then writes to the
@@ -936,6 +997,69 @@ fn screenshot(editor: &mut Editor, args: &Value) -> Result<CallResult, String> {
     })
 }
 
+/// Write a shape, clipping it to the scene and saying how much it lost.
+///
+/// Clipped rather than refused, unlike `put_rect`: a dome half sunk into the
+/// ground or a pillar rising out of the top of the scene is a thing to want,
+/// where a box named outside the volume is usually a mistake. The count is in
+/// the report either way, so an agent that meant the whole shape can see that it
+/// did not get it.
+fn stamp(
+    editor: &mut Editor,
+    label: &'static str,
+    color: u8,
+    cells: Vec<[i32; 3]>,
+    hollow: bool,
+) -> Result<CallResult, String> {
+    let cells = if hollow { shape::shell(&cells) } else { cells };
+    let wanted = cells.len();
+    let inside: Vec<[i32; 3]> = cells
+        .into_iter()
+        .filter(|c| editor.model().contains(c[0], c[1], c[2]))
+        .collect();
+    let clipped = wanted - inside.len();
+
+    let mut report = Report::default();
+    editor.apply_batch(label, color, |_, _| inside, |before, after| {
+        report.record(before, after)
+    });
+    Ok(CallResult::text(format!(
+        "{}{}\n{}",
+        summary(&report),
+        if clipped > 0 {
+            format!(" ({clipped} outside the scene)")
+        } else {
+            String::new()
+        },
+        json!({
+            "targeted": report.targeted,
+            "added": report.added,
+            "removed": report.removed,
+            "repainted": report.repainted,
+            "unchanged": report.unchanged,
+            "clipped": clipped,
+            "layer": editor.model().layers()[editor.active_layer()].name,
+            "layer_voxels": editor.model().layers()[editor.active_layer()].filled_count(),
+            "model_voxels": editor.model().filled_count(),
+        })
+    )))
+}
+
+fn radius_arg(args: &Value) -> Result<u16, String> {
+    args.get("radius")
+        .and_then(Value::as_u64)
+        .and_then(|r| u16::try_from(r).ok())
+        .filter(|r| *r <= 255)
+        .ok_or_else(|| "`radius` is required, and must be 0..=255".into())
+}
+
+fn flag(args: &Value, name: &str) -> Result<bool, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(v) => v.as_bool().ok_or_else(|| format!("`{name}` must be true or false")),
+    }
+}
+
 fn summary(r: &Report) -> String {
     if r.targeted == 0 {
         return "nothing in range".into();
@@ -1052,8 +1176,12 @@ fn axis(args: &Value, name: &str) -> Result<i32, String> {
 /// Refused rather than clipped, for the reason a box is: a write that lands
 /// nowhere reports "0 added", which reads as the model rejecting the colour
 /// rather than as the agent naming a cell that does not exist.
-fn point_in(args: &Value, model: &VoxelModel) -> Result<[i32; 3], String> {
-    let p = [axis(args, "x")?, axis(args, "y")?, axis(args, "z")?];
+fn point_in(args: &Value, model: &VoxelModel, field: &str) -> Result<[i32; 3], String> {
+    let p = if field.is_empty() {
+        [axis(args, "x")?, axis(args, "y")?, axis(args, "z")?]
+    } else {
+        corner(args, field)?
+    };
     if !model.contains(p[0], p[1], p[2]) {
         let s = model.size();
         return Err(format!(
@@ -1460,6 +1588,145 @@ mod tests {
         assert_eq!(run(&mut e, "set_color", json!({"color": 0})).is_error, Some(true));
     }
 
+    // -- shapes -----------------------------------------------------------
+
+    /// The same radius the editor's ball brush uses, so the two mean the same
+    /// thing by the same word.
+    #[test]
+    fn a_sphere_matches_the_ball_brush_of_the_same_radius() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        let j = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [16, 16, 16], "radius": 1, "color": 5}),
+        ));
+        assert_eq!(j["added"], 19, "27 less the eight corners, as the brush draws it");
+        assert_eq!(e.model().get(17, 17, 16), 5, "an edge neighbour");
+        assert_eq!(e.model().get(17, 17, 17), 0, "and not a corner");
+
+        // Radius 0 is one voxel, so "no radius" and "one voxel" agree.
+        let j = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [2, 2, 2], "radius": 0, "color": 5}),
+        ));
+        assert_eq!(j["added"], 1);
+    }
+
+    #[test]
+    fn a_hollow_sphere_keeps_its_surface_and_drops_the_middle() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        let solid = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [16, 16, 16], "radius": 4, "color": 5}),
+        ));
+        run(&mut e, "put_sphere", json!({"center": [16, 16, 16], "radius": 4, "color": 0}));
+
+        let hollow = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [16, 16, 16], "radius": 4, "color": 5, "hollow": true}),
+        ));
+        assert!(
+            hollow["added"].as_u64().unwrap() < solid["added"].as_u64().unwrap(),
+            "a shell is smaller than the ball it came from"
+        );
+        assert_eq!(e.model().get(16, 16, 16), 0, "the middle is empty");
+        assert_eq!(e.model().get(16, 20, 16), 5, "and the top is not");
+    }
+
+    /// A trunk: two ends, the axis implied by which coordinate differs.
+    #[test]
+    fn a_cylinder_runs_between_the_ends_it_is_given() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        let j = json_of(&run(
+            &mut e,
+            "put_cylinder",
+            json!({"from": [16, 4, 16], "to": [16, 20, 16], "radius": 1, "color": 7}),
+        ));
+        assert_eq!(j["added"], 9 * 17, "a 3x3 disc, seventeen cells tall");
+        assert_eq!(e.model().get(16, 4, 16), 7);
+        assert_eq!(e.model().get(16, 20, 16), 7);
+        assert_eq!(e.model().get(16, 21, 16), 0, "and it stops at the end cap");
+        assert_eq!(e.model().get(16, 12, 18), 0, "and at the radius");
+    }
+
+    #[test]
+    fn a_cylinder_across_two_axes_is_refused_with_the_reason() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        let r = run(
+            &mut e,
+            "put_cylinder",
+            json!({"from": [4, 4, 4], "to": [10, 10, 4], "radius": 1}),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("axis-aligned"), "{}", text_of(&r));
+        assert_eq!(e.model().filled_count(), 0);
+    }
+
+    /// A colour of 0 carves, which is how a cave or a bore gets made.
+    #[test]
+    fn colour_zero_carves_a_shape_out_of_what_is_there() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        run(&mut e, "put_rect", json!({"from": [10,10,10], "to": [21,21,21], "color": 4}));
+        let before = e.model().filled_count();
+
+        let j = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [16, 16, 16], "radius": 3, "color": 0}),
+        ));
+        assert!(j["removed"].as_u64().unwrap() > 100);
+        assert_eq!(j["added"], 0);
+        assert_eq!(e.model().get(16, 16, 16), 0, "hollowed out");
+        assert_eq!(e.model().get(10, 10, 10), 4, "and the block is still there");
+        assert!(e.model().filled_count() < before);
+    }
+
+    /// Clipped rather than refused: a dome half sunk in the ground is a thing
+    /// to want, and the count says what did not fit.
+    #[test]
+    fn a_shape_over_the_edge_is_clipped_and_the_report_says_so() {
+        let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
+        let j = json_of(&run(
+            &mut e,
+            "put_sphere",
+            json!({"center": [0, 0, 0], "radius": 3, "color": 5}),
+        ));
+        assert!(j["clipped"].as_u64().unwrap() > 0, "most of it was outside");
+        assert!(j["added"].as_u64().unwrap() > 0, "and the rest went in");
+        assert_eq!(e.model().get(0, 0, 0), 5);
+
+        // A centre outside the scene is a mistake, not a shape.
+        let r = run(&mut e, "put_sphere", json!({"center": [99, 0, 0], "radius": 1}));
+        assert_eq!(r.is_error, Some(true));
+    }
+
+    #[test]
+    fn a_shape_is_one_undo_step() {
+        let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
+        run(&mut e, "put_sphere", json!({"center": [16, 16, 16], "radius": 5, "color": 5}));
+        let placed = e.model().filled_count();
+        assert!(placed > 300);
+        assert_eq!(e.undo_depth(), 1, "one ctrl+Z, not five hundred");
+        e.undo();
+        assert_eq!(e.model().filled_count(), 0);
+    }
+
+    #[test]
+    fn a_shape_without_a_radius_says_so() {
+        let mut e = editor();
+        assert_eq!(
+            run(&mut e, "put_sphere", json!({"center": [1, 1, 1]})).is_error,
+            Some(true)
+        );
+        assert_eq!(
+            run(&mut e, "put_cylinder", json!({"from": [1,1,1], "to": [1,2,1]})).is_error,
+            Some(true)
+        );
+    }
+
     // -- layer boxes ------------------------------------------------------
 
     /// The example this was built for, driven through the tools an agent has.
@@ -1820,9 +2087,9 @@ mod tests {
     #[test]
     fn an_unknown_tool_is_an_error_the_agent_can_read() {
         let mut e = editor();
-        let r = call(&mut e, "put_sphere", &json!({}));
+        let r = call(&mut e, "put_torus", &json!({}));
         assert_eq!(r.is_error, Some(true));
         let text = text_of(&r);
-        assert!(text.contains("put_sphere"), "{text}");
+        assert!(text.contains("put_torus"), "{text}");
     }
 }

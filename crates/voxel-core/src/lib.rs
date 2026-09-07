@@ -25,6 +25,7 @@ pub mod model;
 pub mod palette;
 pub mod raycast;
 pub mod region;
+pub mod shape;
 
 pub use edit::{Change, Edit, EditBatch, History, LayerState, Stroke};
 pub use model::{Bounds, Layer, VoxelModel, MAX_DIM, MAX_LAYERS};

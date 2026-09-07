@@ -101,15 +101,10 @@ impl Brush {
     fn covers(self, dx: i32, dy: i32, dz: i32) -> bool {
         match self.shape {
             BrushShape::Cube => true,
-            // Measured to the far side of the centre cell rather than to its
-            // middle. Comparing against `r²` gives a plus sign at radius 1 and
-            // a lumpy cross at radius 2 — the sizes a voxel brush is actually
-            // used at — where `(r + ½)²` keeps the faces and edges and drops
-            // only the corners, which is what reads as a ball.
-            BrushShape::Sphere => {
-                let r = self.radius as f32 + 0.5;
-                (dx * dx + dy * dy + dz * dz) as f32 <= r * r
-            }
+            // The same rule `shape::sphere` draws with, asked once and shared:
+            // the ball brush and `put_sphere` have to mean the same thing by
+            // the same word, and two copies of it would eventually not.
+            BrushShape::Sphere => crate::shape::in_ball(&[dx, dy, dz], self.radius as u16),
         }
     }
 }

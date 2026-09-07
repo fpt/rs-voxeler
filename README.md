@@ -222,6 +222,8 @@ whoever connects.
 | `describe_model` | size, voxel count, bounds, the layer stack, active layer, colour |
 | `put_voxel` | one voxel; colour 0 erases |
 | `put_rect` | a solid axis-aligned box, corners inclusive |
+| `put_sphere` | a ball at a centre, by radius; `hollow` for a shell |
+| `put_cylinder` | a cylinder between two end-cap centres, by radius |
 | `paint` | recolour the voxels in a box, creating none |
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
@@ -229,6 +231,16 @@ whoever connects.
 | `screenshot` | render the model to a PNG and return it as an image |
 | `undo`, `redo` | take back whole tool calls |
 | `new_model`, `open_model`, `save_model`, `list_models` | files, inside the root |
+
+`radius` is measured to the far side of the centre cell, so 0 is one voxel and
+3 is seven across — the same radius the editor's ball brush uses, because the
+same word should mean the same shape. A cylinder takes its axis from its ends:
+`from [8,0,8] to [8,20,8]` is an upright trunk, and ends differing on more than
+one axis are refused rather than quietly projected onto one. A colour of 0
+carves instead of filling, which is how you bore a tunnel or hollow a cave. A
+shape reaching past the scene is **clipped rather than refused** — a dome half
+sunk in the ground is a thing to want — and the report says how much did not
+fit.
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
 tell you the arm is on backwards. It takes `yaw` and `pitch` in degrees and
