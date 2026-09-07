@@ -128,7 +128,7 @@ impl App {
     /// in step with the model after an edit.
     fn update_hover(&mut self) {
         self.hover = match self.cursor {
-            Some((x, y)) if !hud::over_panel(self.fb.width(), x, y) => {
+            Some((x, y)) if !hud::over_panel(self.fb.width(), self.editor.model().layer_count(), x, y) => {
                 self.editor
                     .target_at(x, y, self.fb.width(), self.fb.height())
             }
@@ -162,12 +162,19 @@ impl App {
     fn on_mouse_down(&mut self, button: MouseButton) {
         let Some((x, y)) = self.cursor else { return };
 
-        // A click on the palette is a colour choice, never an edit — and never
-        // a camera drag either, or picking a colour would spin the model.
-        if button == MouseButton::Left && hud::over_panel(self.fb.width(), x, y) {
+        // A click on a panel is a choice, never an edit — and never a camera
+        // drag either, or picking a colour would spin the model.
+        let layers = self.editor.model().layer_count();
+        if button == MouseButton::Left && hud::over_panel(self.fb.width(), layers, x, y) {
             if let Some(index) = hud::palette_hit(self.fb.width(), x, y) {
                 self.editor.color = index;
                 self.editor.set_status(format!("colour {index}"));
+            } else if let Some(hit) = hud::layer_hit(self.fb.width(), layers, x, y) {
+                self.editor.select_layer(hit.index);
+                if hit.on_eye {
+                    self.editor.toggle_layer_visible();
+                }
+                self.update_hover();
             }
             return;
         }
@@ -223,6 +230,27 @@ impl App {
         }
     }
 
+    /// Keys, while the rename prompt is open.
+    ///
+    /// `event.text` rather than the physical key: a name is what the user's
+    /// layout produces, and reconstructing that from key codes would be a
+    /// keyboard-layout table this editor has no business owning.
+    fn on_rename_key(&mut self, event: &winit::event::KeyEvent) {
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Escape) => return self.editor.cancel_rename(),
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                return self.editor.commit_rename()
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => return self.editor.rename_backspace(),
+            _ => {}
+        }
+        if let Some(text) = &event.text {
+            for c in text.chars() {
+                self.editor.rename_push(c);
+            }
+        }
+    }
+
     fn on_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
         if self.ctrl() {
             match code {
@@ -264,6 +292,17 @@ impl App {
             KeyCode::KeyX | KeyCode::KeyM => self.editor.toggle_mirror(0),
             KeyCode::KeyY => self.editor.toggle_mirror(1),
             KeyCode::KeyZ => self.editor.toggle_mirror(2),
+            // Layers. `L` walks the stack the way `[` and `]` walk the palette,
+            // and the rest sit under the fingers that reach for it.
+            KeyCode::KeyL if self.modifiers.shift_key() => self.editor.cycle_layer(-1),
+            KeyCode::KeyL => self.editor.cycle_layer(1),
+            KeyCode::KeyA => self.editor.add_layer(),
+            KeyCode::KeyD => self.editor.delete_layer(),
+            KeyCode::KeyV => self.editor.toggle_layer_visible(),
+            KeyCode::KeyN => self.editor.begin_rename(),
+            KeyCode::KeyK => self.editor.move_layer(true),
+            KeyCode::KeyJ => self.editor.move_layer(false),
+            KeyCode::KeyU => self.editor.merge_layer_down(),
             KeyCode::KeyG => self.editor.show_grid = !self.editor.show_grid,
             KeyCode::KeyH => self.editor.show_help = !self.editor.show_help,
             KeyCode::KeyF => self.editor.frame_model(),
@@ -332,6 +371,14 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                // A rename is modal: while it is open every key belongs to the
+                // name, or typing "BODY" would fire build, erase and pick on
+                // the way through.
+                if self.editor.renaming().is_some() {
+                    self.on_rename_key(&event);
+                    self.request_redraw();
                     return;
                 }
                 let PhysicalKey::Code(code) = event.physical_key else {

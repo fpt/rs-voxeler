@@ -19,7 +19,7 @@ pub fn text_width(s: &str, scale: u32) -> u32 {
     (s.chars().count() as u32 * ADVANCE).saturating_sub(1) * scale
 }
 
-pub fn text_height(scale: u32) -> u32 {
+pub const fn text_height(scale: u32) -> u32 {
     GLYPH_H * scale
 }
 

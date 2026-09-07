@@ -196,6 +196,31 @@ fn write_chunk(out: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
 mod tests {
     use super::*;
 
+    /// `.vox` has no place to put our layers, so an export writes what is on
+    /// screen: the composite, as one model. Losing them is the honest outcome —
+    /// the alternative is a scene graph we have not implemented pretending to
+    /// be one we have.
+    #[test]
+    fn an_export_flattens_the_layer_stack() {
+        let mut m = VoxelModel::new(4, 4, 4);
+        m.set(1, 1, 1, 3);
+        m.set(2, 1, 1, 3);
+        let cover = m.add_layer(0, "cover").unwrap();
+        m.set_active_layer(cover);
+        m.set(1, 1, 1, 8);
+        let hidden = m.add_layer(cover, "hidden").unwrap();
+        m.set_active_layer(hidden);
+        m.set(3, 3, 3, 9);
+        m.set_layer_visible(hidden, false);
+
+        let back = import(&export(&m).unwrap()).unwrap();
+        assert_eq!(back.layer_count(), 1, "a .vox comes back as one layer");
+        assert_eq!(back.get(1, 1, 1), 8, "the covering layer won, as it was drawn");
+        assert_eq!(back.get(2, 1, 1), 3);
+        assert_eq!(back.get(3, 3, 3), 0, "a hidden layer is not exported");
+        assert_eq!(back.filled_count(), 2);
+    }
+
     #[test]
     fn round_trips_through_the_axis_change() {
         let mut m = VoxelModel::new(4, 6, 8);

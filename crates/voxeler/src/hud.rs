@@ -64,18 +64,72 @@ pub fn palette_hit(fb_width: u32, x: f32, y: f32) -> Option<u8> {
 }
 
 /// How tall the palette panel actually is.
-fn panel_height() -> u32 {
+fn palette_height() -> u32 {
     255u32.div_ceil(COLUMNS) * SWATCH + PAD * 2 + text_height(TEXT_SCALE) + PAD
 }
 
-/// Whether a framebuffer pixel is over the panel rather than the 3D view.
+/// One row of the layer list.
+const ROW: u32 = text_height(TEXT_SCALE) + 6;
+/// The visibility box at the head of each row.
+const EYE: u32 = 9;
+
+/// The layer panel sits directly under the palette, same width, so the right
+/// hand side is one column of controls rather than two things at different
+/// margins.
+fn layers_panel_height(layers: usize) -> u32 {
+    text_height(TEXT_SCALE) + PAD + layers as u32 * ROW + PAD * 2
+}
+
+/// Top-left of the first *row*, past the panel's own heading.
+fn layers_origin(fb_width: u32) -> (i32, i32) {
+    (
+        panel_x(fb_width) + PAD as i32,
+        (palette_height() + PAD + text_height(TEXT_SCALE) + PAD) as i32,
+    )
+}
+
+/// What a click on the layer panel means.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LayerHit {
+    /// The layer's index in the model, counting from the bottom of the stack.
+    pub index: usize,
+    /// Whether the visibility box was hit rather than the row's name.
+    pub on_eye: bool,
+}
+
+/// The layer under a framebuffer pixel, or `None` off the list.
+///
+/// The exact inverse of [`draw_layers`], and next to it for the same reason
+/// [`palette_hit`] is next to the swatch layout: rows are twenty pixels apart
+/// and a hit test one row out silently edits the wrong layer.
+pub fn layer_hit(fb_width: u32, layers: usize, x: f32, y: f32) -> Option<LayerHit> {
+    let (ox, oy) = layers_origin(fb_width);
+    let (dx, dy) = (x - ox as f32, y - oy as f32);
+    if dx < 0.0 || dy < 0.0 || dx >= (panel_width() - PAD * 2) as f32 {
+        return None;
+    }
+    let row = (dy as u32) / ROW;
+    if row as usize >= layers {
+        return None;
+    }
+    // The list is drawn top of the stack first, which is the opposite of the
+    // model's own order: a layer that covers another is *above* it, on screen
+    // and in the array both, and only one of those counts downwards.
+    Some(LayerHit {
+        index: layers - 1 - row as usize,
+        on_eye: dx < EYE as f32,
+    })
+}
+
+/// Whether a framebuffer pixel is over either panel rather than the 3D view.
 ///
 /// Bounded vertically as well as horizontally. Testing the column alone made
-/// the whole right-hand strip of the window swallow clicks — the panel only
-/// covers its top few hundred rows, and below that the viewport reaches the
+/// the whole right-hand strip of the window swallow clicks — the panels only
+/// cover their top few hundred rows, and below that the viewport reaches the
 /// window edge like anywhere else.
-pub fn over_panel(fb_width: u32, x: f32, y: f32) -> bool {
-    x >= panel_x(fb_width) as f32 && (0.0..panel_height() as f32).contains(&y)
+pub fn over_panel(fb_width: u32, layers: usize, x: f32, y: f32) -> bool {
+    let bottom = palette_height() + layers_panel_height(layers);
+    x >= panel_x(fb_width) as f32 && (0.0..bottom as f32).contains(&y)
 }
 
 /// How many glyphs fit in `pixels`.
@@ -119,17 +173,122 @@ fn fit_head(s: &str, max: usize) -> String {
 
 pub fn draw(fb: &mut Framebuffer, editor: &Editor) {
     draw_palette(fb, editor);
+    draw_layers(fb, editor);
     draw_status(fb, editor);
+    if let Some(name) = editor.renaming() {
+        draw_rename(fb, editor, name);
+    }
     if editor.show_help {
         draw_help(fb);
     }
+}
+
+/// The layer stack, top of the stack at the top of the list.
+///
+/// Each row is its visibility, its name, and how many voxels it alone holds —
+/// the count being the one number that says whether a layer you cannot see is
+/// empty or merely hidden.
+fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
+    let layers = editor.model().layers();
+    let x0 = panel_x(fb.width());
+    let width = panel_width();
+    let top = palette_height() as i32;
+    overlay::blend_rect(
+        fb,
+        x0,
+        top,
+        width,
+        layers_panel_height(layers.len()),
+        PANEL_BG,
+        220,
+    );
+    overlay::text(fb, x0 + PAD as i32, top + PAD as i32, "LAYERS", DIM, TEXT_SCALE);
+
+    let (ox, oy) = layers_origin(fb.width());
+    let inner = panel_width() - PAD * 2;
+    for (row, n) in (0..layers.len()).rev().enumerate() {
+        let layer = &layers[n];
+        let y = oy + (row as u32 * ROW) as i32;
+        let active = n == editor.active_layer();
+        if active {
+            overlay::blend_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT, 40);
+            overlay::stroke_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT);
+        }
+
+        // Filled for shown, hollow for hidden: two states that read at a
+        // glance without a glyph the 5x7 font does not have.
+        let box_y = y + (ROW as i32 - EYE as i32) / 2;
+        if layer.visible {
+            overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { TEXT });
+        } else {
+            overlay::stroke_rect(fb, ox, box_y, EYE, EYE, DIM);
+        }
+
+        // The count is right-aligned, so the name gets whatever is left over
+        // rather than being cut to a fixed column that is wrong at both ends.
+        let count = layer.filled_count().to_string();
+        let count_w = text_width(&count, TEXT_SCALE);
+        let name_x = ox + EYE as i32 + 5;
+        let room = fit_chars((ox + inner as i32 - count_w as i32 - 6 - name_x).max(0) as u32);
+        overlay::text(
+            fb,
+            name_x,
+            y + 3,
+            &fit_head(&layer.name, room),
+            if active { ACCENT } else { TEXT },
+            TEXT_SCALE,
+        );
+        overlay::text(
+            fb,
+            ox + inner as i32 - count_w as i32,
+            y + 3,
+            &count,
+            DIM,
+            TEXT_SCALE,
+        );
+    }
+}
+
+/// The rename prompt, over the viewport rather than in the panel: it is modal,
+/// and a modal state that looks like part of the furniture is one you forget
+/// you are in.
+fn draw_rename(fb: &mut Framebuffer, editor: &Editor, name: &str) {
+    let heading = format!("RENAME LAYER {}", editor.active_layer() + 1);
+    let footer = "ENTER OK    ESC CANCEL";
+    let line_h = text_height(TEXT_SCALE) + 4;
+    // A caret, so an empty name still shows the prompt is taking keys.
+    let typed = format!("{name}_");
+    let w = [heading.as_str(), footer, typed.as_str()]
+        .iter()
+        .map(|l| text_width(l, TEXT_SCALE))
+        .max()
+        .unwrap_or(0)
+        .max(200)
+        + PAD * 4;
+    let h = line_h * 3 + PAD * 3;
+    let x = ((fb.width().saturating_sub(panel_width())) / 2).saturating_sub(w / 2) as i32;
+    let y = (fb.height().saturating_sub(h + 80)) as i32;
+
+    overlay::blend_rect(fb, x, y, w, h, 0x0A0C10, 245);
+    overlay::stroke_rect(fb, x, y, w, h, ACCENT);
+    let tx = x + (PAD * 2) as i32;
+    overlay::text(fb, tx, y + PAD as i32, &heading, ACCENT, TEXT_SCALE);
+    overlay::text(fb, tx, y + PAD as i32 + line_h as i32, &typed, TEXT, TEXT_SCALE);
+    overlay::text(
+        fb,
+        tx,
+        y + PAD as i32 + (line_h * 2) as i32,
+        footer,
+        DIM,
+        TEXT_SCALE,
+    );
 }
 
 fn draw_palette(fb: &mut Framebuffer, editor: &Editor) {
     let width = panel_width();
     let x0 = panel_x(fb.width());
     let rows = 255u32.div_ceil(COLUMNS);
-    overlay::blend_rect(fb, x0, 0, width, panel_height(), PANEL_BG, 220);
+    overlay::blend_rect(fb, x0, 0, width, palette_height(), PANEL_BG, 220);
 
     let (ox, oy) = grid_origin(fb.width());
     for index in 1..=255u32 {
@@ -278,6 +437,12 @@ const HELP: &[&str] = &[
     "CTRL+R       RELOAD    CTRL+N  CLEAR",
     "CTRL+Q       QUIT",
     "",
+    "L SHIFT+L    NEXT / PREVIOUS LAYER",
+    "A D          ADD / DELETE LAYER",
+    "V N          SHOW-HIDE / RENAME LAYER",
+    "K J          MOVE LAYER UP / DOWN",
+    "U            MERGE LAYER DOWN",
+    "",
     "H            CLOSE THIS",
 ];
 
@@ -356,12 +521,67 @@ mod tests {
     #[test]
     fn the_panel_covers_its_own_box_and_nothing_else() {
         let fb_w = 800;
-        assert!(over_panel(fb_w, 799.0, 10.0));
-        assert!(!over_panel(fb_w, (fb_w - panel_width()) as f32 - 1.0, 10.0));
-        assert!(
-            !over_panel(fb_w, 799.0, panel_height() as f32 + 1.0),
-            "below the panel is viewport"
-        );
+        assert!(over_panel(fb_w, 1, 799.0, 10.0));
+        assert!(!over_panel(fb_w, 1, (fb_w - panel_width()) as f32 - 1.0, 10.0));
+        let bottom = (palette_height() + layers_panel_height(1)) as f32;
+        assert!(over_panel(fb_w, 1, 799.0, bottom - 1.0), "the layer list is panel");
+        assert!(!over_panel(fb_w, 1, 799.0, bottom + 1.0), "below it is viewport");
+        // And it grows with the stack, or the lower rows swallow no clicks and
+        // pass them to the model behind.
+        assert!(over_panel(fb_w, 8, 799.0, bottom + 1.0));
+    }
+
+    /// The inverse has to be exact here too: rows are twenty pixels apart, and
+    /// a hit test one row out edits a layer the user was not pointing at.
+    #[test]
+    fn a_click_selects_the_layer_row_drawn_under_it() {
+        let fb_w = 800;
+        let layers = 5;
+        let (ox, oy) = layers_origin(fb_w);
+        for row in 0..layers {
+            let x = ox as f32 + EYE as f32 + 10.0;
+            let y = oy as f32 + (row as u32 * ROW) as f32 + ROW as f32 / 2.0;
+            let hit = layer_hit(fb_w, layers, x, y).expect("row {row}");
+            assert_eq!(
+                hit.index,
+                layers - 1 - row,
+                "the list is drawn top of the stack first"
+            );
+            assert!(!hit.on_eye);
+        }
+    }
+
+    #[test]
+    fn the_visibility_box_is_a_target_of_its_own() {
+        let fb_w = 800;
+        let (ox, oy) = layers_origin(fb_w);
+        let y = oy as f32 + ROW as f32 / 2.0;
+        assert!(layer_hit(fb_w, 3, ox as f32 + 2.0, y).unwrap().on_eye);
+        assert!(!layer_hit(fb_w, 3, ox as f32 + EYE as f32 + 1.0, y).unwrap().on_eye);
+    }
+
+    #[test]
+    fn clicks_outside_the_layer_list_select_nothing() {
+        let fb_w = 800;
+        let (ox, oy) = layers_origin(fb_w);
+        assert_eq!(layer_hit(fb_w, 3, ox as f32 - 1.0, oy as f32 + 4.0), None);
+        assert_eq!(layer_hit(fb_w, 3, ox as f32 + 4.0, oy as f32 - 1.0), None);
+        // Past the last row: the panel is taller than its rows when the stack
+        // is short, and the space below them is not layer 0.
+        let below = oy as f32 + (3 * ROW) as f32 + 1.0;
+        assert_eq!(layer_hit(fb_w, 3, ox as f32 + 4.0, below), None);
+    }
+
+    /// A palette click and a layer click must not both fire: the two hit tests
+    /// share the panel column, and only their rows keep them apart.
+    #[test]
+    fn the_two_panels_do_not_claim_each_others_clicks() {
+        let fb_w = 800;
+        let (lx, ly) = layers_origin(fb_w);
+        assert_eq!(palette_hit(fb_w, lx as f32 + 4.0, ly as f32 + 4.0), None);
+
+        let (px, py) = grid_origin(fb_w);
+        assert_eq!(layer_hit(fb_w, 8, px as f32 + 4.0, py as f32 + 4.0), None);
     }
 
     #[test]
@@ -395,6 +615,8 @@ mod tests {
 
         let mut editor = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
         editor.show_help = true;
+        editor.add_layer();
+        editor.begin_rename();
         for (w, h) in [(1u32, 1u32), (40, 30), (200, 60)] {
             let mut fb = Framebuffer::new(w, h);
             fb.clear(0);

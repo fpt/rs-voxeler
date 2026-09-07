@@ -20,7 +20,7 @@ voxeler  (the window: winit + softbuffer)
    │
    ├── voxel-render   faces → transform → clip → raster → z-buffer → framebuffer
    │
-   └── voxel-core     the grid, the palette, undo/redo, the file formats
+   └── voxel-core     the layer stack, the palette, undo/redo, the file formats
 ```
 
 The dependency only points downward. `voxel-core` knows nothing about drawing —
@@ -28,6 +28,69 @@ it does not even have a vector type, and the raycaster takes `[f32; 3]` arrays
 so it stays that way. `voxel-render` knows nothing about editing. Everything
 about *what a click means* is in `voxeler/src/editor.rs`, which is why that file
 has tests and `app.rs` has almost none.
+
+### A layer is a grid of its own
+
+Layers composite top down: `VoxelModel::get` returns the topmost *visible*
+layer's index at a cell. A grid per layer rather than an owner tag per cell,
+because that is the difference between hiding the armour and seeing the body
+underneath, and hiding the armour and seeing a hole. The cost is a byte per cell
+per layer, which `MAX_LAYERS` (16) bounds at 4 MiB even at 64³.
+
+Compositing on every read would make face extraction and the raycaster
+O(layers) in their hottest loops, so the result is cached in `composite` and
+repaired **one cell at a time** by `set_in` — writes happen at the speed of a
+hand, reads at the speed of a frame. Every structural change ends in a full
+`recomposite` instead, because there is no structural change whose effect is
+cheaper to work out than to recompute.
+
+The consequence worth keeping in mind is that `get`, `iter_filled`,
+`filled_count` and `occupied_bounds` are all *composited*, which is why the
+raycaster, the mesh extractor and the `.vox` exporter needed no changes at all
+when layers arrived. The per-layer views are `get_in`, `set_in` and
+`iter_filled_in`, and `format::native` is the one place that must use them: a
+save writes each layer's own grid, or hiding a layer and saving would silently
+delete it.
+
+`VoxelModel::active` — which layer `set` writes to — lives on the model rather
+than in the editor. It is a property of the document (reopening a file should
+put you back where you left off), it belongs in the file, and it is what let
+every existing caller of `set` keep working without learning what a layer is.
+
+### The editor writes to the active layer, and only to it
+
+Three rules, all in `Editor::continue_stroke` and its neighbours:
+
+- **The air/solid test asks the active layer, not the composite.** Testing what
+  is on screen would refuse to build under a voxel a higher layer is showing —
+  which is exactly what a lower layer is for.
+- **A region is grown on the composite and written to the active layer.** You
+  point at what you can see, so that is what a fill selects; what it changes is
+  then narrowed by the rule above. With one layer, or while working on the layer
+  you are looking at, the two sets are identical.
+- **A click that changed nothing says why.** `Drag::owner` carries the layer
+  that owned the voxel the stroke started on, and `end_stroke` reports it when
+  the stroke was empty. A tool acting only on the active layer is a rule; a tool
+  that ignores you with no explanation is a bug report.
+
+### Structural changes store the stack whole
+
+`History` holds a `Change`, which is either cells or layers. A cell edit names
+the layer it landed on (`Edit::layer`), and removing or reordering a layer
+renumbers the ones around it — so every edit already on the stack would start
+pointing at the wrong grid. `History::restructure` therefore snapshots the whole
+layer stack either side of the change. Undo puts the exact numbering back, which
+is what lets the older cell edits keep meaning what they meant.
+
+It costs a copy of the model per structural step. Structural steps happen a
+handful of times in a session, and the alternative — stable layer ids, and a
+resurrection path for a deleted one — is a great deal of machinery for the same
+guarantee.
+
+Visibility is deliberately *not* in the history. It is a thing you toggle
+constantly while working, and undo would spend its first few presses turning
+layers back on instead of undoing the edit you wanted back. It still dirties the
+document, because which layers you had hidden is part of the model.
 
 ### Dense in memory, sparse on disk
 
@@ -223,6 +286,10 @@ from the one that was asked for.
   as air in the extractor is what puts a lid on the cross-section; re-casting
   against a sliced copy is what stops a click reaching a voxel that is not on
   screen. Both, or the slice is a lie in one direction.
+- **The layer list is drawn top of the stack first.** A layer that covers
+  another is above it on screen and later in the array, and only one of those
+  counts downwards. `hud::layer_hit` does that flip and is tested row by row,
+  for the same reason `palette_hit` is.
 - **The HUD's layout and its hit test live together.** `hud::palette_hit` is the
   exact inverse of the swatch layout, tested swatch by swatch, for the reason
   `kessel`'s `window_to_console` is: a click landing one swatch off reads as a
@@ -240,6 +307,26 @@ from the one that was asked for.
 - **A missing file is not an error.** `voxeler robot.vxm` in an empty directory
   starts a model. Refusing would mean the tool could only open what some other
   tool had already made.
+- **The file stores each layer, not the composite.** `.vxm` is `VXM2`: a layer
+  count, the active layer, then per layer its flags, name and own sparse voxel
+  list. `VXM1` — the layerless original — still loads, as a single layer. A file
+  already on disk is not free to rewrite itself.
+- **An export is a flatten.** `.vox` has nowhere to put a stack, so `ctrl+E`
+  writes the composite as one model and the status line says how many layers
+  went into it. Doing otherwise means the nTRN/nGRP/nSHP scene graph a
+  multi-model `.vox` requires, which is the part of that spec most likely to be
+  got subtly wrong.
+- **Merging down shows the result.** The upper layer wins each shared cell — the
+  same rule the composite follows, so a merge looks like what was already on
+  screen — and the layer merged *into* is forced visible, or a merge into a
+  hidden layer is a deletion in disguise.
+- **`ctrl+N` clears every layer.** Leaving the hidden ones full would make the
+  next save carry work the user believes they threw away.
+- **A rename is modal.** While `Editor::rename` is `Some`, `app.rs` routes the
+  whole keyboard into it — typing "BODY" would otherwise fire build, erase and
+  pick on the way through. The characters come from `event.text`, not from key
+  codes: a name is what the user's layout produces, and reconstructing that
+  would be a keyboard-layout table this editor has no business owning.
 - **Saves go through a temp file and a rename.** A crash or a full disk midway
   through leaves the previous save intact rather than a truncated file where the
   model used to be.
@@ -267,7 +354,7 @@ what you meant.
 ```text
 rs-voxeler/
 ├── crates/voxel-core/     the model, host- and render-free
-│   ├── model.rs           the dense grid
+│   ├── model.rs           the layer stack, and the composite it adds up to
 │   ├── palette.rs         256 colours; 0 is air
 │   ├── edit.rs            Stroke + History
 │   ├── raycast.rs         Amanatides–Woo grid traversal
@@ -324,6 +411,15 @@ rs-voxeler/
   passed down, or `joins` has been changed to ask `visible` instead of
   `model.get` — a hidden layer must be unreachable *and* read as air, and the
   two are different tests on purpose.
+- **A click on a voxel does nothing, and the status line names a layer.** That
+  is the rule, not a bug: tools write to the active layer. Select the layer the
+  message names, or `V` to hide it and reach what is under it.
+- **A layer is drawn that should be hidden, or vice versa.** The composite is
+  stale. Every path that changes the stack has to end in `recomposite`; every
+  path that changes one cell has to repair that cell. `set_in` does the second;
+  the structural methods do the first.
+- **A saved model comes back missing a hidden layer.** `format::native::encode`
+  is using `iter_filled` (the composite) where it must use `iter_filled_in`.
 - **A click does nothing.** Check `over_panel` first — a HUD rectangle that
   claims more than it draws eats clicks with no feedback at all. After that,
   check whether `target_at` is returning `None`: for everything but build, no
