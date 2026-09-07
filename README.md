@@ -245,6 +245,7 @@ whoever connects.
 | `select_box`, `select_connected` | hold voxels for a transform |
 | `describe_selection`, `clear_selection` | what is held, and let go |
 | `move_selection` | move the held voxels, one undo step |
+| `rotate_selection`, `flip_selection` | turn or mirror them about their own box |
 | `new_model`, `open_model`, `save_model`, `list_models` | files inside the root; listing includes subdirectories |
 
 `screenshot` is the one that shows rather than counts — a voxel total cannot
@@ -276,9 +277,19 @@ growth is held inside that box, which is what makes "this arm" sayable. The
 growth is bounded, not trimmed afterwards: a flood that spread *through* cells
 outside the box would come back with parts the box was meant to keep out.
 
-A move is one undo step. It clears the source and writes the destination in one
-batch, clears first, so a move shorter than the selection overlaps itself
-without eating its own arrival. Voxels pushed outside the scene are lost and
+`rotate_selection` turns a quarter at a time, counter-clockwise about the
+positive axis by the right-hand rule — the same sense face winding uses.
+It pivots about the **low corner** of the selection's box rather than its
+centre, because centring is not invertible: a quarter turn swaps two extents,
+and where those differ in parity the centre falls between cells, so the rounding
+accumulates and turning a thing back leaves it a cell out. A square footprint
+pivots identically either way. `flip_selection` mirrors within the box, which
+needs no centre and is exact at any size.
+
+Every transform is one undo step. Each clears the source and writes the
+destination in one batch, clears first, so a transform whose result overlaps its
+own source — a short move, a rotation of a squat shape — does not eat its own
+arrival. Voxels pushed outside the scene are lost and
 counted. The selection follows the voxels, so a move can be repeated or refined.
 
 Undo drops the selection — it names coordinates, and an undo changes what is at

@@ -121,11 +121,26 @@ mode on the other side:
   at them — including putting back voxels a move took away. Keeping it would
   leave it pointing at cells it was not made from.
 
-`move_selection` reads **every colour before anything moves**, then emits the
-clears ahead of the writes in one `apply_writes`. A move shorter than the
-selection overlaps itself, and reading as it went would carry a voxel along
-instead of leaving it where it landed — there is a test that walks a six-cell bar
-one step and checks all six colours arrive.
+`Editor::transform_selection` is the shape every transform has: read **every
+colour before anything moves**, then emit the clears ahead of the writes in one
+`apply_writes`. A transform whose result overlaps its source — a short move, a
+rotation of a squat shape — would otherwise carry a voxel along instead of
+leaving it where it landed, or erase its own arrival. Move, rotate and flip are
+three cell mappings over that one body.
+
+**A rotation pivots about the low corner, not the centre.** Centring reads
+better and is not invertible: a quarter turn swaps two extents, and where those
+differ in parity the centre falls between cells and has to be rounded. Rounding
+the same way each time accumulates — `rotate(+1)` then `rotate(-1)` came back a
+whole cell out, which is how this was found. Turning something to look at it and
+turning it back has to be exact, and a square footprint pivots identically
+either way. Flipping has no such problem: `lo + hi - v` needs no centre cell.
+
+The sense of a positive turn is the right-hand rule about the positive axis, the
+same convention face winding uses (`e_b × e_c = e_a`) — one meaning of "positive
+rotation" in this codebase rather than two. It is pinned by a test that asserts
+the exact cells an L-shape produces, because a description of a rotation's
+direction is the easiest thing in this file to get backwards.
 
 `region::Match` splits the question a region answers. A *fill* asks about a
 colour and stops where the colour changes, which is what makes it a fill. A
