@@ -93,14 +93,57 @@ pub struct CallParams {
     pub arguments: Value,
 }
 
-/// One content block in a tool result. Text only: an agent driving this editor
-/// reads counts, and the picture is on the user's screen already — which is the
-/// whole reason this transport is SSE and not stdio.
+/// One content block in a tool result.
+///
+/// The `image` variant is what lets an agent actually *see* what it built. Over
+/// stdio there is no window unless somebody runs `voxeler attach`, so counts are
+/// otherwise the only feedback there is — and counts cannot tell you the arm is
+/// on backwards.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum Content {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image {
+        /// Base64, no data-URI prefix.
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+}
+
+/// Standard base64 with padding.
+///
+/// Hand-rolled for the reason the PNG writer is: it is twenty lines against a
+/// dependency, and this is the only place in the program that needs it.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
+        out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
+        // The tail is padded rather than truncated: a decoder that is handed a
+        // length not divisible by four is entitled to reject the whole thing.
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Result of a `tools/call`.
@@ -161,6 +204,41 @@ mod tests {
         assert!(!s.contains("isError"), "{s}");
         let s = serde_json::to_string(&CallResult::failure("no")).unwrap();
         assert!(s.contains(r#""isError":true"#), "{s}");
+    }
+
+    #[test]
+    fn image_content_uses_mcp_field_names() {
+        let j = serde_json::to_value(Content::Image {
+            data: "AAAA".into(),
+            mime_type: "image/png".into(),
+        })
+        .unwrap();
+        assert_eq!(j["type"], "image");
+        assert_eq!(j["mimeType"], "image/png");
+        assert_eq!(j["data"], "AAAA");
+    }
+
+    /// Checked against the RFC 4648 vectors, padding included — a decoder is
+    /// entitled to reject a length that is not a multiple of four.
+    #[test]
+    fn base64_matches_the_published_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), expected, "{input:?}");
+        }
+        // Every byte value, so the two characters unique to this alphabet get
+        // exercised and the padded tail lands where it should.
+        let all = base64(&(0..=255u8).collect::<Vec<_>>());
+        assert_eq!(all.len(), 344, "86 quads for 256 bytes");
+        assert!(all.contains('+') && all.contains('/'), "{all}");
+        assert!(all.ends_with("/w=="), "the last chunk is one byte: {all}");
     }
 
     #[test]

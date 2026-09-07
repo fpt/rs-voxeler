@@ -114,6 +114,12 @@ pub struct Editor {
     pub mirror: [bool; 3],
     pub show_grid: bool,
     pub show_help: bool,
+    /// Watching somebody else's document rather than holding one.
+    ///
+    /// `voxeler attach` sets it. The model belongs to a running `voxeler mcp`,
+    /// so nothing here may edit it — the window layer refuses the input and this
+    /// flag is what the HUD says so with.
+    pub viewing: bool,
     /// Hide everything at or above this Y. `None` shows the whole model.
     pub slice: Option<u16>,
 
@@ -139,6 +145,7 @@ impl Editor {
             mirror: [false; 3],
             show_grid: true,
             show_help: false,
+            viewing: false,
             slice: None,
             mesh: FaceMesh::default(),
             mesh_dirty: true,
@@ -955,6 +962,55 @@ impl Editor {
         }
     }
 
+    /// Replace the document wholesale: a different model, under a different
+    /// path.
+    ///
+    /// The history goes with it, for the reason [`Editor::reload`]'s does — the
+    /// recorded coordinates describe a grid that no longer exists. The camera
+    /// is re-framed on the new volume, because a view fitted to the old one is
+    /// as likely as not to be pointing at empty space.
+    pub fn open(&mut self, model: VoxelModel, path: PathBuf) {
+        self.model = model;
+        self.path = path;
+        self.history.reset();
+        self.slice = None;
+        self.dirty = false;
+        self.invalidate_mesh();
+        self.frame_volume();
+        self.status = format!("opened {}", self.path.display());
+    }
+
+    /// Show a model that arrived from somewhere else, keeping the view.
+    ///
+    /// Unlike [`Editor::open`] the camera is left exactly where it was: this is
+    /// called every time an attached session changes, and re-framing on each
+    /// update would wrench the view out of the watcher's hands several times a
+    /// second. The history goes, because it described a grid that has been
+    /// replaced — and a viewer has nothing to undo in any case.
+    pub fn show(&mut self, model: VoxelModel) {
+        // A slice past the new model's height would hide all of it.
+        let sy = model.size()[1];
+        if self.slice.is_some_and(|s| s >= sy) {
+            self.slice = None;
+        }
+        self.model = model;
+        self.history.reset();
+        self.invalidate_mesh();
+    }
+
+    /// Record that the model now matches what is on disk at `path`.
+    ///
+    /// Only a save to the *working* path clears the dirty flag; writing a copy
+    /// elsewhere leaves the document unsaved, because it is — the same rule
+    /// [`Editor::save_as`] follows, exposed for a caller that did its own
+    /// writing.
+    pub fn mark_saved(&mut self, path: &Path) {
+        if path == self.path {
+            self.dirty = false;
+        }
+        self.status = format!("saved {}", path.display());
+    }
+
     /// Reload from disk, discarding unsaved work and the history with it — the
     /// recorded coordinates describe a grid that is being replaced.
     pub fn reload(&mut self) {
@@ -985,8 +1041,16 @@ impl Editor {
             "{}  {x}x{y}x{z}  {} VOX  {}",
             if self.dirty { "*" } else { " " },
             self.model.filled_count(),
-            self.tool.name(),
+            if self.viewing { "VIEWING" } else { self.tool.name() },
         );
+        if self.viewing {
+            // Nothing after this is a choice the watcher can make, so the line
+            // stops here rather than advertising tools that do nothing.
+            if let Some(cut) = self.slice {
+                s.push_str(&format!("  SLICE {cut}"));
+            }
+            return s;
+        }
         if self.span != Span::Voxel {
             s.push_str(&format!("/{}", self.span.name()));
         } else if self.brush.radius > 0 {

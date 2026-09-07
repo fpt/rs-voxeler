@@ -16,7 +16,7 @@ then collision/chunks/animation) do not.
 ## Architecture
 
 ```text
-voxeler  (the window: winit + softbuffer, and an MCP server on loopback)
+voxeler  (the window, an MCP server over stdio or SSE, and `attach`)
    │
    ├── voxel-render   faces → transform → clip → raster → z-buffer → framebuffer
    │
@@ -92,6 +92,71 @@ constantly while working, and undo would spend its first few presses turning
 layers back on instead of undoing the edit you wanted back. It still dirties the
 document, because which layers you had hidden is part of the model.
 
+### Two transports, one dispatcher
+
+`voxeler mcp` is **stdio** and headless; `voxeler FILE --mcp` is **SSE** from a
+window that is already open. They answer different questions — the first is
+started by the agent, so "is it running?" never comes up; the second is for when
+you were editing and want an agent to join you — and they differ in exactly one
+place, `mcp::ToolHost`:
+
+- `Context` (SSE) queues the call for the winit event loop and waits.
+- `Direct` (stdio) owns the editor and runs it under a mutex.
+
+Everything else — the methods, the errors, the notification-gets-no-reply rule —
+is `mcp::dispatch`, written once. A mutex is sound in the stdio server precisely
+because there is no event loop there to be caught mid-frame; adding one to the
+windowed server would put a lock around every field the window layer touches, for
+no gain.
+
+### `voxeler attach` sends the model, not the picture
+
+`kessel attach` streams framebuffers, because its console renders a 320² indexed
+screen and 57 KiB a frame over loopback is nothing. This renders up to 1.4
+million pixels — 5 MiB a frame, hopeless. So the *model* crosses the wire and
+the client renders it, which also puts the camera where it belongs: orbiting is
+the viewer's business, and a view needing a round trip per mouse move would be
+unusable.
+
+The bytes are `format::native::encode` — the same sparse `.vxm` a save writes, so
+a model is a few kilobytes and carries its layers, palette and names with no
+second encoding to keep in agreement. A revision counter makes "nothing changed"
+a single byte, so there is nothing a diff would buy.
+
+Three properties hold it together:
+
+- **Client-driven.** The server never pushes. With nobody attached it does no
+  work at all, which is what makes attaching something you can do halfway
+  through a build without having changed what the session would have done.
+- **A viewer, not a second editor.** One document, one history, both in the
+  server. A viewer that could also edit would need a rule for two simultaneous
+  writers, and the honest ones are all worse than "the picture is live and the
+  keyboard is the agent's". `Editor::viewing` is what `app.rs` refuses input on
+  and what the HUD says `VIEWING` for.
+- **`Editor::show`, not `Editor::open`.** A viewer takes a new model several
+  times a second, and `open` re-frames the camera — which would wrench the view
+  out of the watcher's hands on every update.
+
+Liveness is decided by **connecting**, never by a pid: a pid can be reused and a
+killed server leaves its session file behind. That means every discovery leaves
+a connection that says nothing, so `protocol::read_hello` returns `Ok(None)` for
+a peer that hangs up before speaking. Treating that as an error made the server
+log a failure every time anyone ran `voxeler attach`.
+
+### The file tools are confined to a root
+
+`mcp::Root` resolves `open`/`save` paths inside one directory and refuses to
+leave it. The check is **lexical** — `..` components and absolute paths are
+rejected before anything touches the filesystem — because a check made by
+canonicalising the result has already followed whatever symlink was there. Every
+`..` is refused rather than only the escaping ones: `a/../b` is harmless and
+`../b` is not, and telling them apart after the fact is exactly the reasoning
+that goes wrong.
+
+An MCP server is driven by a model reading content nobody vetted. Under `--mcp`
+the root is empty and the file tools reach nothing at all: you opened that
+document yourself, and an agent there has no business opening another.
+
 ### The agent and the user share one editor, through a queue
 
 `--mcp` serves the editor over MCP's **SSE** transport, on loopback, while the
@@ -130,6 +195,12 @@ Three rules the MCP surface depends on:
   removed, repainted, unchanged. An agent cannot see the screen, so a tool that
   says "ok" has told it nothing; a tool whose numbers do not add up has told it
   something false.
+- **`screenshot` is the exception, and the reason `Content::Image` exists.**
+  Counts cannot tell an agent the arm is on backwards. It frames the contents,
+  drops the work-plane grid (a grid is for aiming a mouse, and there is no
+  mouse), and puts the camera back — under SSE that camera is the one the user
+  is looking at, and moving it would be reaching through the screen. The base64
+  is hand-rolled next to the PNG writer, for the same reason.
 
 ### A region can be read from one layer or from the composite
 
@@ -395,7 +466,9 @@ cd crates && cargo clippy --all-targets
 ```
 
 ```bash
-./crates/target/release/voxeler models/robot.vxm --mcp   # serve on 127.0.0.1:8730
+./crates/target/release/voxeler models/robot.vxm --mcp   # sse on 127.0.0.1:8730
+./crates/target/release/voxeler mcp models/             # stdio, headless
+./crates/target/release/voxeler attach models/          # a window onto that
 ```
 
 `--thumbnail` renders one framed view and exits without opening a window. It is
@@ -423,7 +496,8 @@ rs-voxeler/
 │   └── png.rs             a minimal PNG writer (stored deflate)
 ├── crates/voxeler/        the editor
 │   ├── editor.rs          state and every operation on it — the tested part
-│   ├── mcp/               the editor as an MCP server: wire, http, tools
+│   ├── mcp/               MCP: dispatch, wire, http+sse, stdio, tools, session
+│   ├── attach/            `voxeler attach`: protocol, listener, viewer
 │   ├── view.rs            one frame: backdrop, grid, model, gizmos
 │   ├── hud.rs             palette strip, status line, help card
 │   └── app.rs             winit events in, a blitted framebuffer out
@@ -475,6 +549,13 @@ rs-voxeler/
   the structural methods do the first.
 - **A saved model comes back missing a hidden layer.** `format::native::encode`
   is using `iter_filled` (the composite) where it must use `iter_filled_in`.
+- **`voxeler attach` says nothing is running when a server is.** The session
+  file is keyed by *canonical* root, and discovery prefers one rooted at the
+  current directory. Name the root explicitly, or check `VOXELER_SESSION_DIR`
+  and the cache directory agree between the two processes.
+- **The attached window opens and never updates.** The client polls; the wake
+  proxy is what makes the event loop look. Without it `ControlFlow::Wait` sits
+  there until the mouse moves.
 - **An MCP tool call hangs, then times out.** The event loop is not draining.
   Either the window is gone, or the `EventLoopProxy` wake did not fire —
   `ControlFlow::Wait` means nothing runs until something wakes it.

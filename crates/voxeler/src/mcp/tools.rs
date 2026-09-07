@@ -19,12 +19,98 @@
 //! the model hold afterwards. Those five numbers sum to `targeted`, which is
 //! what makes them checkable rather than merely reassuring.
 
+use std::path::{Component, Path, PathBuf};
+
 use serde_json::{json, Value};
 use voxel_core::region::{self, Brush, Reach, Span};
 use voxel_core::{Face, VoxelModel};
 
-use super::wire::{CallResult, ToolInfo};
+use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
+
+/// The directory an agent's file tools are confined to.
+///
+/// An MCP server is driven by a model reading content nobody vetted, so `open`
+/// and `save` resolve inside one directory and refuse to leave it. The check is
+/// on the *lexical* path — `..` components and absolute paths are rejected
+/// before anything touches the filesystem — because a check made by
+/// canonicalising the result has already followed whatever symlink was there.
+#[derive(Clone, Debug)]
+pub struct Root(Option<PathBuf>);
+
+impl Root {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        Self(Some(dir.canonicalize().unwrap_or(dir)))
+    }
+
+    /// No filesystem at all — what the SSE transport uses.
+    ///
+    /// There, the user opened the document and is sitting in front of it. An
+    /// agent that could save would be writing over their file while they
+    /// worked, and one that could open would replace what they were looking at.
+    /// Both are the user's to do.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    fn dir(&self) -> Result<&Path, String> {
+        self.0.as_deref().ok_or_else(|| {
+            "this server edits the document the user already has open, and cannot reach \
+             the filesystem. The user saves it."
+                .to_string()
+        })
+    }
+
+    pub fn display(&self) -> String {
+        match &self.0 {
+            Some(d) => d.display().to_string(),
+            None => "(none)".into(),
+        }
+    }
+
+    /// The directory itself. Only a caller that made a real root asks.
+    pub fn path(&self) -> &Path {
+        self.0.as_deref().unwrap_or(Path::new(""))
+    }
+
+    /// Resolve a relative path inside the root, or say why not.
+    pub fn resolve(&self, given: &str) -> Result<PathBuf, String> {
+        let dir = self.dir()?;
+        let path = Path::new(given);
+        if path.is_absolute() {
+            return Err(format!(
+                "{given:?} is an absolute path; name a file inside {} instead",
+                dir.display()
+            ));
+        }
+        for part in path.components() {
+            match part {
+                Component::Normal(_) | Component::CurDir => {}
+                // `..` is refused outright rather than resolved and re-checked:
+                // "a/../b" is harmless and "../b" is not, and telling them apart
+                // after the fact is exactly the reasoning that goes wrong.
+                _ => {
+                    return Err(format!(
+                        "{given:?} leaves the root; paths may not contain `..` or start at /"
+                    ))
+                }
+            }
+        }
+        if path.components().next().is_none() {
+            return Err("a file name is required".into());
+        }
+        Ok(dir.join(path))
+    }
+
+    /// A path back in the form the agent gave it, for reporting.
+    fn relative(&self, path: &Path) -> String {
+        match &self.0 {
+            Some(dir) => path.strip_prefix(dir).unwrap_or(path).display().to_string(),
+            None => path.display().to_string(),
+        }
+    }
+}
 
 /// What one edit did, cell by cell.
 ///
@@ -145,6 +231,95 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "screenshot",
+            description:
+                "Render the model to a PNG and return it as an image. The one tool that shows \
+                 you what you built rather than counting it — voxel counts cannot tell you the \
+                 arm is on backwards. Frames the model's contents, so it fills the picture \
+                 whatever the volume's size.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "yaw": {"type": "number", "description":
+                        "Degrees around the vertical axis. 0 looks along +Z; 90 is a quarter \
+                         turn. Omit to keep the angle from the last screenshot."},
+                    "pitch": {"type": "number", "minimum": -89, "maximum": 89,
+                        "description": "Degrees above the horizon; 30 is a three-quarter view."},
+                    "width": {"type": "integer", "minimum": 64, "maximum": 1024},
+                    "height": {"type": "integer", "minimum": 64, "maximum": 1024},
+                },
+            }),
+        },
+        ToolInfo {
+            name: "undo",
+            description:
+                "Undo the last edit, or several. One tool call is one step, so undoing once \
+                 reverses one call however many voxels it touched. Shares the user's history: in \
+                 a window they can undo your work and you can undo theirs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"steps": {"type": "integer", "minimum": 1, "default": 1}},
+            }),
+        },
+        ToolInfo {
+            name: "redo",
+            description: "Re-apply what undo reversed. Any new edit discards the redo stack.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"steps": {"type": "integer", "minimum": 1, "default": 1}},
+            }),
+        },
+        ToolInfo {
+            name: "list_models",
+            description:
+                "The model files in the server's root directory, with their sizes. Where open \
+                 and save can reach; nothing outside it is visible.",
+            input_schema: json!({"type": "object", "properties": {}}),
+        },
+        ToolInfo {
+            name: "open_model",
+            description:
+                "Load a model from the root directory, replacing the one being edited. Discards \
+                 unsaved changes and the undo history with them, so save first if they matter. A \
+                 file that does not exist is an error — use new_model to start one.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {
+                    "type": "string",
+                    "description": "Relative to the root, e.g. \"robot.vxm\". A .vox extension \
+                                    reads MagicaVoxel's format; anything else reads .vxm."
+                }},
+                "required": ["path"],
+            }),
+        },
+        ToolInfo {
+            name: "new_model",
+            description:
+                "Start an empty model of the given size, seeded with one voxel at its centre, \
+                 under a name in the root directory. Nothing is written until you call \
+                 save_model.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative to the root."},
+                    "size": {"type": "integer", "minimum": 1, "maximum": 256,
+                             "description": "Edge length of the cubic volume. Default 32."},
+                },
+                "required": ["path"],
+            }),
+        },
+        ToolInfo {
+            name: "save_model",
+            description:
+                "Write the model to the root directory. Omit the path to write back to where it \
+                 came from. A .vox extension writes MagicaVoxel's format, which has nowhere to \
+                 put layers and so flattens them; .vxm keeps the whole stack.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Relative to the root."}},
+            }),
+        },
+        ToolInfo {
             name: "set_color",
             description:
                 "Select the palette index later edits use by default. This is the same selection \
@@ -212,13 +387,23 @@ pub fn list() -> Vec<ToolInfo> {
 /// a bad coordinate is something the agent should read and correct, not a
 /// protocol fault that tears down its session.
 pub fn call(editor: &mut Editor, name: &str, args: &Value) -> CallResult {
-    match dispatch(editor, name, args) {
+    call_in(editor, &Root::none(), name, args)
+}
+
+/// The same, with a root the file tools may reach into.
+pub fn call_in(editor: &mut Editor, root: &Root, name: &str, args: &Value) -> CallResult {
+    match dispatch(editor, root, name, args) {
         Ok(result) => result,
         Err(message) => CallResult::failure(message),
     }
 }
 
-fn dispatch(editor: &mut Editor, name: &str, args: &Value) -> Result<CallResult, String> {
+fn dispatch(
+    editor: &mut Editor,
+    root: &Root,
+    name: &str,
+    args: &Value,
+) -> Result<CallResult, String> {
     match name {
         "describe_model" => Ok(CallResult::text(describe(editor))),
         "put_voxel" => {
@@ -353,8 +538,141 @@ fn dispatch(editor: &mut Editor, name: &str, args: &Value) -> Result<CallResult,
                 layers_json(editor)
             )))
         }
+        "screenshot" => screenshot(editor, args),
+        "undo" | "redo" => {
+            let steps = match args.get("steps") {
+                None | Some(Value::Null) => 1,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|n| *n >= 1)
+                    .ok_or("`steps` must be a positive number")?,
+            };
+            let forward = name == "redo";
+            let mut done = 0;
+            for _ in 0..steps {
+                let depth = if forward {
+                    editor.redo_depth()
+                } else {
+                    editor.undo_depth()
+                };
+                if depth == 0 {
+                    break;
+                }
+                if forward {
+                    editor.redo();
+                } else {
+                    editor.undo();
+                }
+                done += 1;
+            }
+            Ok(CallResult::text(format!(
+                "{name} {done} of {steps} steps\n{}",
+                json!({
+                    "steps": done,
+                    "requested": steps,
+                    "undo_depth": editor.undo_depth(),
+                    "redo_depth": editor.redo_depth(),
+                    "model_voxels": editor.model().filled_count(),
+                })
+            )))
+        }
+        "list_models" => {
+            let mut rows: Vec<Value> = Vec::new();
+            for entry in std::fs::read_dir(root.dir()?)
+                .map_err(|e| format!("cannot read {}: {e}", root.display()))?
+                .flatten()
+            {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !ext.eq_ignore_ascii_case("vxm") && !ext.eq_ignore_ascii_case("vox") {
+                    continue;
+                }
+                rows.push(json!({
+                    "path": root.relative(&path),
+                    "bytes": entry.metadata().map(|m| m.len()).unwrap_or(0),
+                }));
+            }
+            Ok(CallResult::text(format!(
+                "{} model files in {}\n{}",
+                rows.len(),
+                root.display(),
+                json!({"root": root.display().to_string(), "models": rows})
+            )))
+        }
+        "open_model" => {
+            let given = path_arg(args)?;
+            let path = root.resolve(&given)?;
+            if !path.exists() {
+                return Err(format!("{given:?} does not exist; new_model starts one"));
+            }
+            let model = voxel_core::format::load(&path).map_err(|e| format!("{given}: {e}"))?;
+            editor.open(model, path);
+            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor))))
+        }
+        "new_model" => {
+            let given = path_arg(args)?;
+            let path = root.resolve(&given)?;
+            let size = match args.get("size") {
+                None | Some(Value::Null) => crate::editor::DEFAULT_SIZE,
+                Some(v) => {
+                    let n = v.as_u64().ok_or("`size` must be a number")?;
+                    u16::try_from(n)
+                        .ok()
+                        .filter(|n| (1..=voxel_core::MAX_DIM).contains(n))
+                        .ok_or_else(|| format!("size {n} is outside 1..={}", voxel_core::MAX_DIM))?
+                }
+            };
+            editor.open(crate::editor::new_model(size), path);
+            Ok(CallResult::text(format!(
+                "started {given}, {size}x{size}x{size} — not written until save_model\n{}",
+                describe(editor)
+            )))
+        }
+        "save_model" => {
+            let path = match args.get("path").and_then(Value::as_str) {
+                Some(given) => root.resolve(given)?,
+                // Back where it came from. Still gated on there being a root:
+                // without one the editor's path is the *user's* file, and
+                // saving over it while they work is not an agent's call to
+                // make. With one, the path came through `resolve` already.
+                None => {
+                    root.dir()?;
+                    editor.path().to_path_buf()
+                }
+            };
+            voxel_core::format::save(&path, editor.model())
+                .map_err(|e| format!("{}: {e}", root.relative(&path)))?;
+            let flattened = path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("vox"))
+                && editor.model().layer_count() > 1;
+            editor.mark_saved(&path);
+            Ok(CallResult::text(format!(
+                "saved {}{}\n{}",
+                root.relative(&path),
+                if flattened {
+                    format!(" — {} layers flattened into one", editor.model().layer_count())
+                } else {
+                    String::new()
+                },
+                json!({
+                    "path": root.relative(&path),
+                    "voxels": editor.model().filled_count(),
+                    "layers": editor.model().layer_count(),
+                    "flattened": flattened,
+                })
+            )))
+        }
         other => Err(format!("no tool named {other}")),
     }
+}
+
+fn path_arg(args: &Value) -> Result<String, String> {
+    args.get("path")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "`path` is required".into())
 }
 
 /// Apply a write to a set of cells as **one undo step**, and report it.
@@ -388,6 +706,77 @@ fn edit(
     )))
 }
 
+/// Render the model and hand it back as a PNG.
+///
+/// The camera is moved, used and put back: under the SSE transport this editor
+/// is the one the user is looking at, and a screenshot that left their view
+/// somewhere else would be an agent reaching through the screen.
+fn screenshot(editor: &mut Editor, args: &Value) -> Result<CallResult, String> {
+    let size = |name: &str| -> Result<u32, String> {
+        match args.get(name) {
+            None | Some(Value::Null) => Ok(512),
+            Some(v) => v
+                .as_u64()
+                .filter(|n| (64..=1024).contains(n))
+                .map(|n| n as u32)
+                .ok_or_else(|| format!("`{name}` must be between 64 and 1024")),
+        }
+    };
+    let (width, height) = (size("width")?, size("height")?);
+    let angle = |name: &str| -> Result<Option<f32>, String> {
+        match args.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .map(|d| Some(d.to_radians() as f32))
+                .ok_or_else(|| format!("`{name}` must be a number of degrees")),
+        }
+    };
+    let yaw = angle("yaw")?;
+    // Straight down the poles is a camera with no up vector; the editor clamps
+    // its own orbit for the same reason.
+    let pitch = angle("pitch")?.map(|p| p.clamp(-1.55, 1.55));
+
+    let saved = editor.camera;
+    let grid = editor.show_grid;
+    // A picture of the model, not of the editor: the work-plane grid is a tool
+    // for aiming a mouse, and there is no mouse here.
+    editor.show_grid = false;
+    if let Some(yaw) = yaw {
+        editor.camera.yaw = yaw;
+    }
+    if let Some(pitch) = pitch {
+        editor.camera.pitch = pitch;
+    }
+    editor.frame_model();
+
+    let mut fb = voxel_render::Framebuffer::new(width, height);
+    crate::view::render(&mut fb, editor, None);
+    let png = voxel_render::png::encode(fb.width(), fb.height(), fb.color());
+
+    editor.camera = saved;
+    editor.show_grid = grid;
+
+    let [sx, sy, sz] = editor.model().size();
+    Ok(CallResult {
+        content: vec![
+            Content::Text {
+                text: format!(
+                    "{width}x{height} view of {sx}x{sy}x{sz}, {} voxels, yaw {:.0} pitch {:.0}",
+                    editor.model().filled_count(),
+                    yaw.unwrap_or(saved.yaw).to_degrees(),
+                    pitch.unwrap_or(saved.pitch).to_degrees(),
+                ),
+            },
+            Content::Image {
+                data: base64(&png),
+                mime_type: "image/png".into(),
+            },
+        ],
+        is_error: None,
+    })
+}
+
 fn summary(r: &Report) -> String {
     if r.targeted == 0 {
         return "nothing in range".into();
@@ -417,9 +806,19 @@ fn describe(editor: &Editor) -> String {
             "color_rgb": rgb_of(editor, editor.color),
             "active_layer": editor.active_layer(),
             "layers": layer_rows(editor),
+            "path": model_path(editor),
+            "unsaved": editor.is_dirty(),
             "note": "every editing tool writes to the active layer only",
         })
     )
+}
+
+fn model_path(editor: &Editor) -> String {
+    editor
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn layer_rows(editor: &Editor) -> Vec<Value> {
@@ -619,10 +1018,17 @@ mod tests {
         Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"))
     }
 
+    fn text_of(r: &CallResult) -> &str {
+        match &r.content[0] {
+            super::super::wire::Content::Text { text } => text,
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
     /// The text a tool returns carries a JSON object; the tests read the
     /// numbers out of it the way an agent would.
     fn json_of(r: &CallResult) -> Value {
-        let super::super::wire::Content::Text { text } = &r.content[0];
+        let text = text_of(r);
         let start = text.find('{').expect("a report object");
         serde_json::from_str(&text[start..]).expect("valid JSON")
     }
@@ -640,7 +1046,7 @@ mod tests {
             // Called with no arguments a tool must fail cleanly, never panic,
             // and never be mistaken for one that does not exist.
             let r = call(&mut e, tool.name, &json!({}));
-            let super::super::wire::Content::Text { text } = &r.content[0];
+            let text = text_of(&r);
             assert!(!text.contains("no tool named"), "{}", tool.name);
         }
     }
@@ -737,7 +1143,7 @@ mod tests {
 
         let r = run(&mut e, "fill", json!({"x": 0, "y": 0, "z": 0, "color": 9}));
         assert_eq!(r.is_error, Some(true));
-        let super::super::wire::Content::Text { text } = &r.content[0];
+        let text = text_of(&r);
         assert!(text.contains("TOWER") || text.contains("select_layer"), "{text}");
         assert_eq!(e.model().layers()[1].filled_count(), 0, "no ghost copy");
 
@@ -777,7 +1183,7 @@ mod tests {
         let mut e = editor();
         let r = run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [8,1,1], "color": 4}));
         assert_eq!(r.is_error, Some(true));
-        let super::super::wire::Content::Text { text } = &r.content[0];
+        let text = text_of(&r);
         assert!(text.contains("8x8x8"), "{text}");
         assert_eq!(e.model().filled_count(), 0);
     }
@@ -875,12 +1281,232 @@ mod tests {
         assert_eq!(run(&mut e, "set_color", json!({"color": 0})).is_error, Some(true));
     }
 
+    // -- the root, and the file tools ------------------------------------
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("voxeler-root-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_in(e: &mut Editor, root: &Root, name: &str, args: Value) -> CallResult {
+        call_in(e, root, name, &args)
+    }
+
+    /// The boundary an agent must not cross. Every one of these is a path that
+    /// resolves outside the root, and the check is lexical so none of them
+    /// reaches the filesystem to find out.
+    #[test]
+    fn a_path_that_leaves_the_root_is_refused() {
+        let root = Root::new(temp_root("escape"));
+        for bad in [
+            "../outside.vxm",
+            "a/../../outside.vxm",
+            "../../../../etc/passwd",
+            "/etc/passwd",
+            "/tmp/anywhere.vxm",
+            "",
+        ] {
+            assert!(root.resolve(bad).is_err(), "{bad:?} should be refused");
+        }
+        // And the ordinary cases still work, including a harmless interior dot.
+        assert!(root.resolve("robot.vxm").is_ok());
+        assert!(root.resolve("parts/arm.vxm").is_ok());
+        assert!(root.resolve("./robot.vxm").is_ok());
+    }
+
+    /// `a/../b` stays inside and would survive a resolve-then-check, but the
+    /// rule refuses every `..` rather than reasoning about which ones are safe
+    /// — that reasoning is exactly what goes wrong.
+    #[test]
+    fn even_a_harmless_dotdot_is_refused() {
+        let root = Root::new(temp_root("dotdot"));
+        assert!(root.resolve("a/../b.vxm").is_err());
+    }
+
+    #[test]
+    fn the_sse_transport_has_a_root_that_reaches_nothing() {
+        let mut e = editor();
+        // `call` (rather than `call_in`) is what the windowed server uses: the
+        // user opened the document, and an agent there has no business opening
+        // another.
+        let r = call(&mut e, "open_model", &json!({"path": "anything.vxm"}));
+        assert_eq!(r.is_error, Some(true));
+        let text = text_of(&r);
+        assert!(!text.contains("no tool named"), "the tool exists, it is confined: {text}");
+    }
+
+    #[test]
+    fn a_model_can_be_started_saved_listed_and_opened_again() {
+        let dir = temp_root("lifecycle");
+        let root = Root::new(&dir);
+        let mut e = editor();
+
+        run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 16}));
+        assert_eq!(e.model().size(), [16, 16, 16]);
+        assert!(!dir.join("robot.vxm").exists(), "new_model writes nothing yet");
+
+        run_in(&mut e, &root, "put_rect", json!({"from": [0,0,0], "to": [3,3,3], "color": 4}));
+        let r = run_in(&mut e, &root, "save_model", json!({}));
+        assert_eq!(r.is_error, None);
+        assert!(dir.join("robot.vxm").exists(), "and save_model writes it");
+        assert!(!e.is_dirty());
+
+        let j = json_of(&run_in(&mut e, &root, "list_models", json!({})));
+        assert_eq!(j["models"].as_array().unwrap().len(), 1);
+        assert_eq!(j["models"][0]["path"], "robot.vxm");
+
+        // Somewhere else entirely, then back.
+        run_in(&mut e, &root, "new_model", json!({"path": "other.vxm"}));
+        assert_eq!(e.model().filled_count(), 1, "a new model is its seed");
+        run_in(&mut e, &root, "open_model", json!({"path": "robot.vxm"}));
+        assert_eq!(e.model().size(), [16, 16, 16]);
+        assert_eq!(e.model().get(1, 1, 1), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Layers reach the file, and `.vox` says out loud that they will not.
+    #[test]
+    fn saving_as_vox_reports_the_layers_it_flattened() {
+        let dir = temp_root("flatten");
+        let root = Root::new(&dir);
+        let mut e = editor();
+        run_in(&mut e, &root, "new_model", json!({"path": "m.vxm", "size": 8}));
+        run_in(&mut e, &root, "add_layer", json!({"name": "TOP"}));
+        run_in(&mut e, &root, "put_voxel", json!({"x": 2, "y": 2, "z": 2, "color": 9}));
+
+        let j = json_of(&run_in(&mut e, &root, "save_model", json!({"path": "m.vox"})));
+        assert_eq!(j["flattened"], true);
+        assert_eq!(j["layers"], 2);
+
+        let j = json_of(&run_in(&mut e, &root, "save_model", json!({"path": "m.vxm"})));
+        assert_eq!(j["flattened"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_file_that_is_not_there_says_how_to_make_one() {
+        let root = Root::new(temp_root("missing"));
+        let mut e = editor();
+        let r = run_in(&mut e, &root, "open_model", json!({"path": "nope.vxm"}));
+        assert_eq!(r.is_error, Some(true));
+        let text = text_of(&r);
+        assert!(text.contains("new_model"), "{text}");
+    }
+
+    #[test]
+    fn describe_model_names_the_file_and_whether_it_is_unsaved() {
+        let dir = temp_root("describe");
+        let root = Root::new(&dir);
+        let mut e = editor();
+        run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 8}));
+        run_in(&mut e, &root, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 3}));
+
+        let j = json_of(&run_in(&mut e, &root, "describe_model", json!({})));
+        assert_eq!(j["path"], "robot.vxm");
+        assert_eq!(j["unsaved"], true);
+
+        run_in(&mut e, &root, "save_model", json!({}));
+        let j = json_of(&run_in(&mut e, &root, "describe_model", json!({})));
+        assert_eq!(j["unsaved"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- seeing, and taking it back --------------------------------------
+
+    fn image_of(r: &CallResult) -> &str {
+        r.content
+            .iter()
+            .find_map(|c| match c {
+                Content::Image { data, mime_type } => {
+                    assert_eq!(mime_type, "image/png");
+                    Some(data.as_str())
+                }
+                _ => None,
+            })
+            .expect("an image block")
+    }
+
+    /// The tool that shows rather than counts. A voxel count cannot tell an
+    /// agent the arm is on backwards.
+    #[test]
+    fn a_screenshot_comes_back_as_a_png_image_block() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [6,3,4], "color": 4}));
+        let r = run(&mut e, "screenshot", json!({"width": 128, "height": 96}));
+
+        assert_eq!(r.is_error, None);
+        let data = image_of(&r);
+        assert!(data.len() > 100, "an empty picture is not a picture");
+        // Base64 of a real PNG: the signature is the first eight bytes, which
+        // is the first eleven base64 characters plus a bit.
+        assert!(data.starts_with("iVBORw0KG"), "not a PNG: {}", &data[..16.min(data.len())]);
+        // And the text block says what was rendered, for a transcript to read.
+        assert!(text_of(&r).contains("128x96"), "{}", text_of(&r));
+    }
+
+    /// The SSE transport points at the document the user is looking at. A
+    /// screenshot must not leave their camera somewhere else.
+    #[test]
+    fn a_screenshot_puts_the_camera_back_where_it_found_it() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x": 4, "y": 4, "z": 4, "color": 1}));
+        e.camera.yaw = 0.25;
+        e.camera.pitch = 0.5;
+        let before = (e.camera.yaw, e.camera.pitch, e.camera.distance);
+        let grid = e.show_grid;
+
+        run(&mut e, "screenshot", json!({"yaw": 90, "pitch": 30, "width": 64, "height": 64}));
+        assert_eq!((e.camera.yaw, e.camera.pitch, e.camera.distance), before);
+        assert_eq!(e.show_grid, grid, "and the grid setting too");
+    }
+
+    #[test]
+    fn a_screenshot_of_a_size_it_cannot_render_is_refused() {
+        let mut e = editor();
+        assert_eq!(run(&mut e, "screenshot", json!({"width": 4})).is_error, Some(true));
+        assert_eq!(run(&mut e, "screenshot", json!({"height": 99999})).is_error, Some(true));
+    }
+
+    /// One tool call is one step, so an agent that regrets a fill takes it back
+    /// with one undo however many voxels it moved.
+    #[test]
+    fn undo_takes_back_whole_tool_calls_and_redo_puts_them_again() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,3,3], "color": 4}));
+        run(&mut e, "put_voxel", json!({"x": 7, "y": 7, "z": 7, "color": 9}));
+        assert_eq!(e.model().filled_count(), 65);
+
+        let j = json_of(&run(&mut e, "undo", json!({})));
+        assert_eq!(j["steps"], 1);
+        assert_eq!(e.model().filled_count(), 64, "one call, whatever it touched");
+
+        let j = json_of(&run(&mut e, "undo", json!({"steps": 5})));
+        assert_eq!(j["steps"], 1, "there was only one left to take");
+        assert_eq!(j["requested"], 5);
+        assert_eq!(e.model().filled_count(), 0);
+
+        let j = json_of(&run(&mut e, "redo", json!({"steps": 2})));
+        assert_eq!(j["steps"], 2);
+        assert_eq!(e.model().filled_count(), 65);
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_reports_zero_rather_than_failing() {
+        let mut e = editor();
+        let r = run(&mut e, "undo", json!({}));
+        assert_eq!(r.is_error, None, "an empty history is not a fault");
+        assert_eq!(json_of(&r)["steps"], 0);
+    }
+
     #[test]
     fn an_unknown_tool_is_an_error_the_agent_can_read() {
         let mut e = editor();
         let r = call(&mut e, "put_sphere", &json!({}));
         assert_eq!(r.is_error, Some(true));
-        let super::super::wire::Content::Text { text } = &r.content[0];
+        let text = text_of(&r);
         assert!(text.contains("put_sphere"), "{text}");
     }
 }

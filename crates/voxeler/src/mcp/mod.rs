@@ -29,8 +29,13 @@
 //! reachable off-box.
 
 mod http;
+pub mod session;
+pub mod stdio;
 mod tools;
 mod wire;
+
+pub use stdio::serve_stdio;
+pub use tools::Root;
 
 use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
@@ -93,7 +98,7 @@ impl Bridge {
 /// on window events and comes to look. Without it an idle editor would sit in
 /// `ControlFlow::Wait` and the agent's call would land only on the next mouse
 /// move.
-pub fn serve(
+pub fn serve_sse(
     port: u16,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<(Bridge, SocketAddr)> {
@@ -243,43 +248,18 @@ impl Context {
         http::respond(stream, "202 Accepted", "")
     }
 
-    /// Dispatch one JSON-RPC method. `None` for a notification, which by the
-    /// specification gets no reply at all.
     fn handle(&self, req: Request) -> Option<Response> {
-        if req.is_notification() {
-            return None;
-        }
-        let id = req.id.clone().unwrap_or(Value::Null);
-        let result = match req.method.as_str() {
-            "initialize" => Ok(json!({
-                "protocolVersion": wire::negotiate_version(req.params.as_ref()),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": crate::NAME, "version": crate::VERSION},
-            })),
-            // Clients ping to check the session is alive. An empty result is
-            // the whole of the answer.
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tools::list()})),
-            "tools/call" => match serde_json::from_value::<CallParams>(
-                req.params.clone().unwrap_or(Value::Null),
-            ) {
-                Ok(call) => Ok(json!(self.run_tool(call))),
-                Err(e) => Err((INTERNAL_ERROR, format!("bad tools/call params: {e}"))),
-            },
-            other => Err((METHOD_NOT_FOUND, format!("no method {other}"))),
-        };
-        Some(match result {
-            Ok(value) => Response::success(id, value),
-            Err((code, message)) => Response::error(id, code, message),
-        })
+        dispatch(req, self)
     }
+}
 
+impl ToolHost for Context {
     /// Hand a tool call to the event loop and wait for it.
     ///
     /// A timeout comes back as a tool error rather than a protocol one: the
     /// window being gone is something the agent should read and stop for, not a
     /// fault that should tear its session down.
-    fn run_tool(&self, call: CallParams) -> CallResult {
+    fn call(&self, call: CallParams) -> CallResult {
         let name = call.name.clone();
         let (reply, answer) = mpsc::sync_channel(1);
         if self.jobs.send(Job { call, reply }).is_err() {
@@ -294,6 +274,48 @@ impl Context {
             )),
         }
     }
+}
+
+/// Anything that can run one tool call.
+///
+/// The two transports differ only here. Over SSE the editor is owned by a winit
+/// event loop, so a call is queued and waited on; over stdio there is no event
+/// loop and the server owns the editor outright. Everything else about the
+/// protocol — the methods, the errors, the notification rule — is the same, and
+/// [`dispatch`] is where that sameness lives.
+pub trait ToolHost: Send + Sync {
+    fn call(&self, call: CallParams) -> CallResult;
+}
+
+/// Dispatch one JSON-RPC method. `None` for a notification, which by the
+/// specification gets no reply at all.
+pub fn dispatch(req: Request, host: &dyn ToolHost) -> Option<Response> {
+    if req.is_notification() {
+        return None;
+    }
+    let id = req.id.clone().unwrap_or(Value::Null);
+    let result = match req.method.as_str() {
+        "initialize" => Ok(json!({
+            "protocolVersion": wire::negotiate_version(req.params.as_ref()),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": crate::NAME, "version": crate::VERSION},
+        })),
+        // Clients ping to check the session is alive. An empty result is the
+        // whole of the answer.
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({"tools": tools::list()})),
+        "tools/call" => {
+            match serde_json::from_value::<CallParams>(req.params.clone().unwrap_or(Value::Null)) {
+                Ok(call) => Ok(json!(host.call(call))),
+                Err(e) => Err((INTERNAL_ERROR, format!("bad tools/call params: {e}"))),
+            }
+        }
+        other => Err((METHOD_NOT_FOUND, format!("no method {other}"))),
+    };
+    Some(match result {
+        Ok(value) => Response::success(id, value),
+        Err((code, message)) => Response::error(id, code, message),
+    })
 }
 
 #[cfg(test)]
@@ -426,7 +448,7 @@ mod tests {
 
         // And once the editor is gone entirely, the send itself fails.
         assert_eq!(
-            ctx.run_tool(CallParams {
+            ctx.call(CallParams {
                 name: "put_voxel".into(),
                 arguments: json!({}),
             })
@@ -444,7 +466,7 @@ mod tests {
         use std::io::{BufRead, Read, Write};
         use std::net::TcpStream;
 
-        let (bridge, addr) = serve(0, Arc::new(|| {})).expect("listen on an ephemeral port");
+        let (bridge, addr) = serve_sse(0, Arc::new(|| {})).expect("listen on an ephemeral port");
 
         // Stand in for the event loop: drain until the test says stop.
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -529,7 +551,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
-        let (_bridge, addr) = serve(0, Arc::new(|| {})).unwrap();
+        let (_bridge, addr) = serve_sse(0, Arc::new(|| {})).unwrap();
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
 
         let answer = |target: &str| {
