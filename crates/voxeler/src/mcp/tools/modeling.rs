@@ -190,7 +190,7 @@ fn cells(
         "rect" => {
             let (lo, hi) = range(args, model)?;
             budget(lo, hi, remaining)?;
-            Ok(box_cells(lo, hi))
+            Ok(box_cells(lo, hi).collect())
         }
         "ellipsoid" | "line" => {
             let size = model.size();

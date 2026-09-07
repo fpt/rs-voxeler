@@ -119,6 +119,11 @@ pub struct Layer {
     pub visible: bool,
     bounds: Bounds,
     voxels: Vec<u8>,
+    /// How many of this layer's own cells are not air, kept in step with
+    /// `voxels` for the reason [`VoxelModel::filled`] is: the layer panel reads
+    /// it on every redraw, and walking the layer for it made the panel cost the
+    /// whole model.
+    filled: usize,
 }
 
 impl Layer {
@@ -128,6 +133,7 @@ impl Layer {
             visible: true,
             voxels: vec![0; bounds.cells()],
             bounds,
+            filled: 0,
         }
     }
 
@@ -144,13 +150,13 @@ impl Layer {
         }
     }
 
-    /// How many cells this layer alone fills.
+    /// How many cells this layer alone fills. O(1).
     pub fn filled_count(&self) -> usize {
-        self.voxels.iter().filter(|v| **v != 0).count()
+        self.filled
     }
 
     pub fn is_empty(&self) -> bool {
-        self.voxels.iter().all(|v| *v == 0)
+        self.filled == 0
     }
 
     /// Every filled cell, in *scene* coordinates.
@@ -188,6 +194,9 @@ impl Layer {
                 voxels[next.index(x, y, z)] = v;
             }
         }
+        // Reshaping can drop cells outside the new box — a trim never does, a
+        // scene resize can — so the count is taken from what actually landed.
+        self.filled = voxels.iter().filter(|v| **v != 0).count();
         self.bounds = next;
         self.voxels = voxels;
     }
@@ -240,6 +249,18 @@ pub struct VoxelModel {
     /// and because it is what lets every caller of `set` ignore layers.
     active: usize,
     palette: Palette,
+    /// How many cells are visible, kept in step with the layers.
+    ///
+    /// Counted rather than recounted because the answer is asked for far more
+    /// often than it changes: every tool call reports it and the editor's status
+    /// line reads it on every redraw, while the walk behind it is
+    /// O(filled × layers). At 256³ that made a **single voxel edit cost 43 ms** —
+    /// the write is O(1) and the report that followed it was the whole model.
+    ///
+    /// Maintained in [`set_in`](Self::set_in), which is the only path that
+    /// changes one cell, and recomputed wholesale by the handful of structural
+    /// operations that change many at once.
+    filled: usize,
 }
 
 impl VoxelModel {
@@ -261,6 +282,7 @@ impl VoxelModel {
             layers: vec![Layer::new("LAYER 1", Bounds::default())],
             active: 0,
             palette: Palette::default(),
+            filled: 0,
         }
     }
 
@@ -335,12 +357,24 @@ impl VoxelModel {
     pub fn clear(&mut self) {
         for layer in &mut self.layers {
             layer.voxels.fill(0);
+            layer.filled = 0;
         }
+        self.filled = 0;
     }
 
-    /// How many cells are not air, as seen.
+    /// How many cells are not air, as seen. O(1).
     pub fn filled_count(&self) -> usize {
+        self.filled
+    }
+
+    /// Count from scratch. The definition [`filled_count`](Self::filled_count)
+    /// is kept in step with, and what the tests check it against.
+    pub fn recount(&self) -> usize {
         self.iter_filled().count()
+    }
+
+    fn refresh_count(&mut self) {
+        self.filled = self.recount();
     }
 
     /// Every visible cell as `(scene x, y, z, index)`.
@@ -419,8 +453,26 @@ impl VoxelModel {
             let grown = l.bounds.grown_to(x, y, z);
             l.reshape(grown);
         }
+        // What the cell looks like from outside, either side of the write. A
+        // layer under a covering one, or a hidden layer, changes nothing
+        // visible — which is why this asks `get` rather than the layer.
+        let seen_before = self.get(x, y, z) != 0;
+        let l = &mut self.layers[layer];
         let i = l.bounds.index(x, y, z);
-        std::mem::replace(&mut l.voxels[i], value)
+        let before = std::mem::replace(&mut l.voxels[i], value);
+        match (before, value) {
+            (0, 0) => {}
+            (0, _) => l.filled += 1,
+            (_, 0) => l.filled -= 1,
+            _ => {}
+        }
+        let seen_after = self.get(x, y, z) != 0;
+        match (seen_before, seen_after) {
+            (false, true) => self.filled += 1,
+            (true, false) => self.filled -= 1,
+            _ => {}
+        }
+        before
     }
 
     /// Shrink a layer's box to the cells it actually holds. Returns whether the
@@ -526,6 +578,7 @@ impl VoxelModel {
         }
         self.layers.remove(i);
         self.active = self.active.min(self.layers.len() - 1);
+        self.refresh_count();
         true
     }
 
@@ -541,6 +594,7 @@ impl VoxelModel {
         } else if self.active == j {
             self.active = i;
         }
+        self.refresh_count();
         Some(j)
     }
 
@@ -564,12 +618,14 @@ impl VoxelModel {
         self.layers[i - 1].visible = true;
         self.layers.remove(i);
         self.active = self.active.min(self.layers.len() - 1);
+        self.refresh_count();
         true
     }
 
     pub fn set_layer_visible(&mut self, i: usize, visible: bool) {
         if let Some(l) = self.layers.get_mut(i) {
             l.visible = visible;
+            self.refresh_count();
         }
     }
 
@@ -607,6 +663,7 @@ impl VoxelModel {
         self.size = snapshot.size;
         self.active = snapshot.active.min(snapshot.layers.len() - 1);
         self.layers = snapshot.layers;
+        self.refresh_count();
     }
 
     /// Scale the whole scene up, so every voxel becomes `factor`³ of them.
@@ -663,6 +720,7 @@ impl VoxelModel {
                     }
                 }
             }
+            layer.filled = voxels.iter().filter(|v| **v != 0).count();
             layer.bounds = scaled;
             layer.voxels = voxels;
         }
@@ -671,6 +729,7 @@ impl VoxelModel {
             self.size[1] * factor,
             self.size[2] * factor,
         ];
+        self.refresh_count();
         Ok(())
     }
 
@@ -687,6 +746,7 @@ impl VoxelModel {
             let clamped = self.clamp(self.layers[i].bounds);
             self.layers[i].reshape(clamped);
         }
+        self.refresh_count();
     }
 
     /// The inclusive bounding box of the visible cells, or `None` when empty.
@@ -1066,6 +1126,81 @@ mod tests {
         }
         assert_eq!(m.layer_count(), MAX_LAYERS);
         assert!(m.add_layer(0, "one too many").is_none());
+    }
+
+    /// The count is maintained rather than walked, so the one thing that can go
+    /// wrong is drift. Every operation that can change what is visible is run
+    /// here, and the cheap answer is checked against the expensive one after
+    /// each of them.
+    #[test]
+    fn the_maintained_count_never_drifts_from_a_fresh_walk() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let mut step = 0;
+        let mut check = |m: &VoxelModel, what: &str| {
+            step += 1;
+            assert_eq!(
+                m.filled_count(),
+                m.recount(),
+                "step {step} ({what}): the composite count drifted"
+            );
+            // And each layer's own count, which the layer panel reads.
+            for (n, l) in m.layers().iter().enumerate() {
+                assert_eq!(
+                    l.filled_count(),
+                    m.iter_filled_in(n).count(),
+                    "step {step} ({what}): layer {n} drifted"
+                );
+                assert_eq!(l.is_empty(), l.filled_count() == 0, "step {step} ({what})");
+            }
+        };
+
+        for x in 0..8 {
+            m.set(x, 0, 0, 3);
+        }
+        check(&m, "writes");
+        m.set(3, 0, 0, 0);
+        check(&m, "an erase");
+        m.set(3, 0, 0, 0);
+        check(&m, "erasing air again");
+        m.set(1, 0, 0, 9);
+        check(&m, "a recolour, which changes no count");
+
+        // A second layer over the first: writing where something already shows
+        // must not count twice, and hiding it must give the cell back.
+        let top = m.add_layer(0, "cover").unwrap();
+        check(&m, "adding a layer");
+        m.set_active_layer(top);
+        for x in 0..4 {
+            m.set(x, 0, 0, 5);
+        }
+        check(&m, "writing over a covered cell");
+        m.set(9, 0, 0, 5);
+        check(&m, "writing where nothing was");
+
+        m.set_layer_visible(top, false);
+        check(&m, "hiding a layer");
+        m.set(10, 0, 0, 7);
+        check(&m, "writing to a hidden layer");
+        m.set_layer_visible(top, true);
+        check(&m, "showing it again");
+
+        m.move_layer(top, false).unwrap();
+        check(&m, "reordering");
+        let saved = m.layer_snapshot();
+        m.merge_down(1);
+        check(&m, "merging down");
+        m.restore_layers(saved);
+        check(&m, "restoring a snapshot");
+        m.remove_layer(1);
+        check(&m, "removing a layer");
+
+        m.subdivide(2).unwrap();
+        check(&m, "subdividing");
+        m.resize(4, 4, 4);
+        check(&m, "shrinking the scene");
+        m.clear();
+        check(&m, "clearing");
+        assert_eq!(m.filled_count(), 0);
     }
 
     /// Every voxel becomes a block, and the shape is otherwise untouched.

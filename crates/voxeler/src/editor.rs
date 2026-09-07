@@ -1300,11 +1300,17 @@ impl Editor {
     /// `cells` is a closure over the model so a caller can choose against the
     /// grid it is about to change — a paint wants the solid cells, a fill wants
     /// a flood — without this method knowing which.
-    pub fn apply_batch(
+    /// `cells` returns anything iterable, so a caller whose cells are pure
+    /// arithmetic — a box — can hand over a lazy iterator instead of a list.
+    /// Filling a 256³ scene materialised about 600 MB of coordinates and writes
+    /// before touching the model; streaming it costs nothing but the undo step.
+    /// A caller that has to *read* the model to choose its cells still collects,
+    /// because the read cannot outlive the borrow the writes need.
+    pub fn apply_batch<I: IntoIterator<Item = [i32; 3]>>(
         &mut self,
         label: &'static str,
         color: u8,
-        cells: impl FnOnce(&VoxelModel, usize) -> Vec<[i32; 3]>,
+        cells: impl FnOnce(&VoxelModel, usize) -> I,
         observe: impl FnMut(u8, u8),
     ) {
         let layer = self.model.active_layer();
