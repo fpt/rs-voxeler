@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 use voxel_core::region::{self, Brush, Reach, Span};
-use voxel_core::{Face, VoxelModel};
+use voxel_core::{Bounds, Face, VoxelModel};
 
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
@@ -350,10 +350,33 @@ pub fn list() -> Vec<ToolInfo> {
             name: "add_layer",
             description:
                 "Add an empty layer above the active one and select it. Layers composite top \
-                 down, so a new layer covers what is below without consuming it.",
+                 down, so a new layer covers what is below without consuming it. An empty layer \
+                 costs nothing: give `origin` and `size` to declare where it will live, or leave \
+                 them out and the layer grows to fit whatever you draw.",
             input_schema: json!({
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "origin": coord("The low corner of the layer's box"),
+                    "size": {
+                        "type": "array", "items": {"type": "integer"},
+                        "minItems": 3, "maxItems": 3,
+                        "description": "The layer's own extent, e.g. [64, 5, 64] for a ground \
+                                        plane. A starting size, not a wall — writes outside it \
+                                        enlarge it."
+                    },
+                },
+            }),
+        },
+        ToolInfo {
+            name: "trim_layer",
+            description:
+                "Shrink a layer's box to the voxels it actually holds. Boxes keep their \
+                 high-water mark while you work so that erasing and redrawing does not churn \
+                 them; this is how you hand the space back when a part is finished.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"layer": layer},
             }),
         },
         ToolInfo {
@@ -505,9 +528,16 @@ fn dispatch(
         }
         "add_layer" => {
             let before = editor.model().layer_count();
+            let bounds = match (args.get("origin"), args.get("size")) {
+                (None, None) => Bounds::default(),
+                _ => Bounds::new(
+                    u16_triple(args, "origin")?,
+                    u16_triple(args, "size")?,
+                ),
+            };
             match args.get("name").and_then(Value::as_str) {
-                Some(name) => editor.add_named_layer(name),
-                None => editor.add_layer(),
+                Some(name) => editor.add_named_layer(name, bounds),
+                None => editor.add_layer_with(bounds),
             }
             if editor.model().layer_count() == before {
                 return Err(editor.status().to_string());
@@ -515,6 +545,27 @@ fn dispatch(
             Ok(CallResult::text(format!(
                 "added a layer\n{}",
                 layers_json(editor)
+            )))
+        }
+        "trim_layer" => {
+            let i = match args.get("layer") {
+                None | Some(Value::Null) => editor.active_layer(),
+                Some(_) => layer_arg(editor, args)?,
+            };
+            let before = editor.model().layer_bounds(i).cells();
+            editor.trim_layer_at(i);
+            let after = editor.model().layer_bounds(i);
+            Ok(CallResult::text(format!(
+                "trimmed from {before} to {} cells\n{}",
+                after.cells(),
+                json!({
+                    "layer": i,
+                    "cells_before": before,
+                    "cells_after": after.cells(),
+                    "origin": after.origin,
+                    "size": after.size,
+                    "allocated_cells": editor.model().allocated_cells(),
+                })
             )))
         }
         "select_layer" => {
@@ -800,6 +851,9 @@ fn describe(editor: &Editor) -> String {
         json!({
             "size": [sx, sy, sz],
             "coordinates": "0..size on each axis, +Y up; the same coordinates the file stores",
+            "scene_note": "size is the range voxels may occupy, not an allocation — each layer \
+                           has its own origin and size and costs only that",
+            "allocated_cells": model.allocated_cells(),
             "voxels": model.filled_count(),
             "bounds": bounds,
             "color": editor.color,
@@ -833,6 +887,8 @@ fn layer_rows(editor: &Editor) -> Vec<Value> {
                 "name": l.name,
                 "visible": l.visible,
                 "voxels": l.filled_count(),
+                "origin": l.bounds().origin,
+                "size": l.bounds().size,
                 "active": i == editor.active_layer(),
             })
         })
@@ -953,6 +1009,26 @@ fn range(args: &Value, model: &VoxelModel) -> Result<([i32; 3], [i32; 3]), Strin
         }
     }
     Ok((lo, hi))
+}
+
+/// Three whole numbers that must fit a `u16` — an origin or a size.
+fn u16_triple(args: &Value, name: &str) -> Result<[u16; 3], String> {
+    let a = args
+        .get(name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("`{name}` must be [x, y, z]"))?;
+    if a.len() != 3 {
+        return Err(format!("`{name}` must have exactly 3 numbers"));
+    }
+    let mut out = [0u16; 3];
+    for (i, v) in a.iter().enumerate() {
+        out[i] = v
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .filter(|v| *v <= voxel_core::MAX_DIM)
+            .ok_or_else(|| format!("`{name}[{i}]` is outside 0..={}", voxel_core::MAX_DIM))?;
+    }
+    Ok(out)
 }
 
 fn box_cells(lo: [i32; 3], hi: [i32; 3]) -> Vec<[i32; 3]> {
@@ -1279,6 +1355,73 @@ mod tests {
         assert_eq!(e.model().get(0, 0, 0), 42);
 
         assert_eq!(run(&mut e, "set_color", json!({"color": 0})).is_error, Some(true));
+    }
+
+    // -- layer boxes ------------------------------------------------------
+
+    /// The example this was built for, driven through the tools an agent has.
+    #[test]
+    fn layers_can_be_declared_with_their_own_boxes() {
+        let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
+        run(&mut e, "add_layer", json!({"name": "GROUND", "origin": [0,0,0], "size": [64,5,64]}));
+        run(&mut e, "add_layer", json!({"name": "TREE", "origin": [20,5,10], "size": [16,32,16]}));
+        run(&mut e, "add_layer", json!({"name": "CHARACTER", "origin": [40,5,40], "size": [16,16,16]}));
+
+        let j = json_of(&run(&mut e, "describe_model", json!({})));
+        assert_eq!(j["size"], json!([64, 64, 64]));
+        let layers = j["layers"].as_array().unwrap();
+        assert_eq!(layers[1]["name"], "GROUND");
+        assert_eq!(layers[1]["size"], json!([64, 5, 64]));
+        assert_eq!(layers[2]["size"], json!([16, 32, 16]));
+        assert_eq!(layers[2]["origin"], json!([20, 5, 10]));
+        // The whole point: three shapes, not three copies of the scene.
+        assert_eq!(
+            j["allocated_cells"].as_u64().unwrap(),
+            (64 * 5 * 64 + 16 * 32 * 16 + 16 * 16 * 16) as u64
+        );
+    }
+
+    /// A declared box is a starting size, not a wall — a write outside it
+    /// enlarges the layer rather than being refused.
+    #[test]
+    fn a_write_outside_a_declared_box_grows_it_rather_than_failing() {
+        let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
+        run(&mut e, "add_layer", json!({"name": "TREE", "origin": [20,5,10], "size": [4,4,4]}));
+        let r = run(&mut e, "put_voxel", json!({"x": 19, "y": 5, "z": 10, "color": 7}));
+        assert_eq!(r.is_error, None);
+        assert_eq!(json_of(&r)["added"], 1);
+
+        let j = json_of(&run(&mut e, "describe_model", json!({})));
+        assert_eq!(j["layers"][1]["origin"], json!([19, 5, 10]));
+        assert_eq!(j["layers"][1]["size"], json!([5, 4, 4]));
+    }
+
+    #[test]
+    fn trim_layer_reports_the_space_it_gave_back() {
+        let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,15], "color": 4}));
+        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,15], "color": 0}));
+        run(&mut e, "put_voxel", json!({"x": 3, "y": 3, "z": 3, "color": 4}));
+
+        let j = json_of(&run(&mut e, "trim_layer", json!({})));
+        assert_eq!(j["cells_before"], 4096);
+        assert_eq!(j["cells_after"], 1);
+        assert_eq!(j["origin"], json!([3, 3, 3]));
+        assert_eq!(j["allocated_cells"], 1);
+        assert_eq!(e.model().get(3, 3, 3), 4, "and the voxel is still there");
+    }
+
+    #[test]
+    fn a_box_given_as_only_half_a_pair_is_refused() {
+        let mut e = editor();
+        assert_eq!(
+            run(&mut e, "add_layer", json!({"origin": [1, 1, 1]})).is_error,
+            Some(true)
+        );
+        assert_eq!(
+            run(&mut e, "add_layer", json!({"size": [1, 1]})).is_error,
+            Some(true)
+        );
     }
 
     // -- the root, and the file tools ------------------------------------

@@ -1,47 +1,54 @@
 //! `.vxm` — the editor's own format.
 //!
 //! ```text
-//! "VXM2"                       magic
-//! u16 u16 u16                  size x, y, z
+//! "VXM3"                       magic
+//! u16 u16 u16                  scene range x, y, z
 //! u8                           layer count, 1..=MAX_LAYERS
 //! u8                           the layer that was being edited
 //! layers * {
 //!   u8                         flags; bit 0 is "visible"
 //!   u8 + bytes                 name length, then UTF-8
+//!   u16 u16 u16                the layer's origin in the scene
+//!   u16 u16 u16                the layer's own size
 //!   u32                        voxel count
-//!   count * { u8 u8 u8 u8 }    x, y, z, palette index
+//!   count * { u8 u8 u8 u8 }    x, y, z **within the layer**, palette index
 //! }
 //! 256 * { u8 u8 u8 }           palette, RGB
 //! ```
 //!
-//! Sparse on disk even though the grid is dense in memory: a model is mostly
-//! air, and four bytes per *solid* voxel keeps a typical 64³ character under a
-//! few tens of KiB where the dense form is a flat 256 — per layer, which is
-//! what makes a sixteen-layer model a file rather than a download.
+//! Sparse on disk even though a layer is dense in memory: a model is mostly
+//! air, and four bytes per *solid* voxel keeps a typical character under a few
+//! tens of KiB.
+//!
+//! # The scene is a range; the layers are the grids
+//!
+//! The header's size says where voxels may go, not how much was allocated —
+//! that is each layer's own origin and size, and storing them is what lets a
+//! 64x64x5 ground and a 16³ character share a 64³ scene and come back the same
+//! shapes rather than as two 64³ grids. Coordinates are relative to the layer's
+//! origin, so a one-byte field covers a layer anywhere in the scene.
 //!
 //! Each layer stores its own voxels rather than the composite, so hiding a
-//! layer and saving does not throw away what was under it. A layer's flags and
-//! name ride along with it, and so does the active layer: reopening a model
-//! puts you back where you left off.
+//! layer and saving does not throw away what was under it. Its flags and name
+//! ride along, and so does the active layer: reopening puts you back where you
+//! left off.
 //!
-//! Coordinates are one byte because [`MAX_DIM`](crate::MAX_DIM) is 256, so the
-//! largest coordinate is 255. That is the same ceiling `.vox` has, which is not
-//! a coincidence — it is where interoperability stops either way.
+//! # `VXM2` and `VXM1`
 //!
-//! # `VXM1`
-//!
-//! The original layerless format: the same header without the two layer bytes,
-//! then one flat voxel list. Still read, as a single layer named after nothing
-//! in particular — a format nobody else implements is one we are free to
-//! extend, but a file already on disk is not free to rewrite itself.
+//! `VXM2` had layers but no boxes — every layer was the size of the scene.
+//! `VXM1` had no layers at all. Both still load, and both are **trimmed** on the
+//! way in, so an old file gains the smaller shape simply by being opened. A
+//! format nobody else implements is one we are free to extend; a file already on
+//! disk is not free to rewrite itself.
 
-use crate::model::MAX_LAYERS;
+use crate::model::{Bounds, MAX_LAYERS};
 use crate::palette::{Palette, Rgb8};
 use crate::{Result, VoxelError, VoxelModel};
 
 use super::Reader;
 
-const MAGIC: &[u8; 4] = b"VXM2";
+const MAGIC: &[u8; 4] = b"VXM3";
+const MAGIC_V2: &[u8; 4] = b"VXM2";
 const MAGIC_V1: &[u8; 4] = b"VXM1";
 
 /// A name longer than this is truncated on the way out. The field is one byte
@@ -72,10 +79,22 @@ pub fn encode(model: &VoxelModel) -> Vec<u8> {
         out.push(name.len() as u8);
         out.extend_from_slice(name.as_bytes());
 
+        let b = layer.bounds();
+        for d in b.origin.iter().chain(b.size.iter()) {
+            out.extend_from_slice(&d.to_le_bytes());
+        }
+
         let filled: Vec<_> = model.iter_filled_in(n).collect();
         out.extend_from_slice(&(filled.len() as u32).to_le_bytes());
         for ([x, y, z], index) in filled {
-            out.extend_from_slice(&[x as u8, y as u8, z as u8, index]);
+            // Relative to the layer's origin, so one byte covers a layer
+            // wherever in the scene it sits.
+            out.extend_from_slice(&[
+                (x - b.origin[0]) as u8,
+                (y - b.origin[1]) as u8,
+                (z - b.origin[2]) as u8,
+                index,
+            ]);
         }
     }
 
@@ -88,42 +107,67 @@ pub fn encode(model: &VoxelModel) -> Vec<u8> {
 pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
     let mut r = Reader::new(bytes);
     let magic = r.take(4)?;
-    let v1 = magic == MAGIC_V1;
-    if magic != MAGIC && !v1 {
-        return Err(VoxelError::Format(
-            "not a .vxm file (bad magic); a MagicaVoxel file needs a .vox extension".into(),
-        ));
-    }
+    let version = match magic {
+        m if m == MAGIC => 3,
+        m if m == MAGIC_V2 => 2,
+        m if m == MAGIC_V1 => 1,
+        _ => {
+            return Err(VoxelError::Format(
+                "not a .vxm file (bad magic); a MagicaVoxel file needs a .vox extension".into(),
+            ))
+        }
+    };
     let size = read_size(&mut r)?;
     let mut model = VoxelModel::new(size[0], size[1], size[2]);
 
-    if v1 {
-        read_voxels(&mut r, &mut model, 0)?;
+    if version == 1 {
+        read_voxels(&mut r, &mut model, 0, [0; 3])?;
     } else {
         let count = r.u8()? as usize;
         let active = r.u8()? as usize;
         if count == 0 || count > MAX_LAYERS {
             return Err(VoxelError::Format(format!(
-                "a model needs 1..={MAX_LAYERS} layers, the file claims {count}"
+                "a scene needs 1..={MAX_LAYERS} layers, the file claims {count}"
             )));
         }
         for n in 0..count {
             // The first layer is the one `VoxelModel::new` already made; the
             // rest are added as they are read, so the stack ends up in file
             // order with no separate allocation pass.
-            if n > 0 && model.add_layer(n - 1, "").is_none() {
-                return Err(VoxelError::Format("too many layers".into()));
-            }
             let flags = r.u8()?;
             let name_len = r.u8()? as usize;
             let name = String::from_utf8_lossy(r.take(name_len)?).into_owned();
+            // Before v3 a layer had no box of its own — it was the scene's size
+            // — so the origin is zero and the voxels are already scene-relative.
+            let bounds = if version >= 3 {
+                Bounds::new(
+                    [r.u16()?, r.u16()?, r.u16()?],
+                    [r.u16()?, r.u16()?, r.u16()?],
+                )
+            } else {
+                Bounds::new([0; 3], size)
+            };
+            if n > 0 && model.add_layer_with(n - 1, "", bounds).is_none() {
+                return Err(VoxelError::Format("too many layers".into()));
+            }
+            if n == 0 {
+                model.set_layer_bounds(0, bounds);
+            }
             model.rename_layer(n, name);
-            read_voxels(&mut r, &mut model, n)?;
-            // Set after the voxels, so the one recomposite it costs happens
-            // with the layer already filled.
+            read_voxels(&mut r, &mut model, n, bounds.origin)?;
+            // Set after the voxels: a hidden layer still has to be written to,
+            // and visibility has no bearing on that.
             model.set_layer_visible(n, flags & 1 != 0);
         }
         model.set_active_layer(active);
+    }
+
+    // An older file gave every layer the scene's size. Trimming here is what
+    // makes opening one enough to gain the smaller shape.
+    if version < 3 {
+        for n in 0..model.layer_count() {
+            model.trim_layer(n);
+        }
     }
 
     // The palette is optional so a hand-written file can omit it.
@@ -153,7 +197,12 @@ fn read_size(r: &mut Reader) -> Result<[u16; 3]> {
     Ok(size)
 }
 
-fn read_voxels(r: &mut Reader, model: &mut VoxelModel, layer: usize) -> Result<()> {
+fn read_voxels(
+    r: &mut Reader,
+    model: &mut VoxelModel,
+    layer: usize,
+    origin: [u16; 3],
+) -> Result<()> {
     let count = r.u32()? as usize;
     // Check the count against what is actually left before allocating from it:
     // a corrupt header claiming four billion voxels should be an error, not an
@@ -166,10 +215,16 @@ fn read_voxels(r: &mut Reader, model: &mut VoxelModel, layer: usize) -> Result<(
     }
     for _ in 0..count {
         let (x, y, z, index) = (r.u8()?, r.u8()?, r.u8()?, r.u8()?);
-        // Out-of-bounds records are dropped rather than rejected: they can only
-        // come from a file whose grid was shrunk by hand, and losing the stray
+        // Out-of-scene records are dropped rather than rejected: they can only
+        // come from a file whose scene was shrunk by hand, and losing the stray
         // voxels beats refusing to open the model.
-        model.set_in(layer, x as i32, y as i32, z as i32, index);
+        model.set_in(
+            layer,
+            x as i32 + origin[0] as i32,
+            y as i32 + origin[1] as i32,
+            z as i32 + origin[2] as i32,
+            index,
+        );
     }
     Ok(())
 }
@@ -241,6 +296,87 @@ mod tests {
         assert_eq!(back.get_in(1, 4, 2, 3), 8);
     }
 
+    /// Boxes are the point of v3: a layer has to come back the shape it was
+    /// declared, not merely holding the right voxels.
+    #[test]
+    fn round_trips_each_layers_own_box() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        m.rename_layer(0, "GROUND");
+        m.set_layer_bounds(0, Bounds::new([0, 0, 0], [64, 5, 64]));
+        m.set(3, 1, 3, 4);
+
+        let tree = m.add_layer_with(0, "TREE", Bounds::new([20, 5, 10], [16, 32, 16])).unwrap();
+        m.set_active_layer(tree);
+        m.set(24, 20, 14, 7);
+
+        let back = decode(&encode(&m)).unwrap();
+        assert_eq!(back, m);
+        assert_eq!(back.layer_bounds(0), Bounds::new([0, 0, 0], [64, 5, 64]));
+        assert_eq!(back.layer_bounds(1), Bounds::new([20, 5, 10], [16, 32, 16]));
+        assert_eq!(back.get(24, 20, 14), 7, "in scene coordinates, wherever the box is");
+        assert_eq!(back.get(3, 1, 3), 4);
+    }
+
+    /// A layer far from the origin stores coordinates relative to its own box,
+    /// so one byte covers it wherever in the scene it sits.
+    #[test]
+    fn a_layer_far_from_the_origin_round_trips() {
+        let mut m = VoxelModel::new(256, 256, 256);
+        m.set_layer_bounds(0, Bounds::new([250, 250, 250], [6, 6, 6])) ;
+        m.set(255, 255, 255, 9);
+        let back = decode(&encode(&m)).unwrap();
+        assert_eq!(back.get(255, 255, 255), 9);
+        assert_eq!(back.layer_bounds(0), Bounds::new([250, 250, 250], [6, 6, 6]));
+    }
+
+    /// An empty layer costs a header and nothing else, and comes back empty
+    /// rather than as a scene-sized grid.
+    #[test]
+    fn an_empty_layer_survives_as_an_empty_box() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        m.add_layer(0, "SPARE").unwrap();
+        let back = decode(&encode(&m)).unwrap();
+        assert_eq!(back.layer_count(), 2);
+        assert_eq!(back.layer_bounds(1), Bounds::default());
+        assert_eq!(back.allocated_cells(), 0);
+    }
+
+    /// The version before boxes: every layer was the scene's size. Opening one
+    /// trims it, so an old file gains the smaller shape by being read.
+    #[test]
+    fn a_vxm2_file_loads_and_is_trimmed_to_its_contents() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"VXM2");
+        for d in [64u16, 64, 64] {
+            bytes.extend_from_slice(&d.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[2, 1]); // two layers, the second active
+        for (name, cells) in [
+            ("GROUND", vec![[1u8, 0, 1, 4], [3, 0, 3, 4]]),
+            ("TREE", vec![[20, 5, 10, 7]]),
+        ] {
+            bytes.push(1);
+            bytes.push(name.len() as u8);
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&(cells.len() as u32).to_le_bytes());
+            for c in cells {
+                bytes.extend_from_slice(&c);
+            }
+        }
+        bytes.extend(std::iter::repeat_n(0u8, 768));
+
+        let m = decode(&bytes).unwrap();
+        assert_eq!(m.layer_count(), 2);
+        assert_eq!(m.layers()[0].name, "GROUND");
+        assert_eq!(m.active_layer(), 1);
+        assert_eq!(m.get(1, 0, 1), 4);
+        assert_eq!(m.get(20, 5, 10), 7);
+        // Trimmed on the way in: neither layer is a 64-cubed grid any more.
+        assert_eq!(m.layer_bounds(0), Bounds::new([1, 0, 1], [3, 1, 3]));
+        assert_eq!(m.layer_bounds(1), Bounds::new([20, 5, 10], [1, 1, 1]));
+        assert!(m.allocated_cells() < 100, "was 2 x 262144");
+    }
+
     /// The layerless format that shipped first still opens, as one layer.
     #[test]
     fn a_vxm1_file_loads_as_a_single_layer() {
@@ -295,9 +431,9 @@ mod tests {
         let mut m = sample();
         m.rename_layer(0, ""); // so the count sits at a fixed offset
         let mut bytes = encode(&m);
-        // Past the magic, the size, the two layer bytes, and the first layer's
-        // flags and zero name length: the voxel count.
-        bytes[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
+        // Past the magic, the scene size, the two layer bytes, and the first
+        // layer's flags, zero name length and twelve bytes of box: the count.
+        bytes[26..30].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode(&bytes).is_err());
     }
 

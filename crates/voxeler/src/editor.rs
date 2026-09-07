@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use voxel_core::region::{self, Brush, BrushShape, Span, MAX_BRUSH};
-use voxel_core::{format, Face, History, RayHit, Stroke, VoxelModel};
+use voxel_core::{format, Bounds, Face, History, RayHit, Stroke, VoxelModel};
 use voxel_render::mesh::{extract, ExtractOptions, FaceMesh};
 use voxel_render::{Mat4, OrbitCamera, Vec3};
 
@@ -568,7 +568,50 @@ impl Editor {
 
     fn report_layer(&mut self) {
         let i = self.model.active_layer();
-        self.status = format!("layer {}/{}: {}", i + 1, self.model.layer_count(), self.layer_name(i));
+        let b = self.model.layer_bounds(i);
+        let extent = if b.is_empty() {
+            "empty".to_string()
+        } else {
+            let [w, h, d] = b.size;
+            let [x, y, z] = b.origin;
+            format!("{w}x{h}x{d} at {x},{y},{z}")
+        };
+        self.status = format!(
+            "layer {}/{}: {} ({extent})",
+            i + 1,
+            self.model.layer_count(),
+            self.layer_name(i)
+        );
+    }
+
+    /// Shrink the active layer's box to the voxels it actually holds.
+    ///
+    /// Not automatic on erase: a box keeps its high-water mark while you work,
+    /// so erasing and redrawing in one spot does not reallocate the layer every
+    /// stroke. This is the "I am done with that area" button.
+    pub fn trim_layer(&mut self) {
+        let i = self.model.active_layer();
+        self.trim_layer_at(i);
+    }
+
+    /// The same, on a layer the caller names.
+    pub fn trim_layer_at(&mut self, i: usize) {
+        let before = self.model.layer_bounds(i);
+        if !self.model.trim_layer(i) {
+            self.status = "the layer already fits its contents".into();
+            return;
+        }
+        let after = self.model.layer_bounds(i);
+        // Not an undo step and not a change to the model: the voxels are
+        // identical either side, and only how much room is set aside for them
+        // has moved. It does dirty the document, because the file records it.
+        self.dirty = true;
+        self.status = format!(
+            "trimmed {} from {} to {} cells",
+            self.layer_name(i),
+            before.cells(),
+            after.cells()
+        );
     }
 
     /// Select a layer outright — what a click on the panel does.
@@ -595,20 +638,26 @@ impl Editor {
         // up sharing a name after a reorder, which is untidy but honest — the
         // alternative is renaming layers behind the user's back.
         let name = format!("LAYER {}", self.model.layer_count() + 1);
-        self.insert_layer(name);
+        self.insert_layer(name, Bounds::default());
     }
 
     /// The same, with a name the caller chose — what an agent driving the
     /// editor over MCP wants, having a purpose in mind that "LAYER 3" does not
     /// record.
-    pub fn add_named_layer(&mut self, name: &str) {
-        self.insert_layer(name.to_string());
+    pub fn add_named_layer(&mut self, name: &str, bounds: Bounds) {
+        self.insert_layer(name.to_string(), bounds);
     }
 
-    fn insert_layer(&mut self, name: String) {
+    /// A layer with a box declared up front but no name of its own.
+    pub fn add_layer_with(&mut self, bounds: Bounds) {
+        let name = format!("LAYER {}", self.model.layer_count() + 1);
+        self.insert_layer(name, bounds);
+    }
+
+    fn insert_layer(&mut self, name: String, bounds: Bounds) {
         let mut added = None;
         let changed = self.history.restructure(&mut self.model, "add layer", |model| {
-            added = model.add_layer(model.active_layer(), name);
+            added = model.add_layer_with(model.active_layer(), name, bounds);
             if let Some(i) = added {
                 model.set_active_layer(i);
             }
@@ -1926,6 +1975,61 @@ mod tests {
         assert_eq!(e.model().get_in(1, 3, 1, 3), 6);
         assert_eq!(e.active_layer(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The point of per-layer boxes, from the editor: a scene you can build
+    /// across costs only what is drawn in it.
+    #[test]
+    fn a_layer_grows_to_what_is_drawn_and_costs_only_that() {
+        let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
+        assert_eq!(e.model().allocated_cells(), 0, "an empty scene allocates nothing");
+
+        e.begin_stroke(hit([20, 5, 10], 0));
+        e.end_stroke();
+        assert_eq!(e.model().allocated_cells(), 1);
+        assert!(e.model().layer_bounds(0).contains(20, 5, 10));
+
+        e.span = Span::Voxel;
+        e.brush = Brush { radius: 2, shape: BrushShape::Cube };
+        e.begin_stroke(hit([20, 5, 10], 0));
+        e.end_stroke();
+        assert_eq!(e.model().layer_bounds(0).size, [5, 5, 5]);
+        assert_eq!(e.model().allocated_cells(), 125, "and not 64 cubed");
+    }
+
+    /// Boxes keep their high-water mark while you work; the trim key is what
+    /// hands the space back.
+    #[test]
+    fn trimming_gives_back_the_space_an_erase_left_behind() {
+        let mut e = editor_with_floor();
+        assert_eq!(e.model().allocated_cells(), 64, "the 8x1x8 floor");
+
+        e.tool = Tool::Erase;
+        e.span = Span::Plane;
+        e.begin_stroke(hit([3, 0, 3], 4));
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), 0);
+        assert_eq!(e.model().allocated_cells(), 64, "the box stays put");
+
+        e.trim_layer();
+        assert_eq!(e.model().allocated_cells(), 0);
+        assert!(e.is_dirty());
+        assert_eq!(e.undo_depth(), 1, "a trim moves no voxels, so it is no undo step");
+    }
+
+    /// A declared box is where a layer is expected to live, and the status line
+    /// says so — but it is not a wall.
+    #[test]
+    fn a_layer_can_be_declared_and_still_grows() {
+        let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
+        e.add_named_layer("TREE", Bounds::new([20, 5, 10], [16, 32, 16]));
+        assert_eq!(e.active_layer(), 1);
+        assert_eq!(e.model().layer_bounds(1), Bounds::new([20, 5, 10], [16, 32, 16]));
+        assert!(e.status().contains("16x32x16"), "{}", e.status());
+
+        e.begin_stroke(hit([19, 5, 10], 0));
+        e.end_stroke();
+        assert!(e.model().layer_bounds(1).contains(19, 5, 10), "it grew");
     }
 
     #[test]

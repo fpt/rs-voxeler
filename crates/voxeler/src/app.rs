@@ -384,6 +384,7 @@ impl App {
             KeyCode::KeyK => self.editor.move_layer(true),
             KeyCode::KeyJ => self.editor.move_layer(false),
             KeyCode::KeyU => self.editor.merge_layer_down(),
+            KeyCode::KeyT => self.editor.trim_layer(),
             KeyCode::KeyG => self.editor.show_grid = !self.editor.show_grid,
             KeyCode::KeyH => self.editor.show_help = !self.editor.show_help,
             KeyCode::KeyF => self.editor.frame_model(),
