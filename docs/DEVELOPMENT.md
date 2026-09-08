@@ -10,17 +10,34 @@ things that were expensive to learn.
 cd crates && cargo build --release
 cd crates && cargo test
 cd crates && cargo clippy --all-targets -- -D warnings
+cd crates && cargo fmt --check
 ```
 
 Or through the Makefile from the repository root, which is what CI runs:
 
 ```bash
-make check          # test + lint, the two commands CI runs
+make check          # test + lint + fmt-check, the three commands CI runs
 make test
 make lint
+make fmt            # fix the formatting
+make fmt-check      # ask whether it needs fixing
 make run            # debug build on models/robot.vxm
 make thumb          # render one frame to /tmp/voxeler.png
 ```
+
+**The tree is rustfmt-clean, and CI checks it.** It was not for a long time, on
+the reasoning that reformatting is a decision to take on purpose rather than
+discover from a red build — so it was taken on purpose, in #35, and the check
+went in behind it. `cargo fmt` with no arguments fixes every failure; there is
+nothing in `fmt-check` that is a judgement call.
+
+Two consequences worth knowing. `cargo fmt` never edits inside a string
+literal, so a long description broken across lines with `\` keeps whatever
+indentation you gave it — align the continuations under the opening quote
+yourself, because nothing will tell you they drifted. And the two commits that
+made the tree clean are in `.git-blame-ignore-revs`; `git config
+blame.ignoreRevsFile .git-blame-ignore-revs` once, and `git blame` will look
+past them to whoever wrote the line.
 
 ```bash
 ./crates/target/release/voxeler models/robot.vxm

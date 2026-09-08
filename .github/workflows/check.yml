@@ -1,11 +1,14 @@
 # What `make check` runs, on every push and pull request.
 #
-# Deliberately the same two commands the Makefile names, rather than a second
+# Deliberately the same commands the Makefile names, rather than a second
 # definition of "is this good" that drifts from the one people run locally.
 #
-# `cargo fmt --check` is *not* here: the tree is not rustfmt-clean, and the
-# comments in it are hand-wrapped to sit under their code. Reformatting is a
-# decision to take on purpose, not a thing to discover from a red build.
+# `cargo fmt --check` was left out for a long time, on the grounds that the tree
+# was not rustfmt-clean and reformatting is a decision to take on purpose rather
+# than discover from a red build (#35). The decision was taken: the tree is
+# rustfmt-clean now, so the check is here. It runs as its own step so a
+# formatting slip and a real lint failure are two different red builds, and the
+# fix is always `cargo fmt` with no arguments.
 
 name: check
 
@@ -57,6 +60,9 @@ jobs:
 
       - name: Lint
         run: make lint
+
+      - name: Format
+        run: make fmt-check
 
       # The one end-to-end check a headless runner can make: load a model,
       # extract its faces, rasterise them and write a PNG. `--thumbnail` exists
