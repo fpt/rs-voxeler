@@ -72,6 +72,20 @@ sticking out at its sides.
   undo step, without re-creating anything. Use it to reposition a finished limb
   rather than erasing and redrawing it. It is all or nothing: if any part would
   leave the scene the move is refused and names the layer and axis.
+- **Repeat a part with `create_instance`, do not redraw it.** Wheels, windows,
+  teeth, towers and above all mirrored pairs are the bulk of a voxel model.
+  `create_instance source="ARM L" name="ARM R" dx=14 mirror=["x"]` makes a
+  reference, so a later fix to the source reaches every copy — which is the
+  whole difference between four wheels and one wheel drawn four times.
+  `dx`/`dy`/`dz` are relative to the source, and `mirror` reflects about the
+  source's own box, so a mirrored limb lands beside the body. Prefer this to
+  `duplicate_selection` whenever the copies should stay the same shape; use the
+  clipboard when they are meant to diverge.
+- **An instance's layer refuses writes, and the message names the source.**
+  That is the rule, not a failure: edit the source. `detach_instance` is the way
+  out when one copy really should differ — it keeps exactly the voxels on screen
+  and starts taking writes. Build the source *before* instancing it where you
+  can; every later edit to it is free, but the copies are not editable.
 - `set_object_visible` hides a whole part at once. Layers keep their own
   switches, so showing the object again restores what was shown before. A layer
   row whose report carries `"shown": false` while `"visible"` is true is inside

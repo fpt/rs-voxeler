@@ -89,6 +89,11 @@ impl<'a> Reader<'a> {
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
+    /// Signed, because an instance's offset can point either way.
+    pub(crate) fn i16(&mut self) -> Result<i16> {
+        Ok(self.u16()? as i16)
+    }
+
     pub(crate) fn u32(&mut self) -> Result<u32> {
         let b = self.take(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))

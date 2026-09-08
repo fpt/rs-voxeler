@@ -816,6 +816,73 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "create_instance",
+            description:
+                "Repeat an object somewhere else as a REFERENCE, not a copy: editing the source \
+                 changes every instance. This is what four wheels, a mirrored pair of arms or a \
+                 row of windows should be. dx/dy/dz place it relative to the source, so the \
+                 copy keeps its offset when the source grows; `mirror` reflects about the \
+                 middle of the source's own box, which is what puts a mirrored arm beside the \
+                 body rather than across the scene. The instance gets one layer holding what \
+                 the source composites to, on top of the stack. Writes to that layer are \
+                 refused, naming the source — edit the source, or `detach_instance`. Refused \
+                 for the scene root, for an object that is itself an instance, for a source \
+                 with no voxels, and for a placement that would fall outside the scene.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": object,
+                    "name": {"type": "string"},
+                    "parent": object,
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "dz": {"type": "integer"},
+                    "mirror": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["x", "y", "z"]},
+                        "maxItems": 3,
+                    },
+                },
+                "required": ["source", "name"],
+            }),
+        },
+        ToolInfo {
+            name: "place_instance",
+            description:
+                "Move or mirror an existing instance. dx/dy/dz and `mirror` replace what it had \
+                 rather than adding to it, so this is where the copy sits, not how far to \
+                 nudge it. All or nothing: a placement that would put any part outside the \
+                 scene is refused and nothing moves.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "object": object,
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "dz": {"type": "integer"},
+                    "mirror": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["x", "y", "z"]},
+                        "maxItems": 3,
+                    },
+                },
+                "required": ["object"],
+            }),
+        },
+        ToolInfo {
+            name: "detach_instance",
+            description:
+                "Turn an instance into ordinary work: it keeps exactly the voxels it is showing \
+                 and stops following its source. Nothing on screen changes — this changes what \
+                 the layer MEANS, not what it holds — and its layer becomes writable. The way \
+                 out when you want one of the copies to differ.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"object": object},
+                "required": ["object"],
+            }),
+        },
+        ToolInfo {
             name: "delete_object",
             description:
                 "Remove an object. Its child objects and its layers move up to its parent rather \
@@ -1161,7 +1228,7 @@ fn dispatch(
         "trim_layer" => {
             let i = match args.get("layer") {
                 None | Some(Value::Null) => editor.active_layer(),
-                Some(_) => layer_arg(editor, args)?,
+                Some(_) => writable_layer_arg(editor, args)?,
             };
             let before = editor.model().layer_bounds(i).cells();
             editor.trim_layer_at(i);
@@ -1181,6 +1248,13 @@ fn dispatch(
         }
         "select_layer" => {
             let i = layer_arg(editor, args)?;
+            // The one gate that keeps every active-layer tool off an
+            // instance: a derived layer never becomes active, so `put_voxel`,
+            // `fill`, `paste` and every selection made from the active layer
+            // cannot land on one without a check of their own.
+            if let Some(why) = editor.generated_refusal(i) {
+                return Err(why);
+            }
             editor.select_layer(i);
             Ok(CallResult::text(format!(
                 "editing layer {i}\n{}",
@@ -1323,6 +1397,41 @@ fn dispatch(
             Ok(CallResult::text(format!(
                 "added object {}\n{}",
                 editor.model().object_count() - 1,
+                objects_json(editor)
+            )))
+        }
+        "create_instance" => {
+            let source = object_arg(editor, args, "source")?;
+            let parent = match args.get("parent") {
+                None | Some(Value::Null) => 0,
+                _ => object_arg(editor, args, "parent")?,
+            };
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("create_instance needs `name`")?
+                .to_string();
+            let made = editor.add_instance(source, parent, &name, offset(args)?, mirror(args)?)?;
+            Ok(CallResult::text(format!(
+                "added instance {made}\n{}",
+                objects_json(editor)
+            )))
+        }
+        "place_instance" => {
+            let i = object_arg(editor, args, "object")?;
+            editor.place_instance(i, offset(args)?, mirror(args)?)?;
+            Ok(CallResult::text(format!(
+                "placed instance {i}\n{}",
+                objects_json(editor)
+            )))
+        }
+        "detach_instance" => {
+            let i = object_arg(editor, args, "object")?;
+            if !editor.detach_instance(i) {
+                return Err(editor.status().to_string());
+            }
+            Ok(CallResult::text(format!(
+                "detached {i}\n{}",
                 objects_json(editor)
             )))
         }
@@ -1790,6 +1899,41 @@ fn session_identity() -> &'static str {
     })
 }
 
+/// A placement, spelled dx/dy/dz the way `move_object` and `move_selection` are.
+///
+/// One spelling of an offset in this surface rather than three an agent has to
+/// remember the difference between.
+fn offset(args: &Value) -> Result<[i32; 3], String> {
+    let one = |key: &str| -> Result<i32, String> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(0),
+            Some(v) => v
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| format!("`{key}` must be a whole number")),
+        }
+    };
+    Ok([one("dx")?, one("dy")?, one("dz")?])
+}
+
+/// Which axes an instance is reflected about, as `["x", "z"]`.
+fn mirror(args: &Value) -> Result<[bool; 3], String> {
+    let mut out = [false; 3];
+    let Some(v) = args.get("mirror").filter(|v| !v.is_null()) else {
+        return Ok(out);
+    };
+    for name in v.as_array().ok_or("`mirror` must be a list of axes")? {
+        let axis = match name.as_str() {
+            Some("x") | Some("X") => 0,
+            Some("y") | Some("Y") => 1,
+            Some("z") | Some("Z") => 2,
+            _ => return Err("`mirror` takes \"x\", \"y\" and \"z\"".into()),
+        };
+        out[axis] = true;
+    }
+    Ok(out)
+}
+
 /// An axis named the way an agent would say it.
 fn axis_arg(args: &Value) -> Result<usize, String> {
     match args.get("axis").and_then(Value::as_str) {
@@ -1877,6 +2021,9 @@ fn layer_rows(editor: &Editor) -> Vec<Value> {
                 "size": l.bounds().size,
                 "active": i == editor.active_layer(),
             });
+            if l.is_generated() {
+                row["generated"] = json!(true);
+            }
             // `shown` is dropped when it agrees with `visible`, which is nearly
             // always. Present, it is the answer to the one question the rest of
             // the row cannot settle: this layer is switched on and still not
@@ -1923,14 +2070,46 @@ fn object_rows(editor: &Editor) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(i, o)| {
-            json!({
+            let mut row = json!({
                 "index": i,
                 "name": o.name,
                 "path": path(i),
                 "parent": o.parent,
                 "visible": o.visible,
                 "layers": model.object_layers(i),
-            })
+            });
+            // Only on the rows it applies to. An extra `"instance": null` on
+            // every object in a scene that has none is noise in the one place
+            // an agent reads to find out what the scene is.
+            if let Some(at) = o.instance {
+                let mirror: Vec<&str> = ["x", "y", "z"]
+                    .iter()
+                    .zip(at.mirror)
+                    .filter(|(_, m)| *m)
+                    .map(|(a, _)| *a)
+                    .collect();
+                row["instance"] = json!({
+                    "source": at.source,
+                    "source_name": model.objects()[at.source].name,
+                    "offset": at.offset,
+                    "mirror": mirror,
+                });
+                // An edit to the source can push a copy off the edge of the
+                // scene. The rebuild clips it rather than refusing, so this is
+                // the only place that fact is visible.
+                if model.instance_clipped(i) {
+                    row["instance"]["clipped"] = json!(true);
+                    row["instance"]["note"] = json!(
+                        "part of this copy falls outside the scene and is not drawn; \
+                         move it with place_instance or resize the scene"
+                    );
+                }
+            }
+            let copies = model.instances_of(i);
+            if !copies.is_empty() {
+                row["instanced_by"] = json!(copies);
+            }
+            row
         })
         .collect()
 }
@@ -2146,6 +2325,18 @@ fn color_arg(editor: &Editor, args: &Value) -> Result<u8, String> {
 /// A layer by index or by name. Names are matched case-insensitively, because
 /// an agent reading "ARMOUR" out of `describe_model` and sending back "armour"
 /// has not made a mistake worth an error.
+/// A layer named for *writing*, refused when it belongs to an instance.
+///
+/// The read-only tools keep using [`layer_arg`]: inspecting the copy is a fair
+/// question, and only changing it is the thing with no meaning.
+fn writable_layer_arg(editor: &Editor, args: &Value) -> Result<usize, String> {
+    let layer = layer_arg(editor, args)?;
+    match editor.generated_refusal(layer) {
+        Some(why) => Err(why),
+        None => Ok(layer),
+    }
+}
+
 fn layer_arg(editor: &Editor, args: &Value) -> Result<usize, String> {
     let v = args.get("layer").ok_or("missing `layer`")?;
     let count = editor.model().layer_count();
@@ -2201,6 +2392,192 @@ mod tests {
 
     fn run(e: &mut Editor, name: &str, args: Value) -> CallResult {
         call(e, name, &args)
+    }
+
+    // -- instances --------------------------------------------------------
+
+    /// Set up a source object holding one voxel, on its own layer.
+    fn source(e: &mut Editor) {
+        run(e, "create_object", json!({"name": "WHEEL"}));
+        run(e, "add_layer", json!({"name": "WHEEL"}));
+        run(
+            e,
+            "set_layer_object",
+            json!({"layer": "WHEEL", "object": "WHEEL"}),
+        );
+        run(e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 5}));
+    }
+
+    /// The whole reason instances exist: edit once, and every copy follows.
+    #[test]
+    fn an_instance_follows_its_source_through_edits_and_undo() {
+        let mut e = editor();
+        source(&mut e);
+        let r = run(
+            &mut e,
+            "create_instance",
+            json!({"source": "WHEEL", "name": "WHEEL R", "dx": 4}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.model().get(5, 1, 1), 5, "the copy is on screen");
+        assert_eq!(e.model().filled_count(), 2);
+
+        // An edit to the source is one undo step and moves both.
+        let depth = e.undo_depth();
+        run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 1, "color": 5}));
+        assert_eq!(e.undo_depth(), depth + 1, "one step, not two");
+        assert_eq!(e.model().get(5, 2, 1), 5, "the copy grew with it");
+
+        // And undoing it takes the copy back with it, because the copy was
+        // never in the history — it is derived from what the history restored.
+        e.undo();
+        assert_eq!(e.model().get(1, 2, 1), 0);
+        assert_eq!(e.model().get(5, 2, 1), 0, "no stale copy left behind");
+        assert_eq!(e.model().filled_count(), 2);
+        e.redo();
+        assert_eq!(e.model().get(5, 2, 1), 5);
+
+        // Creating it was a step of its own, and undoing that takes the whole
+        // instance — object and layer — away.
+        let objects = e.model().object_count();
+        while e.undo_depth() > 0 {
+            e.undo();
+        }
+        assert!(e.model().object_count() < objects);
+        assert_eq!(e.model().get(5, 1, 1), 0);
+    }
+
+    /// A tool that ignores you with no explanation is a bug report. This is the
+    /// instance half of the rule `Drag::owner` states for layers.
+    #[test]
+    fn writing_to_an_instance_is_refused_and_names_the_source() {
+        let mut e = editor();
+        source(&mut e);
+        run(
+            &mut e,
+            "create_instance",
+            json!({"source": "WHEEL", "name": "WHEEL R", "dx": 4}),
+        );
+
+        // Selecting it is what every active-layer tool would go through.
+        let r = run(&mut e, "select_layer", json!({"layer": "WHEEL R"}));
+        assert_eq!(r.is_error, Some(true));
+        let why = text_of(&r);
+        assert!(why.contains("WHEEL R"), "{why}");
+        assert!(why.contains("repeats"), "{why}");
+        assert!(why.contains("detach"), "{why}");
+
+        // And so is naming it outright on a tool that takes a layer.
+        let r = run(
+            &mut e,
+            "put_ellipsoid",
+            json!({"center": [5,1,1], "radii": [1,1,1], "layer": "WHEEL R"}),
+        );
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert_eq!(e.model().filled_count(), 2, "and nothing was written");
+
+        // Detaching is the way out, and changes nothing on screen.
+        let seen: Vec<_> = e.model().iter_filled().collect();
+        let r = run(&mut e, "detach_instance", json!({"object": "WHEEL R"}));
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), seen);
+        assert_eq!(
+            run(&mut e, "select_layer", json!({"layer": "WHEEL R"})).is_error,
+            None,
+            "and now it is ordinary work"
+        );
+    }
+
+    /// The commonest reason to instance anything, and the placement rule that
+    /// makes it land beside the body rather than across the scene.
+    #[test]
+    fn a_mirrored_instance_reports_its_reference_and_refuses_a_bad_placement() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "ARM"}));
+        run(&mut e, "add_layer", json!({"name": "ARM"}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": "ARM", "object": "ARM"}),
+        );
+        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [2,1,1], "color": 3}));
+        run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 1, "color": 3}));
+
+        let r = run(
+            &mut e,
+            "create_instance",
+            json!({"source": "ARM", "name": "ARM R", "dx": 4, "mirror": ["x"]}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        // The source spans x 1..=2, so the reflection swaps them and dx carries
+        // the pair four to the right.
+        assert_eq!(e.model().get(6, 2, 1), 3, "the short arm swapped sides");
+        assert_eq!(e.model().get(5, 2, 1), 0);
+
+        let rows = json_of(&run(&mut e, "list_objects", json!({})));
+        let copy = rows["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "ARM R")
+            .expect("the instance is listed");
+        assert_eq!(copy["instance"]["source_name"], "ARM");
+        assert_eq!(copy["instance"]["mirror"], json!(["x"]));
+        assert_eq!(copy["instance"]["offset"], json!([4, 0, 0]));
+        let arm = rows["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "ARM")
+            .unwrap();
+        assert!(arm["instanced_by"].is_array(), "the source says it has copies");
+        assert_eq!(
+            rows["layers"].as_array().unwrap()[2]["generated"],
+            json!(true)
+        );
+
+        // All or nothing: a refused placement leaves it exactly where it was.
+        let r = run(&mut e, "place_instance", json!({"object": "ARM R", "dx": 99}));
+        assert_eq!(r.is_error, Some(true));
+        assert_eq!(e.model().get(6, 2, 1), 3);
+    }
+
+    /// A copy quietly losing half of itself is exactly what nobody notices.
+    /// Found by driving the real binary: a stray voxel written far out on the
+    /// source grew its box, and the copy at +14 ran off the scene in silence.
+    #[test]
+    fn an_instance_pushed_off_the_scene_says_so() {
+        let mut e = editor();
+        source(&mut e);
+        run(
+            &mut e,
+            "create_instance",
+            json!({"source": "WHEEL", "name": "WHEEL R", "dx": 4}),
+        );
+        let listed = |e: &mut Editor| {
+            json_of(&run(e, "list_objects", json!({})))["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["name"] == "WHEEL R")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(listed(&mut e)["instance"]["clipped"], Value::Null);
+
+        // Growing the source's box far to the right carries the copy over the
+        // edge. The rebuild clips rather than refusing — it is a consequence of
+        // an edit somewhere else — so the listing is where it has to show.
+        run(&mut e, "put_voxel", json!({"x": 6, "y": 1, "z": 1, "color": 5}));
+        assert_eq!(listed(&mut e)["instance"]["clipped"], json!(true));
+        assert!(listed(&mut e)["instance"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("outside the scene"));
+
+        // And it comes back the moment there is room again.
+        e.undo();
+        assert_eq!(listed(&mut e)["instance"]["clipped"], Value::Null);
     }
 
     // -- colour -----------------------------------------------------------

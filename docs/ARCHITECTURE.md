@@ -141,6 +141,42 @@ recomputed by `refresh_shown` — the single place it moves, for the reason
 inside `get`. The layer's own flag is untouched, so showing an object again
 restores exactly what was shown before.
 
+### An instance is a reference, and it is baked
+
+`Object::instance` names another object, an offset and a per-axis mirror. The
+question the design turns on is where that reference is *resolved*, and the
+answer is: not in `get`.
+
+Resolving it there — a true virtual reference, no duplicated storage — would put
+a stored transform inside the hottest read in the codebase, and would need a
+second path in every maintained tally, because the cells would belong to no
+layer. What it buys is a byte per cell, which is the same order as the composite
+grid rule already accepted at 4 MiB for a 64³ scene.
+
+So an instance owns **one ordinary layer**, flagged `Layer::generated`, holding
+the source subtree's composite; `rebuild_instances` rewrites it when the source
+moves. Compositing, meshing, the raycaster, `owner_at`, `occupied_bounds` and
+every tally needed no changes, because a derived layer is a layer.
+
+One layer rather than one per source layer, because a rebuild must never change
+the layer *count*: inserting or removing one renumbers the rest, and every
+`Edit::layer` already on the undo stack would point at the wrong grid.
+
+Derived cells are therefore never in the history. Undo restores the source and
+the rebuild runs again, which is what keeps the copies in step rather than
+restoring stale ones. `Editor::refresh_instances` asks for it at the commit
+points — stroke, batch, undo, structural change — never inside `set_in`, where a
+fill would pay for a source walk per voxel.
+
+Placing is all or nothing and rebuilding clips, and the asymmetry is the point:
+a placement is a thing a caller chose and can be told to choose differently; a
+rebuild is a consequence of an unrelated edit, and refusing there would leave
+every instance stale with nothing to press. `instance_clipped` reports it.
+
+A write to a copy is refused with the source's name rather than detaching into
+one silently, and `select_layer` is the single gate that enforces it: a derived
+layer never becomes active, so every active-layer tool is off it for free.
+
 ### A layer is a grid of its own
 
 Layers composite top down: `get` returns the topmost *visible* layer's index at

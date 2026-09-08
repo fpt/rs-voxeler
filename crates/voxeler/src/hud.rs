@@ -215,17 +215,26 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
             overlay::stroke_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT);
         }
 
-        // Three states, because a layer can be off for two different reasons
-        // and only one of them is undone by pressing V on it:
+        // Four states, because a layer can be off for two different reasons and
+        // only one of them is undone by pressing V on it — and because one kind
+        // of layer is on screen and still not somewhere you can draw:
         //
         //   filled          on screen
+        //   filled + notch  on screen, an instance's copy, refuses writes
         //   hollow + pip    switched on, but an object above it is hidden
         //   hollow          switched off here
         //
-        // Drawing the middle case as filled would be a straight lie about what
+        // Drawing the third case as filled would be a straight lie about what
         // is on screen; drawing it as plain hollow would make V look broken.
+        // Drawing the second as an ordinary layer would make a click on it look
+        // like a broken editor rather than a rule.
         let box_y = y + (ROW as i32 - EYE as i32) / 2;
-        if layer.shown() {
+        if layer.is_generated() {
+            overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { DIM });
+            // A bite out of the corner: the same square, minus a piece, for a
+            // layer that is the same picture minus the ability to change it.
+            overlay::fill_rect(fb, ox + EYE as i32 - 3, box_y, 3, 3, PANEL_BG);
+        } else if layer.shown() {
             overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { TEXT });
         } else {
             overlay::stroke_rect(fb, ox, box_y, EYE, EYE, DIM);

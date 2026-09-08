@@ -262,6 +262,7 @@ whoever connects.
 | `list_objects`, `create_object`, `rename_object`, `delete_object` | the scene tree: what each part *is* |
 | `set_layer_object`, `reparent_object`, `set_object_visible` | put layers in parts, parts in parts, and hide either |
 | `move_object` | move a part and everything under it, one undo step |
+| `create_instance`, `place_instance`, `detach_instance` | repeat a part by reference; edit the source and every copy follows |
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
 | `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
@@ -327,6 +328,44 @@ leave the scene, nothing moves and the message says which layer and which axis.
 The tree is saved in the file, so the next session still knows what the parts
 are. That is what makes an agent's edits semantic: "make the left arm longer" is
 an object, not a coordinate hunt.
+
+### Instances: draw it once, use it four times
+
+Voxel models are mostly repetition — wheels, windows, teeth, towers, and above
+all mirrored pairs. `create_instance` repeats an object as a **reference**
+rather than a copy, so editing the source changes every copy at once:
+
+```
+create_instance  source="ARM L"  name="ARM R"  dx=14  mirror=["x"]
+```
+
+`dx`/`dy`/`dz` place it *relative to the source*, so the copy keeps its offset
+when the source grows. `mirror` reflects about the middle of the source's own
+box, which is what puts a mirrored arm beside the body rather than across the
+scene.
+
+An instance gets one layer, on top of the stack, holding what the source
+composites to. Writes to it are refused, naming the source:
+
+```
+"ARM R" repeats "ARM" — edit "ARM" to change every copy, or detach it to
+make this one its own work
+```
+
+That is a rule rather than an obstacle: you edit the source, and all four
+wheels follow. When you want one copy to differ, `detach_instance` turns it
+into ordinary work — it keeps exactly the voxels it is showing, so nothing on
+screen changes, and its layer starts taking writes.
+
+`place_instance` moves or re-mirrors one. Placing is all or nothing: a
+placement that would put any part outside the scene is refused and nothing
+moves. Editing the *source* is different — a copy that no longer fits gets
+clipped rather than refusing an unrelated edit, and `list_objects` marks it
+`clipped` so it is not lost quietly.
+
+The file stores the reference, not the cells: an 87-voxel arm costs eight bytes
+as an instance against 348 as a copy, and reopening rebuilds it from whatever
+the source says *now*.
 
 ## Selecting and moving
 
