@@ -136,7 +136,7 @@ impl Roots {
         if self.0.is_empty() {
             return Err(
                 "this server edits the document the user already has open, and cannot \
-                        reach the filesystem. The user saves it."
+                 reach the filesystem. The user saves it."
                     .into(),
             );
         }
@@ -294,7 +294,7 @@ pub fn list() -> Vec<ToolInfo> {
     let color = json!({
         "type": "integer", "minimum": 0, "maximum": 255,
         "description": "Palette index. 0 is air, so it erases. Omit to use the colour \
-                        currently selected in the editor."
+         currently selected in the editor."
     });
     // A separate fragment from `color`, and the difference is the point: a
     // drawing tool takes 0 and erases with it, while a palette operation on 0
@@ -457,7 +457,7 @@ pub fn list() -> Vec<ToolInfo> {
                 "properties": {"path": {
                     "type": "string",
                     "description": "Relative to the root, e.g. \"robot.vxm\". A .vox extension \
-                                    reads MagicaVoxel's format; anything else reads .vxm."
+                     reads MagicaVoxel's format; anything else reads .vxm."
                 }},
                 "required": ["path"],
             }),
@@ -532,8 +532,8 @@ pub fn list() -> Vec<ToolInfo> {
                         "type": "array", "items": {"type": "integer"},
                         "minItems": 3, "maxItems": 3,
                         "description": "The layer's own extent, e.g. [64, 5, 64] for a ground \
-                                        plane. A starting size, not a wall — writes outside it \
-                                        enlarge it."
+                         plane. A starting size, not a wall — writes outside it \
+                         enlarge it."
                     },
                 },
             }),
@@ -691,8 +691,8 @@ pub fn list() -> Vec<ToolInfo> {
         ToolInfo {
             name: "trim_layer",
             description: "Shrink a layer's box to the voxels it actually holds. Boxes keep their \
-                 high-water mark while you work so that erasing and redrawing does not churn \
-                 them; this is how you hand the space back when a part is finished.",
+                          high-water mark while you work so that erasing and redrawing does not \
+                          churn them; this is how you hand the space back when a part is finished.",
             input_schema: json!({
                 "type": "object",
                 "properties": {"layer": layer},
@@ -1358,7 +1358,7 @@ fn dispatch(
                     "a": a, "b": b,
                     "a_to_b": a_moved, "b_to_a": b_moved,
                     "note": "the voxels moved, not the palette entries — each index \
-                             still means the colour it meant",
+                     still means the colour it meant",
                 })
             )))
         }
@@ -1378,7 +1378,7 @@ fn dispatch(
                     "colors": mapping.len(),
                     "color": editor.color,
                     "note": "every index has moved; anything you were holding is stale, \
-                             and the editor's selected colour has followed the mapping",
+                     and the editor's selected colour has followed the mapping",
                 })
             )))
         }
@@ -1869,7 +1869,7 @@ fn describe(editor: &Editor) -> String {
             "size": [sx, sy, sz],
             "coordinates": "0..size on each axis, +Y up; the same coordinates the file stores",
             "scene_note": "size is the range voxels may occupy, not an allocation — each layer \
-                           has its own origin and size and costs only that",
+             has its own origin and size and costs only that",
             "allocated_cells": model.allocated_cells(),
             "voxels": model.filled_count(),
             "bounds": bounds,
@@ -1884,7 +1884,7 @@ fn describe(editor: &Editor) -> String {
             "session_id": session_identity(),
             "unsaved": editor.is_dirty(),
             "note": "basic edits write to the active layer; apply_edits and procedural shape \
-                     tools accept explicit layers; palette edits affect all uses of an index",
+             tools accept explicit layers; palette edits affect all uses of an index",
         })
     )
 }

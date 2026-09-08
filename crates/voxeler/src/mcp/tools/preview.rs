@@ -10,7 +10,7 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
         "type": "boolean",
         "default": true,
         "description": "Show only the inspected cells; false keeps visible surrounding \
-                        geometry and cannot combine with include_hidden=true.",
+         geometry and cannot combine with include_hidden=true.",
     });
     properties["width"] =
         json!({"type": "integer", "minimum": 64, "maximum": 1024, "default": 512});
@@ -28,7 +28,7 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
         "maxItems": 6,
         "items": {"type": "string", "enum": VIEWS},
         "description": "Order in the labelled sheet; default \
-                        front/right/back/left/top/three_quarter.",
+         front/right/back/left/top/three_quarter.",
     });
     multi["width"]["maximum"] = json!(512);
     multi["height"]["maximum"] = json!(512);

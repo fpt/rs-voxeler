@@ -230,7 +230,7 @@ fn thumbnail(
 }
 
 const USAGE: &str = "\
-voxeler — a voxel model editor
+                     voxeler — a voxel model editor
 
 USAGE:
     voxeler [FILE] [--size N] [--mcp [PORT]]
