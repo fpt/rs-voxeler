@@ -80,7 +80,7 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
 
 pub(super) fn apply(editor: &mut Editor, name: &str, args: &Value) -> Result<CallResult, String> {
     let default_layer = if args.get("layer").is_some() {
-        layer_arg(editor, args)?
+        writable_layer_arg(editor, args)?
     } else {
         editor.active_layer()
     };
@@ -122,7 +122,7 @@ pub(super) fn apply(editor: &mut Editor, name: &str, args: &Value) -> Result<Cal
     for (i, (op, params)) in operations.iter().enumerate() {
         let result = (|| {
             let layer = if params.get("layer").is_some() {
-                layer_arg(editor, params)?
+                writable_layer_arg(editor, params)?
             } else {
                 default_layer
             };

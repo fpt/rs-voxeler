@@ -1,23 +1,28 @@
 //! `.vxm` — the editor's own format.
 //!
 //! ```text
-//! "VXM4"                       magic
+//! "VXM5"                       magic
 //! u16 u16 u16                  scene range x, y, z
 //! u8                           object count, 1..=MAX_OBJECTS; index 0 is root
 //! objects * {
-//!   u8                         flags; bit 0 is "visible"
+//!   u8                         flags; bit 0 "visible", bit 1 "is an instance"
 //!   u8                         parent index + 1, or 0 for the root
 //!   u8 + bytes                 name length, then UTF-8
+//!   if bit 1: {
+//!     u8                       the object this one repeats
+//!     i16 i16 i16              how far from it this copy sits
+//!     u8                       mirrored axes; bits 0, 1, 2 are x, y, z
+//!   }
 //! }
 //! u8                           layer count, 1..=MAX_LAYERS
 //! u8                           the layer that was being edited
 //! layers * {
-//!   u8                         flags; bit 0 is "visible"
+//!   u8                         flags; bit 0 "visible", bit 1 "derived"
 //!   u8                         the object this layer is part of
 //!   u8 + bytes                 name length, then UTF-8
 //!   u16 u16 u16                the layer's origin in the scene
 //!   u16 u16 u16                the layer's own size
-//!   u32                        voxel count
+//!   u32                        voxel count; always 0 for a derived layer
 //!   count * { u8 u8 u8 u8 }    x, y, z **within the layer**, palette index
 //! }
 //! 256 * { u8 u8 u8 }           palette, RGB
@@ -53,23 +58,40 @@
 //! a file is not a caller, and a chain that loops would make the visibility walk
 //! and every tree draw run forever.
 //!
-//! # `VXM3`, `VXM2` and `VXM1`
+//! # An instance is stored as a reference
 //!
-//! `VXM3` had layers with boxes but no objects. `VXM2` had layers but no boxes —
-//! every layer was the size of the scene. `VXM1` had no layers at all. All three
-//! still load: an older file arrives as a single unnamed root object holding
-//! every layer, and the two oldest are additionally **trimmed** on the way in, so
+//! Four wheels are one wheel and three references to it. Writing the cells four
+//! times would put the saving back where it was, so a derived layer writes its
+//! header — flags, object, name and box, so its place in the stack and its name
+//! survive — and a voxel count of zero. The cells come back from the reference
+//! when the file is opened, which is also what makes a model edited by a newer
+//! build of the source come back updated rather than stale.
+//!
+//! The reference is validated the way the tree is, but repaired rather than
+//! refused: a source that is missing, is the object itself, or is another
+//! instance drops the reference and leaves the layer as ordinary work. The
+//! layer under an instance is real work, and losing a model over one bad index
+//! would be the worse answer.
+//!
+//! # `VXM4`, `VXM3`, `VXM2` and `VXM1`
+//!
+//! `VXM4` had objects but no instances. `VXM3` had layers with boxes but no
+//! objects. `VXM2` had layers but no boxes — every layer was the size of the
+//! scene. `VXM1` had no layers at all. All four still load: a file older than
+//! v4 arrives as a single unnamed root object holding every layer, and the two
+//! oldest are additionally **trimmed** on the way in, so
 //! they gain the smaller shape simply by being opened. A format nobody else
 //! implements is one we are free to extend; a file already on disk is not free
-//! to rewrite itself. That rule has now held four times.
+//! to rewrite itself. That rule has now held five times.
 
-use crate::model::{Bounds, Object, MAX_LAYERS, MAX_OBJECTS};
+use crate::model::{Bounds, Instance, Object, MAX_LAYERS, MAX_OBJECTS};
 use crate::palette::{Palette, Rgb8};
 use crate::{Result, VoxelError, VoxelModel};
 
 use super::Reader;
 
-const MAGIC: &[u8; 4] = b"VXM4";
+const MAGIC: &[u8; 4] = b"VXM5";
+const MAGIC_V4: &[u8; 4] = b"VXM4";
 const MAGIC_V3: &[u8; 4] = b"VXM3";
 const MAGIC_V2: &[u8; 4] = b"VXM2";
 const MAGIC_V1: &[u8; 4] = b"VXM1";
@@ -97,20 +119,40 @@ pub fn encode(model: &VoxelModel) -> Vec<u8> {
     }
     out.push(model.object_count() as u8);
     for object in model.objects() {
-        out.push(u8::from(object.visible));
+        let mut flags = u8::from(object.visible);
+        if object.instance.is_some() {
+            flags |= 2;
+        }
+        out.push(flags);
         // Plus one, so the root's "no parent" is a zero and not an index that
         // happens to point at the root itself.
         out.push(object.parent.map_or(0, |p| p as u8 + 1));
         let name = clip(&object.name);
         out.push(name.len() as u8);
         out.extend_from_slice(name.as_bytes());
+        if let Some(at) = object.instance {
+            out.push(at.source as u8);
+            for d in at.offset {
+                out.extend_from_slice(&(d as i16).to_le_bytes());
+            }
+            out.push(
+                at.mirror
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |bits, (a, m)| bits | (u8::from(*m) << a)),
+            );
+        }
     }
 
     out.push(model.layer_count() as u8);
     out.push(model.active_layer() as u8);
 
     for (n, layer) in model.layers().iter().enumerate() {
-        out.push(u8::from(layer.visible));
+        let mut flags = u8::from(layer.visible);
+        if layer.is_generated() {
+            flags |= 2;
+        }
+        out.push(flags);
         out.push(layer.object as u8);
         let name = clip(&layer.name);
         out.push(name.len() as u8);
@@ -121,7 +163,13 @@ pub fn encode(model: &VoxelModel) -> Vec<u8> {
             out.extend_from_slice(&d.to_le_bytes());
         }
 
-        let filled: Vec<_> = model.iter_filled_in(n).collect();
+        // A derived layer's cells come from the reference its object holds, so
+        // writing them would spend the saving this exists to make.
+        let filled: Vec<_> = if layer.is_generated() {
+            Vec::new()
+        } else {
+            model.iter_filled_in(n).collect()
+        };
         out.extend_from_slice(&(filled.len() as u32).to_le_bytes());
         for ([x, y, z], index) in filled {
             // Relative to the layer's origin, so one byte covers a layer
@@ -145,7 +193,8 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
     let mut r = Reader::new(bytes);
     let magic = r.take(4)?;
     let version = match magic {
-        m if m == MAGIC => 4,
+        m if m == MAGIC => 5,
+        m if m == MAGIC_V4 => 4,
         m if m == MAGIC_V3 => 3,
         m if m == MAGIC_V2 => 2,
         m if m == MAGIC_V1 => 1,
@@ -171,10 +220,25 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
             let parent = r.u8()?;
             let name_len = r.u8()? as usize;
             let name = String::from_utf8_lossy(r.take(name_len)?).into_owned();
+            // Before v5 there were no instances, so the bit is not there to
+            // read and every object is work of its own.
+            let instance = if version >= 5 && flags & 2 != 0 {
+                let source = r.u8()? as usize;
+                let offset = [r.i16()?, r.i16()?, r.i16()?];
+                let bits = r.u8()?;
+                Some(Instance {
+                    source,
+                    offset: offset.map(i32::from),
+                    mirror: std::array::from_fn(|a| bits & (1 << a) != 0),
+                })
+            } else {
+                None
+            };
             objects.push(Object {
                 name,
                 visible: flags & 1 != 0,
                 parent: (parent > 0).then(|| parent as usize - 1),
+                instance,
             });
         }
         // Refused rather than repaired: a tree whose parents do not resolve, or
@@ -234,6 +298,11 @@ pub fn decode(bytes: &[u8]) -> Result<VoxelModel> {
         }
         model.set_active_layer(active);
     }
+
+    // The cells of a derived layer were not in the file. This is what puts
+    // them back, and it runs for every version: an older file has no instances,
+    // so it is a walk over nothing.
+    model.restore_instances();
 
     // An older file gave every layer the scene's size. Trimming here is what
     // makes opening one enough to gain the smaller shape.
@@ -313,6 +382,73 @@ mod tests {
         m.set(10, 20, 5, 42);
         m.palette_mut().set(42, Rgb8::new(1, 2, 3));
         m
+    }
+
+    /// The saving the format exists to make: the reference is written and the
+    /// cells are not, and the model comes back the same either way.
+    #[test]
+    fn an_instance_is_stored_as_a_reference_and_costs_no_cells() {
+        let mut m = VoxelModel::new(40, 16, 16);
+        let wheel = m.add_object(0, "WHEEL").unwrap();
+        let layer = m.add_layer(0, "WHEEL").unwrap();
+        m.set_layer_object(layer, wheel);
+        for x in 0..8 {
+            for y in 0..8 {
+                m.set_in(layer, x, y, 1, 5);
+            }
+        }
+        let copy = m
+            .add_instance(wheel, 0, "WHEEL R", [20, 0, 0], [true, false, false])
+            .unwrap();
+        let seen: Vec<_> = m.iter_filled().collect();
+        let bytes = encode(&m);
+
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back.iter_filled().collect::<Vec<_>>(), seen, "same picture");
+        let at = back.instance(copy).expect("still an instance");
+        assert_eq!(at.source, wheel);
+        assert_eq!(at.offset, [20, 0, 0]);
+        assert_eq!(at.mirror, [true, false, false]);
+        assert_eq!(back.layer_count(), m.layer_count());
+        assert_eq!(back.layers()[2].name, "WHEEL R");
+        assert!(back.layers()[2].is_generated());
+
+        // Detaching writes the same picture as cells, so the difference
+        // between the two files is exactly what the reference saved.
+        let mut flat = m.clone();
+        flat.detach_instance(copy);
+        assert_eq!(flat.iter_filled().collect::<Vec<_>>(), seen);
+        // 64 cells at four bytes each, against the eight the reference costs:
+        // one source index, three i16 of offset, one byte of mirrored axes.
+        assert_eq!(encode(&flat).len(), bytes.len() + 64 * 4 - 8);
+    }
+
+    /// A file is not a caller. A reference that cannot mean anything drops,
+    /// and the layer under it stays as ordinary work.
+    #[test]
+    fn a_broken_reference_costs_the_reference_and_not_the_model() {
+        let mut m = VoxelModel::new(16, 8, 8);
+        let part = m.add_object(0, "PART").unwrap();
+        let layer = m.add_layer(0, "PART").unwrap();
+        m.set_layer_object(layer, part);
+        m.set_in(layer, 1, 1, 1, 6);
+        let copy = m
+            .add_instance(part, 0, "COPY", [4, 0, 0], [false; 3])
+            .unwrap();
+        let mut bytes = encode(&m);
+
+        // The source byte of the second object's instance record. Point it at
+        // an object that is not there.
+        let at = bytes
+            .windows(4)
+            .position(|w| w == b"COPY")
+            .expect("the name is in the file")
+            + 4;
+        bytes[at] = 99;
+        let back = decode(&bytes).unwrap();
+        assert!(back.instance(copy).is_none(), "the reference went");
+        assert!(!back.layers()[2].is_generated(), "the layer is work now");
+        assert_eq!(back.get(1, 1, 1), 6, "and the source is untouched");
     }
 
     /// A model whose layers overlap, are named, and are not all shown — every

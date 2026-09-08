@@ -687,6 +687,7 @@ impl Editor {
         let owner = drag.owner;
         let label = if self.history.push(drag.stroke) {
             self.dirty = true;
+            self.refresh_instances();
             Some(self.tool.name())
         } else {
             None
@@ -721,6 +722,11 @@ impl Editor {
         match self.history.undo(&mut self.model) {
             Some(label) => {
                 self.dirty = true;
+                // An instance's cells are derived, so they are not in the
+                // history at all: putting the source back and rebuilding is
+                // what keeps the copies in step instead of restoring four
+                // stale ones.
+                self.refresh_instances();
                 self.invalidate_mesh();
                 self.status = format!("undo {label}");
             }
@@ -733,6 +739,11 @@ impl Editor {
         match self.history.redo(&mut self.model) {
             Some(label) => {
                 self.dirty = true;
+                // An instance's cells are derived, so they are not in the
+                // history at all: putting the source back and rebuilding is
+                // what keeps the copies in step instead of restoring four
+                // stale ones.
+                self.refresh_instances();
                 self.invalidate_mesh();
                 self.status = format!("redo {label}");
             }
@@ -1195,6 +1206,14 @@ impl Editor {
 
     /// Select a layer outright — what a click on the panel does.
     pub fn select_layer(&mut self, i: usize) {
+        // The same gate the MCP surface uses. A derived layer never becomes
+        // active, which is what keeps every active-layer tool — build, erase,
+        // paint, fill, paste, and every selection made from it — off an
+        // instance without a check of its own.
+        if let Some(why) = self.generated_refusal(i) {
+            self.status = why;
+            return;
+        }
         self.model.set_active_layer(i);
         self.report_layer();
     }
@@ -1204,9 +1223,27 @@ impl Editor {
     /// Wrapping would put the top of the stack one key away from the bottom,
     /// and a stack is a thing with ends — running off one and finding yourself
     /// at the other is how an edit lands on the wrong layer.
+    /// Whether `i` is a layer the editor will write to.
+    fn writable_layer(&self, i: usize) -> bool {
+        self.model
+            .layers()
+            .get(i)
+            .is_some_and(|l| !l.is_generated())
+    }
+
     pub fn cycle_layer(&mut self, delta: i32) {
         let n = self.model.layer_count() as i32;
-        let next = (self.model.active_layer() as i32 + delta).clamp(0, n - 1);
+        let mut next = (self.model.active_layer() as i32 + delta).clamp(0, n - 1);
+        // Step over an instance's copy rather than stopping on one. It cannot
+        // be made active, so landing there would make the key look broken; the
+        // step it costs is the one thing it can do instead.
+        while !self.writable_layer(next as usize) {
+            let after = next + delta.signum();
+            if !(0..n).contains(&after) {
+                return;
+            }
+            next = after;
+        }
         self.model.set_active_layer(next as usize);
         self.report_layer();
     }
@@ -1488,6 +1525,7 @@ impl Editor {
         });
         if changed {
             self.dirty = true;
+            self.refresh_instances();
         }
         self.invalidate_mesh();
     }
@@ -1683,7 +1721,105 @@ impl Editor {
 
     fn after_structural(&mut self) {
         self.dirty = true;
+        self.refresh_instances();
         self.invalidate_mesh();
+    }
+
+    /// Bring every instance back in step with the source it repeats.
+    ///
+    /// Called after anything that can change a source's cells — a stroke, a
+    /// batch, an undo, a structural change — rather than inside the write
+    /// itself. A rebuild walks the source, so charging it per voxel would make
+    /// a fill pay for it a million times; charging it per *commit* is the same
+    /// trade `Editor::mesh` already makes, and a stroke is the unit a user
+    /// thinks in.
+    fn refresh_instances(&mut self) {
+        if self.model.rebuild_instances() {
+            self.invalidate_mesh();
+        }
+    }
+
+    /// Repeat an object somewhere else, as a reference rather than a copy.
+    pub fn add_instance(
+        &mut self,
+        source: usize,
+        parent: usize,
+        name: &str,
+        offset: [i32; 3],
+        mirror: [bool; 3],
+    ) -> Result<usize, String> {
+        // Checked before the snapshot, so a refusal does not spend an undo.
+        self.model
+            .clone()
+            .add_instance(source, parent, name, offset, mirror)?;
+        let name = name.to_string();
+        let mut made = 0;
+        self.history
+            .restructure(&mut self.model, "add instance", |model| {
+                made = model
+                    .add_instance(source, parent, name, offset, mirror)
+                    .unwrap_or(0);
+            });
+        self.after_structural();
+        self.status = format!(
+            "{} repeats {}",
+            self.object_name(made),
+            self.object_name(source)
+        );
+        Ok(made)
+    }
+
+    /// Move or mirror an instance, all or nothing.
+    pub fn place_instance(
+        &mut self,
+        object: usize,
+        offset: [i32; 3],
+        mirror: [bool; 3],
+    ) -> Result<(), String> {
+        self.model.clone().place_instance(object, offset, mirror)?;
+        self.history
+            .restructure(&mut self.model, "place instance", |model| {
+                let _ = model.place_instance(object, offset, mirror);
+            });
+        self.after_structural();
+        self.status = format!("moved {}", self.object_name(object));
+        Ok(())
+    }
+
+    /// Turn an instance into ordinary work, keeping exactly what is on screen.
+    pub fn detach_instance(&mut self, object: usize) -> bool {
+        if self.model.instance(object).is_none() {
+            self.status = format!("{} is not an instance", self.object_name(object));
+            return false;
+        }
+        let name = self.object_name(object);
+        self.history
+            .restructure(&mut self.model, "detach instance", |model| {
+                model.detach_instance(object);
+            });
+        self.after_structural();
+        self.status = format!("{name} is its own work now");
+        true
+    }
+
+    /// Why a write to `layer` was refused, if it was.
+    ///
+    /// A tool acting only on the active layer is a rule; a tool that ignores
+    /// you with no explanation is a bug report. This is the instance half of
+    /// that: the message names the source to edit instead, and the way out.
+    pub fn generated_refusal(&self, layer: usize) -> Option<String> {
+        let l = self.model.layers().get(layer)?;
+        if !l.is_generated() {
+            return None;
+        }
+        let at = self.model.instance(l.object)?;
+        Some(format!(
+            "\"{}\" repeats \"{}\" — edit \"{}\" to change every copy, or detach it to make \
+             this one its own work",
+            self.object_name(l.object),
+            self.object_name(at.source),
+            self.object_name(at.source),
+        ))
     }
 
     // -- renaming --------------------------------------------------------

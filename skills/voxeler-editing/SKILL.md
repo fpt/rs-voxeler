@@ -100,6 +100,7 @@ a paste you undid can be pasted again.
 ```
 list_objects / create_object / rename_object / delete_object
 set_layer_object / reparent_object / set_object_visible / move_object
+create_instance / place_instance / detach_instance
 select_layer / add_layer / set_layer_visible / trim_layer
 set_color / find_color / set_palette_color
 count_by_color / select_by_color
@@ -128,6 +129,13 @@ next session.
 without re-creating a voxel — reach for it before erasing and redrawing a limb
 somewhere else. It is refused outright if any part of the subtree would leave
 the scene.
+
+`create_instance` repeats a part by reference: editing the source changes every
+copy. Check `list_objects` for an `instance` field before editing anything — a
+write to a copy is refused and names the source to edit instead, and a row
+marked `clipped` is a copy an earlier edit pushed off the edge of the scene.
+`place_instance` moves one; `detach_instance` turns it into ordinary work,
+keeping exactly what is on screen, when one copy is meant to diverge.
 
 `delete_object` removes a label, not the work: children and layers move up to
 its parent.

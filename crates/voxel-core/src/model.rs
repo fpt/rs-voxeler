@@ -51,6 +51,9 @@ pub struct Object {
     pub visible: bool,
     /// The object this is part of. `None` only for the root.
     pub parent: Option<usize>,
+    /// Set when this object repeats another one rather than holding work of
+    /// its own. `None` for an ordinary object, which is almost all of them.
+    pub instance: Option<Instance>,
 }
 
 impl Object {
@@ -59,6 +62,45 @@ impl Object {
             name: name.into(),
             visible: true,
             parent,
+            instance: None,
+        }
+    }
+}
+
+/// What an instance repeats, and where it puts it.
+///
+/// An instance is a *reference*: the four wheels of a car are one wheel drawn
+/// once, and editing that wheel moves all four. What is stored is the
+/// reference, not the cells — [`VoxelModel::rebuild_instances`] derives the
+/// cells from it, and `.vxm` writes only this.
+///
+/// The placement is a **delta, not a destination**. Storing "the low corner
+/// lands at [24, 0, 0]" would come apart the moment the source grew a voxel on
+/// its left: the corner would move and the instance would not. A delta says
+/// "over there, relative to the original", which is what a mirrored pair or a
+/// row of wheels actually means, and it survives every edit to the source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Instance {
+    /// The object whose contents this one repeats.
+    pub source: usize,
+    /// How far from the source this copy sits.
+    pub offset: [i32; 3],
+    /// Reflect about the middle of the source's own occupied box, per axis.
+    ///
+    /// About the source's box rather than the scene's, or a mirrored arm would
+    /// land on the far side of the *world* instead of beside the body it
+    /// belongs to. `lo + hi - v` needs no centre cell, so this is exact at any
+    /// parity — the reason [`Editor::flip_selection`] has no rounding problem
+    /// either.
+    pub mirror: [bool; 3],
+}
+
+impl Instance {
+    pub fn new(source: usize) -> Self {
+        Self {
+            source,
+            offset: [0; 3],
+            mirror: [false; 3],
         }
     }
 }
@@ -189,6 +231,11 @@ pub struct Layer {
     /// each time would put the depth of the tree inside `get`. The one place it
     /// moves is [`VoxelModel::refresh_shown`].
     shown: bool,
+    /// Set when this layer is an instance's derived copy rather than work
+    /// somebody did. Derived layers are refused by every write, rewritten
+    /// wholesale by [`VoxelModel::rebuild_instances`], and left out of the
+    /// file — the reference they came from is what is saved.
+    generated: bool,
     bounds: Bounds,
     voxels: Vec<u8>,
     /// How many of this layer's own cells are not air, kept in step with
@@ -225,6 +272,7 @@ impl Layer {
             filled: 0,
             object: 0,
             shown: true,
+            generated: false,
         }
     }
 
@@ -434,6 +482,50 @@ impl Layer {
         true
     }
 
+    /// Whether this layer is an instance's derived copy rather than work.
+    ///
+    /// Derived layers are refused by every write and rewritten wholesale by
+    /// [`VoxelModel::rebuild_instances`]. Nothing else in the codebase needs to
+    /// know, which is the point: they composite, mesh, raycast and export as
+    /// ordinary layers, because that is what they are once they exist.
+    pub fn is_generated(&self) -> bool {
+        self.generated
+    }
+
+    /// Replace every cell at once, from a list already known to be inside
+    /// `next`.
+    ///
+    /// Tallied as it builds, never by a second walk over the result — the rule
+    /// [`reshape`](Self::reshape) follows and for the same measured reason.
+    fn refill(&mut self, next: Bounds, cells: &[([i32; 3], u8)]) {
+        self.bounds = next;
+        self.voxels = vec![0; next.cells()];
+        self.planes = [
+            vec![0; next.size[0] as usize],
+            vec![0; next.size[1] as usize],
+            vec![0; next.size[2] as usize],
+        ];
+        self.filled = 0;
+        for ([x, y, z], v) in cells {
+            if *v == 0 || !next.contains(*x, *y, *z) {
+                continue;
+            }
+            let i = next.index(*x, *y, *z);
+            if std::mem::replace(&mut self.voxels[i], *v) != 0 {
+                continue;
+            }
+            self.filled += 1;
+            let local = [
+                (*x - next.origin[0] as i32) as usize,
+                (*y - next.origin[1] as i32) as usize,
+                (*z - next.origin[2] as i32) as usize,
+            ];
+            for (axis, at) in self.planes.iter_mut().zip(local) {
+                axis[at] += 1;
+            }
+        }
+    }
+
     /// The smallest box holding every filled cell, or an empty one.
     ///
     /// A scan of the plane tallies rather than of the cells — a few hundred
@@ -456,6 +548,23 @@ impl Layer {
         }
         Bounds::new(origin, size)
     }
+}
+
+/// The smallest box holding every cell in a list, or an empty one.
+fn box_of(cells: &[([i32; 3], u8)]) -> Bounds {
+    let Some(first) = cells.first().map(|(p, _)| *p) else {
+        return Bounds::default();
+    };
+    let (lo, hi) = cells.iter().fold((first, first), |(lo, hi), (p, _)| {
+        (
+            std::array::from_fn(|a| lo[a].min(p[a])),
+            std::array::from_fn(|a| hi[a].max(p[a])),
+        )
+    });
+    Bounds::new(
+        std::array::from_fn(|a| lo[a] as u16),
+        std::array::from_fn(|a| (hi[a] - lo[a] + 1) as u16),
+    )
 }
 
 /// A scene: a range on each axis, and the layers placed within it.
@@ -775,6 +884,13 @@ impl VoxelModel {
         if !self.contains(x, y, z) || layer >= self.layers.len() {
             return 0;
         }
+        // An instance is a reference. Letting a write land here would put a
+        // cell on a layer the next rebuild throws away, which reads as an edit
+        // that silently did nothing. `Editor` refuses it with the source's
+        // name; this is the floor under that, so no path can get past it.
+        if self.layers[layer].generated {
+            return 0;
+        }
         let l = &mut self.layers[layer];
         if !l.bounds.contains(x, y, z) {
             if value == 0 {
@@ -1039,6 +1155,293 @@ impl VoxelModel {
             .collect()
     }
 
+    // -- instances -------------------------------------------------------
+
+    /// What `object` repeats, if it is an instance rather than work of its own.
+    pub fn instance(&self, object: usize) -> Option<Instance> {
+        self.objects.get(object).and_then(|o| o.instance)
+    }
+
+    /// Every cell the source of an instance shows, in scene coordinates.
+    ///
+    /// The source's *content*, not its appearance: a hidden layer is repeated
+    /// like any other. Visibility is a property of the view, and an instance
+    /// that emptied itself when somebody switched a layer off while working
+    /// would be a reference to the screen rather than to the part.
+    fn source_cells(&self, source: usize) -> Vec<([i32; 3], u8)> {
+        let subtree = self.subtree(source);
+        let mut seen: std::collections::BTreeMap<[i32; 3], u8> = Default::default();
+        // Bottom up, so the layer on top wins the cell — the rule `get`
+        // follows, so an instance looks like what its source looks like.
+        for layer in &self.layers {
+            // A derived layer is never a source. Without this an instance
+            // reparented under the object it repeats would feed on itself, and
+            // each rebuild would grow the copy it had just made.
+            if layer.generated || !subtree.contains(&layer.object) {
+                continue;
+            }
+            for ([x, y, z], v) in layer.iter_filled() {
+                seen.insert([x as i32, y as i32, z as i32], v);
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// The single layer an instance object derives, if it has one.
+    fn generated_layer(&self, object: usize) -> Option<usize> {
+        (0..self.layers.len())
+            .find(|n| self.layers[*n].generated && self.layers[*n].object == object)
+    }
+
+    /// Where an instance's cells land, and whether any fell outside the scene.
+    ///
+    /// The mirror reflects about the middle of the *source's own* box, so a
+    /// mirrored arm lands beside the body rather than across the world, and
+    /// `lo + hi - v` needs no centre cell — exact at either parity.
+    fn placed_cells(&self, at: Instance) -> (Vec<([i32; 3], u8)>, bool) {
+        let cells = self.source_cells(at.source);
+        let Some(first) = cells.first().map(|(p, _)| *p) else {
+            return (Vec::new(), false);
+        };
+        let (lo, hi) = cells.iter().fold((first, first), |(lo, hi), (p, _)| {
+            (
+                std::array::from_fn(|a| lo[a].min(p[a])),
+                std::array::from_fn(|a| hi[a].max(p[a])),
+            )
+        });
+        let mut clipped = false;
+        let mut out = Vec::with_capacity(cells.len());
+        for (p, v) in cells {
+            let q: [i32; 3] = std::array::from_fn(|a| {
+                let m = if at.mirror[a] {
+                    lo[a] + hi[a] - p[a]
+                } else {
+                    p[a]
+                };
+                m + at.offset[a]
+            });
+            if self.contains(q[0], q[1], q[2]) {
+                out.push((q, v));
+            } else {
+                clipped = true;
+            }
+        }
+        (out, clipped)
+    }
+
+    /// Redo every instance's layer from the source it names.
+    ///
+    /// Derived state, recomputed rather than maintained, and the one place it
+    /// moves. An instance's cells are therefore never in the undo history: the
+    /// history puts the *source* back and this runs again, which is why undo
+    /// through a source edit leaves the wheels in step instead of restoring
+    /// four stale copies.
+    ///
+    /// A cell pushed outside the scene by an edit to the source is **clipped**,
+    /// not refused. Placing an instance is all-or-nothing, because that is a
+    /// thing somebody asked for and can be told about; a rebuild is a
+    /// consequence of an unrelated edit, and refusing there would leave every
+    /// instance stale with nothing to press.
+    ///
+    /// Returns whether anything moved, so a caller can skip the recount.
+    pub fn rebuild_instances(&mut self) -> bool {
+        let mut changed = false;
+        for object in 0..self.objects.len() {
+            let Some(at) = self.objects[object].instance else {
+                continue;
+            };
+            let Some(n) = self.generated_layer(object) else {
+                continue;
+            };
+            let (cells, _) = self.placed_cells(at);
+            let bounds = box_of(&cells);
+            let layer = &mut self.layers[n];
+            if layer.bounds == bounds && layer.filled == cells.len() {
+                // Same box and same count is not proof, so the cells are still
+                // compared — but only after two loads have ruled out the
+                // common case, which is that nothing about the source moved.
+                if cells
+                    .iter()
+                    .all(|([x, y, z], v)| layer.at(*x, *y, *z) == *v)
+                {
+                    continue;
+                }
+            }
+            layer.refill(bounds, &cells);
+            changed = true;
+        }
+        if changed {
+            self.refresh_count();
+            self.dirty_all();
+        }
+        changed
+    }
+
+    /// Add an object that repeats `source`, with one derived layer on top.
+    ///
+    /// Refused when the source does not exist, is the root, or is itself an
+    /// instance — an instance of an instance would need a rebuild order, and
+    /// nothing here has asked for one yet. Refused too when the placement puts
+    /// any cell outside the scene, because a placement is something a caller
+    /// chose and can be told to choose differently.
+    pub fn add_instance(
+        &mut self,
+        source: usize,
+        parent: usize,
+        name: impl Into<String>,
+        offset: [i32; 3],
+        mirror: [bool; 3],
+    ) -> Result<usize, String> {
+        if source == 0 || source >= self.objects.len() {
+            return Err(format!("there is no object {source} to instance"));
+        }
+        if self.objects[source].instance.is_some() {
+            return Err(format!(
+                "\"{}\" is itself an instance; instance the object it repeats instead",
+                self.objects[source].name
+            ));
+        }
+        if parent >= self.objects.len() {
+            return Err(format!("there is no object {parent} to put it under"));
+        }
+        if self.objects.len() >= MAX_OBJECTS {
+            return Err(format!("a scene holds at most {MAX_OBJECTS} objects"));
+        }
+        if self.layers.len() >= MAX_LAYERS {
+            return Err(format!(
+                "a scene holds at most {MAX_LAYERS} layers, and an instance needs one"
+            ));
+        }
+        let at = Instance {
+            source,
+            offset,
+            mirror,
+        };
+        let (cells, clipped) = self.placed_cells(at);
+        if clipped {
+            return Err("that placement would put part of the instance outside the scene".into());
+        }
+        if cells.is_empty() {
+            return Err(format!(
+                "\"{}\" has no voxels to repeat",
+                self.objects[source].name
+            ));
+        }
+        let name = name.into();
+        let mut object = Object::new(name.clone(), Some(parent));
+        object.instance = Some(at);
+        self.objects.push(object);
+        let i = self.objects.len() - 1;
+        // On top of the stack, where a new layer goes. An instance is a copy of
+        // something already placed, and putting it under the work it repeats
+        // would hide it behind its own source wherever the two touch.
+        let mut layer = Layer::new(name, Bounds::default());
+        layer.object = i;
+        layer.generated = true;
+        layer.refill(box_of(&cells), &cells);
+        self.layers.push(layer);
+        self.refresh_shown();
+        self.refresh_count();
+        self.dirty_all();
+        Ok(i)
+    }
+
+    /// Move or mirror an instance, all or nothing.
+    pub fn place_instance(
+        &mut self,
+        object: usize,
+        offset: [i32; 3],
+        mirror: [bool; 3],
+    ) -> Result<(), String> {
+        let Some(mut at) = self.instance(object) else {
+            return Err(format!("object {object} is not an instance"));
+        };
+        at.offset = offset;
+        at.mirror = mirror;
+        let (_, clipped) = self.placed_cells(at);
+        if clipped {
+            return Err("that placement would put part of the instance outside the scene".into());
+        }
+        self.objects[object].instance = Some(at);
+        self.rebuild_instances();
+        Ok(())
+    }
+
+    /// Put the derived layers back after a load, and fill them from their
+    /// references.
+    ///
+    /// A file carries an instance's header and none of its cells, so opening
+    /// one leaves a layer that is the right shape and empty. This marks it
+    /// derived and hands it to [`rebuild_instances`](Self::rebuild_instances) —
+    /// which is also why a model saved against an older version of its source
+    /// comes back matching the source it has now, rather than matching what the
+    /// source looked like when it was saved.
+    pub fn restore_instances(&mut self) {
+        for object in 0..self.objects.len() {
+            if self.objects[object].instance.is_none() {
+                continue;
+            }
+            match self.generated_layer(object) {
+                Some(_) => {}
+                // The header was not in the file either — an instance whose
+                // layer somebody removed. One is made for it, on top.
+                None => match (0..self.layers.len()).find(|n| self.layers[*n].object == object) {
+                    Some(n) => self.layers[n].generated = true,
+                    None if self.layers.len() < MAX_LAYERS => {
+                        let name = self.objects[object].name.clone();
+                        let mut layer = Layer::new(name, Bounds::default());
+                        layer.object = object;
+                        layer.generated = true;
+                        self.layers.push(layer);
+                    }
+                    // No room for it. The reference goes rather than the file.
+                    None => self.objects[object].instance = None,
+                },
+            }
+        }
+        self.refresh_shown();
+        self.rebuild_instances();
+    }
+
+    /// Turn an instance into ordinary work: keep the cells, drop the reference.
+    ///
+    /// The way out of the refusal a write to an instance gets. What is on
+    /// screen does not change — the layer already holds exactly these cells —
+    /// so this is a change of what the layer *means*, not of what it shows.
+    pub fn detach_instance(&mut self, object: usize) -> bool {
+        if self.instance(object).is_none() {
+            return false;
+        }
+        self.objects[object].instance = None;
+        if let Some(n) = self.generated_layer(object) {
+            self.layers[n].generated = false;
+        }
+        true
+    }
+
+    /// Whether part of an instance is falling off the edge of the scene.
+    ///
+    /// A rebuild clips rather than refuses — it is a consequence of an edit
+    /// somewhere else, and refusing there would leave every instance stale with
+    /// nothing to press. But a copy quietly losing half of itself is exactly
+    /// the kind of thing nobody notices, so it is reported where the instance
+    /// is listed. Move it, or make room.
+    pub fn instance_clipped(&self, object: usize) -> bool {
+        self.instance(object)
+            .is_some_and(|at| self.placed_cells(at).1)
+    }
+
+    /// Whether an object is the source of any instance.
+    pub fn instances_of(&self, source: usize) -> Vec<usize> {
+        (0..self.objects.len())
+            .filter(|i| {
+                self.objects[*i]
+                    .instance
+                    .is_some_and(|a| a.source == source)
+            })
+            .collect()
+    }
+
     /// Whether an object and every object above it is visible.
     fn object_shown(&self, object: usize) -> bool {
         let mut at = Some(object);
@@ -1107,6 +1510,32 @@ impl VoxelModel {
                 l.object = 0;
             }
         }
+        // A file is not a caller. A reference to an object that is not there,
+        // to the object itself, or to another instance is dropped rather than
+        // refused: the layer under it is real work, and losing the whole model
+        // over a bad index would be the worse answer.
+        let mut objects = objects;
+        for i in 0..objects.len() {
+            let bad = objects[i]
+                .instance
+                .is_some_and(|a| a.source == i || a.source == 0 || a.source >= objects.len());
+            if bad {
+                objects[i].instance = None;
+            }
+        }
+        for i in 0..objects.len() {
+            if objects[i]
+                .instance
+                .is_some_and(|a| objects[a.source].instance.is_some())
+            {
+                objects[i].instance = None;
+            }
+        }
+        for l in &mut self.layers {
+            if l.generated && objects[l.object].instance.is_none() {
+                l.generated = false;
+            }
+        }
         self.objects = objects;
         self.refresh_shown();
         self.refresh_count();
@@ -1134,6 +1563,14 @@ impl VoxelModel {
             return false;
         }
         let parent = self.objects[i].parent.unwrap_or(0);
+        // Removing a label must not remove the work, and an instance's work is
+        // the copy it is holding. Whether this object was the source of
+        // instances or was one itself, what is on screen stays exactly as it
+        // is — the layers become ordinary work, filed under the parent.
+        self.detach_instance(i);
+        for dependent in self.instances_of(i) {
+            self.detach_instance(dependent);
+        }
         for o in &mut self.objects {
             if o.parent == Some(i) {
                 o.parent = Some(parent);
@@ -1151,6 +1588,14 @@ impl VoxelModel {
             match o.parent {
                 Some(p) if p > i => o.parent = Some(p - 1),
                 _ => {}
+            }
+            // A source index is an index into this same arena, so it renumbers
+            // with everything else. The ones pointing *at* `i` are already gone
+            // — `detach_instance` cleared them above.
+            if let Some(a) = &mut o.instance {
+                if a.source > i {
+                    a.source -= 1;
+                }
             }
         }
         for l in &mut self.layers {
@@ -1436,6 +1881,182 @@ fn chunk_count(size: [u16; 3]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a source object holding one layer, and return `(object, layer)`.
+    fn part(m: &mut VoxelModel, name: &str, cells: &[[i32; 3]]) -> (usize, usize) {
+        let object = m.add_object(0, name).unwrap();
+        let layer = m.add_layer(m.layer_count() - 1, name).unwrap();
+        m.set_layer_object(layer, object);
+        for c in cells {
+            m.set_in(layer, c[0], c[1], c[2], 7);
+        }
+        (object, layer)
+    }
+
+    /// The whole point: a copy that follows the thing it copied.
+    #[test]
+    fn an_instance_repeats_its_source_and_follows_every_edit_to_it() {
+        let mut m = VoxelModel::new(16, 8, 8);
+        let (wheel, layer) = part(&mut m, "WHEEL", &[[1, 1, 1], [1, 2, 1]]);
+        let copy = m
+            .add_instance(wheel, 0, "WHEEL R", [8, 0, 0], [false; 3])
+            .unwrap();
+
+        assert_eq!(m.get(9, 1, 1), 7, "the copy is there");
+        assert_eq!(m.get(9, 2, 1), 7);
+        assert_eq!(m.filled_count(), 4);
+
+        // Editing the source moves the copy, which is the difference between
+        // one wheel referenced twice and two wheels drawn.
+        m.set_in(layer, 1, 3, 1, 9);
+        m.rebuild_instances();
+        assert_eq!(m.get(9, 3, 1), 9, "the copy grew with its source");
+        assert_eq!(m.filled_count(), 6);
+
+        // And erasing on the source takes it back off the copy.
+        m.set_in(layer, 1, 3, 1, 0);
+        m.rebuild_instances();
+        assert_eq!(m.get(9, 3, 1), 0);
+        assert_eq!(m.filled_count(), 4);
+        assert_eq!(m.instances_of(wheel), vec![copy]);
+    }
+
+    /// About the source's own box, not the scene's — or a mirrored arm lands on
+    /// the far side of the world instead of beside the body.
+    #[test]
+    fn a_mirror_reflects_about_the_sources_own_box() {
+        let mut m = VoxelModel::new(32, 8, 8);
+        // An L, so a reflection is visible rather than a symmetry.
+        let (arm, _) = part(&mut m, "ARM L", &[[2, 1, 1], [3, 1, 1], [2, 2, 1]]);
+        m.add_instance(arm, 0, "ARM R", [10, 0, 0], [true, false, false])
+            .unwrap();
+
+        // The source spans x 2..=3, so the reflection maps 2 -> 3 and 3 -> 2,
+        // and the offset then carries the pair 10 to the right.
+        assert_eq!(m.get(13, 1, 1), 7);
+        assert_eq!(m.get(12, 1, 1), 7);
+        assert_eq!(m.get(13, 2, 1), 7, "the short arm swapped sides");
+        assert_eq!(m.get(12, 2, 1), 0);
+        assert_eq!(m.filled_count(), 6);
+    }
+
+    /// A write to an instance would land on a layer the next rebuild throws
+    /// away, which reads as an edit that silently did nothing.
+    #[test]
+    fn an_instance_layer_refuses_every_write() {
+        let mut m = VoxelModel::new(16, 8, 8);
+        let (wheel, _) = part(&mut m, "WHEEL", &[[1, 1, 1]]);
+        let copy = m
+            .add_instance(wheel, 0, "WHEEL R", [8, 0, 0], [false; 3])
+            .unwrap();
+        let n = m.generated_layer(copy).unwrap();
+
+        assert_eq!(m.set_in(n, 9, 5, 5, 3), 0);
+        assert_eq!(m.get(9, 5, 5), 0, "nothing landed");
+        assert_eq!(m.filled_count(), 2);
+
+        // Detaching is the way out, and it changes what the layer *means*
+        // rather than what it holds.
+        let before: Vec<_> = m.iter_filled().collect();
+        assert!(m.detach_instance(copy));
+        assert_eq!(m.iter_filled().collect::<Vec<_>>(), before);
+        assert!(m.instance(copy).is_none());
+        assert_eq!(m.set_in(n, 9, 5, 5, 3), 0);
+        assert_eq!(m.get(9, 5, 5), 3, "and now it takes writes");
+
+        // Detached means detached: the source moving on does not follow.
+        m.set_in(1, 1, 2, 1, 7);
+        m.rebuild_instances();
+        assert_eq!(m.get(9, 2, 1), 0);
+    }
+
+    /// Removing a label must not remove the work — including the work an
+    /// instance is holding.
+    #[test]
+    fn removing_a_source_leaves_its_copies_standing() {
+        let mut m = VoxelModel::new(16, 8, 8);
+        let (wheel, _) = part(&mut m, "WHEEL", &[[1, 1, 1]]);
+        let copy = m
+            .add_instance(wheel, 0, "WHEEL R", [8, 0, 0], [false; 3])
+            .unwrap();
+        let seen: Vec<_> = m.iter_filled().collect();
+
+        assert!(m.remove_object(wheel));
+        let after: Vec<_> = m.iter_filled().collect();
+        assert_eq!(after, seen, "nothing vanished");
+        // `copy` renumbered down with everything above the hole.
+        assert!(m.instance(copy - 1).is_none(), "and it is its own work now");
+        m.rebuild_instances();
+        assert_eq!(m.iter_filled().collect::<Vec<_>>(), seen);
+    }
+
+    /// An instance of an instance would need a rebuild order, and a placement
+    /// off the edge of the scene is something the caller can be told about.
+    #[test]
+    fn instancing_refuses_what_it_cannot_mean() {
+        let mut m = VoxelModel::new(16, 8, 8);
+        let (wheel, _) = part(&mut m, "WHEEL", &[[1, 1, 1]]);
+        let copy = m
+            .add_instance(wheel, 0, "B", [8, 0, 0], [false; 3])
+            .unwrap();
+
+        assert!(m.add_instance(copy, 0, "C", [0; 3], [false; 3]).is_err());
+        assert!(m.add_instance(0, 0, "C", [0; 3], [false; 3]).is_err());
+        assert!(m.add_instance(99, 0, "C", [0; 3], [false; 3]).is_err());
+        assert!(m
+            .add_instance(wheel, 0, "C", [99, 0, 0], [false; 3])
+            .is_err());
+        let empty = m.add_object(0, "NOTHING").unwrap();
+        assert!(m.add_instance(empty, 0, "C", [0; 3], [false; 3]).is_err());
+        // A refused placement leaves the one that worked exactly as it was.
+        assert!(m.place_instance(copy, [99, 0, 0], [false; 3]).is_err());
+        assert_eq!(m.instance(copy).unwrap().offset, [8, 0, 0]);
+        assert_eq!(m.get(9, 1, 1), 7);
+    }
+
+    /// The instance half of `the_maintained_count_never_drifts_from_a_fresh_walk`:
+    /// every operation that can change a source, then the cheap answer against
+    /// the expensive one.
+    #[test]
+    fn an_instance_never_drifts_from_the_source_it_repeats() {
+        let mut m = VoxelModel::new(24, 12, 12);
+        let (body, layer) = part(&mut m, "BODY", &[[2, 2, 2], [3, 2, 2], [2, 3, 2]]);
+        let copy = m
+            .add_instance(body, 0, "COPY", [8, 0, 0], [true, false, false])
+            .unwrap();
+
+        let check = |m: &mut VoxelModel, what: &str| {
+            m.rebuild_instances();
+            assert_eq!(m.filled_count(), m.recount(), "{what}: count");
+            let at = m.instance(copy).unwrap();
+            let (cells, _) = m.placed_cells(at);
+            let n = m.generated_layer(copy).unwrap();
+            assert_eq!(
+                m.layers()[n].filled_count(),
+                cells.len(),
+                "{what}: the copy holds what the source places"
+            );
+            for ([x, y, z], v) in cells {
+                assert_eq!(m.layers()[n].at(x, y, z), v, "{what}: at {x},{y},{z}");
+            }
+            let l = &m.layers()[n];
+            assert_eq!(l.occupied(), l.bounds(), "{what}: box");
+        };
+
+        check(&mut m, "as placed");
+        m.set_in(layer, 5, 5, 5, 4);
+        check(&mut m, "after a write that grows the box");
+        m.set_in(layer, 2, 2, 2, 0);
+        check(&mut m, "after erasing the furthest cell");
+        m.set_in(layer, 3, 2, 2, 11);
+        check(&mut m, "after a recolour");
+        m.place_instance(copy, [10, 1, 0], [false; 3]).unwrap();
+        check(&mut m, "after moving the copy");
+        m.set_layer_visible(layer, false);
+        check(&mut m, "with the source layer switched off");
+        m.trim_layer(layer);
+        check(&mut m, "after a trim");
+    }
 
     #[test]
     fn set_reports_the_previous_index() {

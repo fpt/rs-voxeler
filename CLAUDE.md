@@ -130,10 +130,68 @@ recomputed by `refresh_shown` — the single place it moves, for the reason
 `get`. The layer's own flag never changes when an object hides it, so showing
 the object again restores exactly what was shown before.
 
-The layer panel draws three states for that reason — filled for on screen,
-hollow with a pip for "switched on, hidden by an object", hollow for switched
-off here. Filled would be a lie about the screen; plain hollow would make `V`
-look broken.
+The layer panel draws four states for that reason — filled for on screen,
+filled with a notch for an instance's copy, hollow with a pip for "switched on,
+hidden by an object", hollow for switched off here. Filled would be a lie about
+the screen; plain hollow would make `V` look broken.
+
+### An instance is a reference, and it is baked
+
+Four wheels are one wheel and three references to it. `Object::instance` is
+`Some(Instance { source, offset, mirror })` for an object that repeats another
+one, and the whole feature turns on where that reference is *resolved*.
+
+It is not resolved in `get`. The rule above — that `get`, the raycaster and the
+extractor know nothing about objects — is the one thing here worth protecting,
+and putting a stored transform inside the hottest read to save a byte per cell
+would trade it away. So an instance owns **one ordinary layer**, marked
+`Layer::generated`, holding the source subtree's composite, and
+`rebuild_instances` rewrites it whenever the source moves. Compositing, meshing,
+the raycaster, `owner_at`, `occupied_bounds` and every maintained tally needed no
+changes at all, because a derived layer *is* a layer.
+
+**One layer, not one per source layer.** A rebuild must never change the layer
+*count*: removing or inserting a layer renumbers the ones around it, and every
+`Edit::layer` already on the undo stack would start pointing at the wrong grid.
+Flattening the source to a single grid is what makes a rebuild a pure cell
+operation, and it is the same answer `.vox` export already gives.
+
+Five rules:
+
+- **Derived cells are never in the history.** Undo puts the *source* back and
+  the rebuild runs again, which is why undoing through a source edit leaves the
+  copies in step instead of restoring four stale ones. `Editor::refresh_instances`
+  is the one place it is asked for, at the commit points — a stroke, a batch, an
+  undo, a structural change — never inside `set_in`, or a fill would pay for a
+  source walk a million times.
+- **An instance repeats content, not appearance.** Hidden layers of the source
+  are repeated like any other. Visibility is a property of the view, and a copy
+  that emptied itself because somebody switched a layer off while working would
+  be a reference to the screen rather than to the part.
+- **The placement is a delta, not a destination.** "The corner lands at
+  [24,0,0]" comes apart the moment the source grows a voxel on its left. The
+  mirror reflects about the middle of the *source's own* box, so a mirrored arm
+  lands beside the body instead of across the world, and `lo + hi - v` needs no
+  centre cell — exact at either parity, the same reason `flip_selection` has no
+  rounding problem.
+- **Placing is all or nothing; rebuilding clips.** A placement is something a
+  caller chose and can be told to choose differently, so one cell outside the
+  scene refuses the whole thing. A rebuild is a *consequence* of an unrelated
+  edit, and refusing there would leave every instance stale with nothing to
+  press — so it clips, and `instance_clipped` is how the listing says so. Found
+  by driving the real binary: a stray voxel far out on a source grew its box and
+  carried the copy over the edge in silence.
+- **A write to a copy is refused, and names the source.** Not detached-on-write:
+  that quietly stops tracking the source, and the user finds out much later when
+  an edit no longer propagates. `select_layer` is the single gate — a derived
+  layer never becomes active, so build, erase, paint, fill, paste and every
+  selection made from the active layer are off it without a check of their own.
+  `detach_instance` is the way out, and changes what the layer *means* rather
+  than what it holds.
+
+Removing an object detaches both directions — the instances of it, and it if it
+was one — because removing a label must not remove the work, and an instance's
+work is the copy it is holding.
 
 ### A layer is a grid of its own
 
@@ -846,17 +904,26 @@ from the one that was asked for.
 - **A missing file is not an error.** `voxeler robot.vxm` in an empty directory
   starts a model. Refusing would mean the tool could only open what some other
   tool had already made.
-- **The file stores each layer, not the composite.** `.vxm` is `VXM4`: a scene
+- **An instance costs eight bytes on disk.** `.vxm` writes the reference — one
+  source index, three `i16` of offset, one byte of mirrored axes — and a voxel
+  count of zero for the derived layer, whose header still goes out so its place
+  in the stack and its name survive. `restore_instances` fills it from the
+  reference on the way in, which is also why a model comes back matching the
+  source it has *now* rather than what the source looked like when it was saved.
+  A reference that cannot mean anything — missing, self, or another instance —
+  is dropped rather than refused: the layer under it is real work.
+- **The file stores each layer, not the composite.** `.vxm` is `VXM5`: a scene
   range, the object table, a layer count, the active layer, then per layer its
   flags, its object, name, origin, size and own sparse voxel list. Coordinates
   are relative to the layer's origin, so one byte covers a layer anywhere in the
   scene. An object's parent is stored as `parent + 1`, so the root's "no parent"
-  is a zero rather than a sentinel that could be read as object 0. `VXM3` (no
-  objects), `VXM2` (layers, no boxes) and `VXM1` (no layers) all still load — an
+  is a zero rather than a sentinel that could be read as object 0. `VXM4` (no
+  instances), `VXM3` (no objects), `VXM2` (layers, no boxes) and `VXM1` (no
+  layers) all still load — an
   older file arrives as a single root object holding every layer, and the two
   oldest are additionally **trimmed** on the way in, so they gain the smaller
   shape by being opened. A file already on disk is not free to rewrite itself.
-  That rule has now held four times.
+  That rule has now held five times.
 - **An export is a flatten.** `.vox` has nowhere to put a stack, so `ctrl+E`
   writes the composite as one model and the status line says how many layers
   went into it. Doing otherwise means the nTRN/nGRP/nSHP scene graph a
