@@ -223,6 +223,7 @@ struct Drag {
 }
 
 pub struct Editor {
+    document_id: u64,
     model: VoxelModel,
     history: History,
     mesh: FaceMesh,
@@ -273,6 +274,7 @@ pub struct Editor {
 impl Editor {
     pub fn new(model: VoxelModel, path: PathBuf) -> Self {
         let mut editor = Self {
+            document_id: next_document_id(),
             camera: OrbitCamera::default(),
             tool: Tool::Build,
             span: Span::default(),
@@ -301,6 +303,12 @@ impl Editor {
 
     pub fn model(&self) -> &VoxelModel {
         &self.model
+    }
+
+    /// Changes on document replacement, not on edits or saves. Paired with
+    /// the MCP process identity, this lets an agent detect a restarted session.
+    pub fn document_id(&self) -> u64 {
+        self.document_id
     }
 
     pub fn path(&self) -> &Path {
@@ -1919,6 +1927,9 @@ impl Editor {
     /// is re-framed on the new volume, because a view fitted to the old one is
     /// as likely as not to be pointing at empty space.
     pub fn open(&mut self, model: VoxelModel, path: PathBuf) {
+        self.document_id = next_document_id();
+        self.selection = None;
+        self.clipboard = None;
         self.model = model;
         self.path = path;
         self.history.reset();
@@ -1937,6 +1948,9 @@ impl Editor {
     /// second. The history goes, because it described a grid that has been
     /// replaced — and a viewer has nothing to undo in any case.
     pub fn show(&mut self, model: VoxelModel) {
+        self.document_id = next_document_id();
+        self.selection = None;
+        self.clipboard = None;
         // A slice past the new model's height would hide all of it.
         let sy = model.size()[1];
         if self.slice.is_some_and(|s| s >= sy) {
@@ -1965,6 +1979,9 @@ impl Editor {
     pub fn reload(&mut self) {
         match format::load(&self.path) {
             Ok(model) => {
+                self.document_id = next_document_id();
+                self.selection = None;
+                self.clipboard = None;
                 self.model = model;
                 self.history.reset();
                 self.dirty = false;
@@ -2023,6 +2040,11 @@ impl Editor {
         s.push_str(&format!("  UNDO {}/{}", self.undo_depth(), self.redo_depth()));
         s
     }
+}
+
+fn next_document_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Load `path`, or start a new `size`³ model if it does not exist yet.

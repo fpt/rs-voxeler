@@ -28,7 +28,12 @@ use voxel_core::{Bounds, Face, VoxelModel};
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
 
+mod checking;
 mod modeling;
+mod preview;
+
+#[cfg(test)]
+mod inspection_tests;
 
 /// The directories an agent's file tools may reach.
 ///
@@ -649,9 +654,11 @@ pub fn list() -> Vec<ToolInfo> {
             description:
                 "Turn the selected voxels a quarter turn at a time about their own box, as ONE \
                  undo step. Counter-clockwise about the positive axis by the right-hand rule; \
-                 negative turns go the other way. The box keeps its centre, so a rotation stays \
-                 where the shape was. Where a turn swaps two extents of different parity there \
-                 is no cell at the centre and the result sits half a cell low on those axes.",
+                 negative turns go the other way. The box keeps its low corner, NOT its centre. \
+                 Non-square footprints change centre when their extents swap; inspect \
+                 describe_selection and use move_selection to reposition. A turn followed by \
+                 its inverse is exact if no voxels leave the scene. Out-of-bounds voxels are \
+                 lost and reported as dropped.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -881,6 +888,8 @@ pub fn list() -> Vec<ToolInfo> {
         },
     ];
     tools.extend(modeling::schemas());
+    tools.extend(checking::schemas());
+    tools.extend(preview::schemas());
     tools
 }
 
@@ -909,7 +918,14 @@ fn dispatch(
 ) -> Result<CallResult, String> {
     match name {
         "describe_model" => Ok(CallResult::text(describe(editor))),
-        "apply_edits" | "put_ellipsoid" | "put_line" => modeling::apply(editor, name, args),
+        "check_symmetry" | "check_components" => checking::check(editor, name, args),
+        "compare_saved_model" => checking::compare_saved(editor, root, args),
+        "preview_model" | "screenshot_views" => {
+            preview::render(editor, root, args, name == "screenshot_views")
+        }
+        "apply_edits" | "put_ellipsoid" | "put_line" | "put_tapered_line" | "put_prism" => {
+            modeling::apply(editor, name, args)
+        }
         "set_palette_color" => {
             let index = channel(args, "index")?;
             if index == 0 {
@@ -1746,8 +1762,12 @@ fn describe(editor: &Editor) -> String {
             "layers": layer_rows(editor),
             "objects": object_rows(editor),
             "path": model_path(editor),
+            "document_path": editor.path().to_string_lossy(),
+            "document_id": editor.document_id(),
+            "session_id": session_identity(),
             "unsaved": editor.is_dirty(),
-            "note": "basic edits write to the active layer; apply_edits, put_ellipsoid and put_line accept explicit layers; palette edits affect all uses of an index",
+            "note": "basic edits write to the active layer; apply_edits and procedural shape \
+                     tools accept explicit layers; palette edits affect all uses of an index",
         })
     )
 }
@@ -1758,6 +1778,16 @@ fn model_path(editor: &Editor) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+fn session_identity() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}-{}", std::process::id(), started.as_nanos())
+    })
 }
 
 /// An axis named the way an agent would say it.
@@ -3336,6 +3366,143 @@ mod tests {
         assert_eq!(e.model().filled_count(), 4, "sphere clipped to a corner");
         assert_eq!(e.model().get(1, 0, 0), 7);
         assert_eq!(e.model().get(1, 1, 0), 0);
+    }
+
+    #[test]
+    fn rotation_schema_and_non_square_rotation_agree_on_the_anchor() {
+        let tool = list().into_iter().find(|t| t.name == "rotate_selection").unwrap();
+        assert!(tool.description.contains("low corner, NOT its centre"));
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from":[1,2,3],"to":[5,3,4],"color":7}));
+        run(&mut e, "select_box", json!({"from":[1,2,3],"to":[5,3,4]}));
+        let before: Vec<_> = e.model().iter_filled().collect();
+        let r = json_of(&run(&mut e, "rotate_selection", json!({"axis":"y"})));
+        assert_eq!(r["dropped"], 0);
+        assert_eq!(r["selection"]["min"], json!([1,2,3]));
+        assert_eq!(r["selection"]["max"], json!([2,3,7]));
+        run(&mut e, "rotate_selection", json!({"axis":"y","turns":-1}));
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn tapered_line_has_a_point_and_perpendicular_flat_caps() {
+        let mut e = editor();
+        let r = run(&mut e, "put_tapered_line", json!({
+            "from":[1,3,3],"to":[5,3,3],"radius_from":2,"radius_to":0,"color":7
+        }));
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.model().get(1,5,3), 7, "wide base");
+        assert_eq!(e.model().get(3,4,3), 7, "linear taper");
+        assert_eq!(e.model().get(5,3,3), 7, "the pointed tip is included");
+        assert_eq!(e.model().get(5,4,3), 0, "the tip has no upright stub");
+        assert_eq!(e.model().get(0,3,3), 0, "no rounded cap behind the base");
+        assert_eq!(e.model().get(6,3,3), 0, "nothing beyond the tip");
+        let count = e.model().filled_count();
+        assert_eq!(e.undo_depth(), 1);
+        e.undo();
+        assert_eq!(e.model().filled_count(), 0);
+        e.redo();
+        assert_eq!(e.model().filled_count(), count);
+    }
+
+    #[test]
+    fn tapered_line_reverses_and_rotates_with_its_axis() {
+        let mut e = editor();
+        let shape = json!({"from":[1.5,1.,2.],"to":[5.5,6.,4.5],
+            "radius_from":2.25,"radius_to":0.5,"color":7});
+        assert_eq!(run(&mut e, "put_tapered_line", shape.clone()).is_error, None);
+        let before: std::collections::BTreeSet<_> = e.model().iter_filled().collect();
+        e.undo();
+        let mut reverse = shape.clone();
+        reverse["from"] = shape["to"].clone();
+        reverse["to"] = shape["from"].clone();
+        reverse["radius_from"] = shape["radius_to"].clone();
+        reverse["radius_to"] = shape["radius_from"].clone();
+        assert_eq!(run(&mut e, "put_tapered_line", reverse).is_error, None);
+        assert_eq!(e.model().iter_filled().collect::<std::collections::BTreeSet<_>>(), before);
+        e.undo();
+        let mut rotated = shape.clone();
+        for key in ["from", "to"] {
+            rotated[key] = json!([shape[key][2], shape[key][0], shape[key][1]]);
+        }
+        run(&mut e, "put_tapered_line", rotated);
+        let expected = before.into_iter().map(|([x,y,z], c)| ([z,x,y], c)).collect();
+        assert_eq!(e.model().iter_filled().collect::<std::collections::BTreeSet<_>>(), expected);
+    }
+
+    #[test]
+    fn tapered_batch_matches_standalone_and_erases_only_its_layer() {
+        let mut e = editor();
+        run(&mut e, "put_rect", json!({"from":[0,0,0],"to":[7,7,7],"color":3}));
+        run(&mut e, "add_layer", json!({"name":"BRANCH"}));
+        run(&mut e, "select_layer", json!({"layer":0}));
+        let shape = json!({"from":[0,0,0],"to":[6,0,0],
+            "radius_from":2,"radius_to":2,"layer":"BRANCH","color":7});
+        assert_eq!(run(&mut e, "put_tapered_line", shape.clone()).is_error, None);
+        let expected: Vec<_> = e.model().iter_filled_in(1).collect();
+        assert!(!expected.is_empty());
+        assert_eq!(e.model().get_in(1, 6, 2, 0), 7, "flat cylinder clipped at scene edge");
+        assert_eq!(e.model().get_in(1, 7, 0, 0), 0);
+        e.undo();
+        let mut operation = shape.clone();
+        operation["op"] = json!("tapered_line");
+        let depth = e.undo_depth();
+        let r = run(&mut e, "apply_edits", json!({"edits":[operation]}));
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.undo_depth(), depth + 1);
+        assert_eq!(e.active_layer(), 0);
+        assert_eq!(e.model().iter_filled_in(1).collect::<Vec<_>>(), expected);
+        let mut erase = shape;
+        erase["color"] = json!(0);
+        run(&mut e, "put_tapered_line", erase);
+        assert_eq!(e.model().layers()[1].filled_count(), 0);
+        assert_eq!(e.model().layers()[0].filled_count(), 512);
+        e.undo();
+        assert_eq!(e.model().iter_filled_in(1).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn invalid_tapered_lines_preserve_the_document_and_history() {
+        let mut e = editor();
+        run(&mut e, "put_voxel", json!({"x":0,"y":0,"z":0}));
+        e.undo();
+        let shape = json!({"op":"tapered_line","from":[1,1,1],"to":[5,5,5],
+            "radius_from":2,"radius_to":0});
+        for (key, value) in [
+            ("radius_from", json!(-1)), ("radius_to", json!(257)),
+            ("radius_from", json!(0)), ("radius_to", json!("1")),
+            ("radius_to", Value::Null), ("to", json!([1,1,1])),
+            ("from", json!([8,1,1])), ("to", json!([2,3])),
+        ] {
+            let mut invalid = shape.clone();
+            invalid[key] = value;
+            let before = voxel_core::format::native::encode(e.model());
+            for (name, args) in [
+                ("put_tapered_line", invalid.clone()),
+                ("apply_edits", json!({"edits":[
+                    {"op":"voxel","x":2,"y":2,"z":2}, invalid
+                ]})),
+            ] {
+                let r = run(&mut e, name, args);
+                assert_eq!(r.is_error, Some(true), "{key}: {}", text_of(&r));
+                assert_eq!(voxel_core::format::native::encode(e.model()), before);
+                assert_eq!(e.undo_depth(), 0);
+                assert_eq!(e.redo_depth(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn tapered_line_charges_its_candidate_box_before_writing() {
+        let mut e = Editor::new(VoxelModel::new(256, 256, 256), PathBuf::from("t.vxm"));
+        let r = run(&mut e, "put_tapered_line", json!({
+            "from":[0,0,0],"to":[255,255,255],"radius_from":256,"radius_to":0
+        }));
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("candidate cells"));
+        assert_eq!(e.model().filled_count(), 0);
+        assert_eq!(e.undo_depth(), 0);
+        assert!(!e.is_dirty());
     }
 
     #[test]

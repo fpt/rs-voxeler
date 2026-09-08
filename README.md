@@ -182,12 +182,13 @@ symmetrically.
 
 ## Driving it from an agent
 
-The repository includes two reusable skills:
+The repository includes three reusable skills:
 [`skills/voxeler-modeling`](skills/voxeler-modeling/SKILL.md) for building a
 model from scratch — reference-based modeling, layered batch edits and verified
 previews — and [`skills/voxeler-editing`](skills/voxeler-editing/SKILL.md) for
-changing one that already exists. Ask your agent to read the one that fits the
-task, or install either directory in your agent's skill directory for
+changing one that already exists. [`skills/voxeler-checking`](skills/voxeler-checking/SKILL.md)
+covers read-only model QA. Ask your agent to read the one that fits the
+task, or install the relevant directories in your agent's skill directory for
 discovery.
 
 Two transports, because they answer different questions.
@@ -242,8 +243,13 @@ whoever connects.
 | `describe_model` | size, voxel count, bounds, the layer stack, active layer, colour |
 | `put_voxel` | one voxel; colour 0 erases |
 | `put_rect` | a solid axis-aligned box, corners inclusive |
-| `apply_edits` | ordered voxel/box/ellipsoid/line edits across layers, one undo step |
+| `apply_edits` | ordered voxel/box/ellipsoid/line/tapered-line/prism edits across layers, one undo step |
 | `put_ellipsoid`, `put_line` | ellipsoid or rounded thick line, optionally on a named layer |
+| `put_tapered_line` | a cone, tapered branch or flat-ended cylinder along any direction |
+| `put_prism` | extrude a simple polygon into armour, with inclusive boundaries |
+| `check_symmetry`, `check_components` | scoped, read-only mirror and connectivity findings |
+| `preview_model`, `screenshot_views` | focused preview and labelled multi-view sheet |
+| `compare_saved_model` | compare native saved content without reopening |
 | `paint` | recolour the voxels in a box, creating none |
 | `fill` | flood fill from a cell, over the active layer's connected shape |
 | `set_color`, `find_color` | select a palette index; find the one nearest an RGB |
@@ -418,7 +424,7 @@ Screenshot settings affect the returned image only; the editor's view is restore
 ### Batch and curved modeling
 
 `apply_edits` takes an `edits` array. Each operation has `op` set to `voxel`,
-`rect`, `ellipsoid` or `line`. Top-level `layer` and `color` set defaults;
+`rect`, `ellipsoid`, `line`, `tapered_line` or `prism`. Top-level `layer` and `color` set defaults;
 individual operations may override them. An omitted layer uses the active
 layer, but explicit layer arguments never change the selection.
 
@@ -449,6 +455,30 @@ fractional centers such as `63.5` allow exact symmetry in an even-sized scene.
 Radii must be greater than zero and at most 256. Centers/endpoints must be inside
 `0..=size-1`; curved surfaces are clipped at the scene boundary. Boxes and single
 voxels reject out-of-range coordinates. Colour 0 erases the addressed layer.
+
+`put_tapered_line` adds independent `radius_from` and `radius_to` to `from` and
+`to`. Radii interpolate linearly along the axis; flat end faces are perpendicular
+to that axis, so a slanted branch's tip follows the branch rather than world-up.
+A zero endpoint radius makes a point, and equal radii make a flat-ended cylinder
+(not the rounded capsule that `put_line` draws). Both radii must be in 0..=256,
+at least one must be positive, and the endpoints must be distinct. Integer
+coordinates sample voxel centers, so a very thin or fractional tip can miss a
+cell; inspect the rendered result at the working resolution.
+
+For a branch that stays thick until near its tip, join two segments with matching
+radii at the joint. Both can be one undo step, with an erase before them to
+replace an existing branch:
+
+```json
+{"layer":"CHONMAGE","color":1,"edits":[
+  {"op":"tapered_line","from":[90,116,64],"to":[96,119,64],"radius_from":3.5,"radius_to":3},
+  {"op":"tapered_line","from":[96,119,64],"to":[103,122.5,64],"radius_from":3,"radius_to":0}
+]}
+```
+
+These are drawing operations, not a resize of selected geometry. They accept an
+explicit layer, leave selection unchanged, and share the batch validation,
+candidate-cell budget, clipping, colour-0 erase and undo rules above.
 
 `set_palette_color` accepts `{"index":65,"r":200,"g":25,"b":36}`. It changes
 every voxel using index 65, including those in hidden layers, and is undoable.
@@ -483,7 +513,53 @@ Directory names may be absolute inside an allowed directory, or relative to the
 first. File tools reject symlink paths, and recursive listing skips symlink files
 and directories.
 
-## Where this is going
+### Model inspection and polygonal armour
+
+`check_symmetry` compares mirrored occupied cells and optionally palette indices.
+`axis` is required; `plane` defaults to the scene midpoint and accepts integer
+or half-integer coordinates. It reports mismatched pairs and bounded samples.
+`check_components` reports connected components by size, bounds and owning
+layers; `connectivity:6` requires face contact, while 26 includes corners.
+Neither tool treats its findings as automatic defects.
+
+Both accept one of `layer`, `object` (with descendants), or `selection:true`.
+The default scope is the visible composite; `include_hidden:true` composites
+hidden layers too. Optional inclusive `from`/`to` clips the inspected region.
+The limit is 2,097,152 inspected source voxels; narrow the scope if refused.
+`limit` (1..1000, default 100) bounds samples/components, not the total count.
+
+`preview_model` frames that same scope, isolated by default. `isolate:false`
+keeps visible surroundings (cannot combine with `include_hidden:true`).
+`screenshot_views` returns a labelled sheet with shared framing and lighting:
+
+```json
+{"object":"HEAD","views":["front","right","back","left","top","three_quarter"],"width":256,"height":256}
+```
+
+Dimensions are per tile (64..512 for sheets, 64..1024 for single previews).
+These perspective previews ignore the working slice and preserve all live
+editor state. Optional PNG `path` uses the existing file-access restrictions.
+
+`compare_saved_model` compares with the working `.vxm`, or an explicit `path`,
+without reopening. It includes hidden layers, hierarchy, palette and active
+layer; allocation slack and editor-only state are ignored. `.vox` is refused.
+`describe_model` now exposes `document_path`, process `session_id` and
+`document_id` (changes on document replacement, not ordinary edits or saves).
+After reconnection, establish identity before replaying any edits.
+
+`put_prism` extrudes a simple polygon; batch `apply_edits` also accepts
+`op:"prism"`. Vertices are [y,z] for axis X, [x,z] for Y and [x,y] for Z.
+`start`/`end` are inclusive, and voxel centres on edges are included. Vertices
+may be fractional; either winding and concavity work. Crossing edges, holes,
+repeated vertices and out-of-scene coordinates are refused. Example:
+
+```json
+{"axis":"z","vertices":[[40,60],[87,60],[76,48],[51,48]],"start":80,"end":84,"color":1}
+```
+
+The existing batch candidate budget and all-or-nothing, one-undo semantics apply.
+
+## Roadmap
 
 The order is asset → renderer → one game → only the API that game needed:
 
