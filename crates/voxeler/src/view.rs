@@ -133,7 +133,16 @@ fn draw_ground(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, size: [u16;
         (0..=n)
             .step_by(GRID_STEP as usize)
             .chain(std::iter::once(n))
-            .map(move |i| (i, if i % GRID_COARSE_STEP == 0 || i == n { GRID_COARSE } else { GRID_FINE }))
+            .map(move |i| {
+                (
+                    i,
+                    if i % GRID_COARSE_STEP == 0 || i == n {
+                        GRID_COARSE
+                    } else {
+                        GRID_FINE
+                    },
+                )
+            })
     };
 
     for (i, color) in lines(size[0]) {
@@ -142,7 +151,11 @@ fn draw_ground(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, size: [u16;
             fb,
             scene,
             Vec3 { x, y, z: offset.z },
-            Vec3 { x, y, z: offset.z + sz },
+            Vec3 {
+                x,
+                y,
+                z: offset.z + sz,
+            },
             color,
             0.0,
         );
@@ -153,7 +166,11 @@ fn draw_ground(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, size: [u16;
             fb,
             scene,
             Vec3 { x: offset.x, y, z },
-            Vec3 { x: offset.x + sx, y, z },
+            Vec3 {
+                x: offset.x + sx,
+                y,
+                z,
+            },
             color,
             0.0,
         );
@@ -201,8 +218,16 @@ fn draw_volume_box(
         raster::draw_box(
             fb,
             scene,
-            Vec3 { x: min.x, y, z: min.z },
-            Vec3 { x: max.x, y, z: max.z },
+            Vec3 {
+                x: min.x,
+                y,
+                z: min.z,
+            },
+            Vec3 {
+                x: max.x,
+                y,
+                z: max.z,
+            },
             crate::hud::accent(),
             0.0,
         );
@@ -211,13 +236,7 @@ fn draw_volume_box(
 
 /// Mark what a click would do: the face under the cursor, and the cell the tool
 /// would write to.
-fn draw_target(
-    fb: &mut Framebuffer,
-    scene: &Scene,
-    editor: &Editor,
-    target: Target,
-    offset: Vec3,
-) {
+fn draw_target(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, target: Target, offset: Vec3) {
     let (fill, outline) = match editor.tool {
         Tool::Build => {
             let c = editor.model().palette().get(editor.color);

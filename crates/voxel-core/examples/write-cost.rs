@@ -61,7 +61,13 @@ fn drag(n: u16) -> (u128, usize) {
     let mut r = spread(12345);
     let t = ms(|| {
         for i in 0..2000 {
-            m.set_in(0, c + r(24) - 12, c + r(24) - 12, c + r(24) - 12, (i % 200 + 1) as u8);
+            m.set_in(
+                0,
+                c + r(24) - 12,
+                c + r(24) - 12,
+                c + r(24) - 12,
+                (i % 200 + 1) as u8,
+            );
         }
     });
     (t, m.allocated_cells())
@@ -100,7 +106,9 @@ fn main() {
     for n in [64u16, 128, 256] {
         let (grown, _) = bulk(n, false);
         let (declared, cells) = bulk(n, true);
-        println!("bulk fill {n:>3}^3     {grown:>5} ms   (declared {declared:>4} ms)   {cells} cells");
+        println!(
+            "bulk fill {n:>3}^3     {grown:>5} ms   (declared {declared:>4} ms)   {cells} cells"
+        );
     }
     let (t, cells) = drag(256);
     println!("drag 2 000 cells   {t:>5} ms                       {cells} cells");

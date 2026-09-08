@@ -175,7 +175,9 @@ impl App {
             return;
         }
         self.hover = match self.cursor {
-            Some((x, y)) if !hud::over_panel(self.fb.width(), self.editor.model().layer_count(), x, y) => {
+            Some((x, y))
+                if !hud::over_panel(self.fb.width(), self.editor.model().layer_count(), x, y) =>
+            {
                 self.editor
                     .target_at(x, y, self.fb.width(), self.fb.height())
             }
@@ -654,7 +656,10 @@ mod tests {
         let from = (100.0, 100.0);
         assert!(is_click(from, from));
         assert!(is_click(from, (101.0, 100.0)));
-        assert!(is_click(from, (102.0, 102.0)), "under three pixels diagonally");
+        assert!(
+            is_click(from, (102.0, 102.0)),
+            "under three pixels diagonally"
+        );
         assert!(!is_click(from, (104.0, 100.0)));
         assert!(!is_click(from, (100.0, 96.0)), "backwards counts too");
     }

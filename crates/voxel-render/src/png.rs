@@ -42,7 +42,12 @@ pub fn encode(width: u32, height: u32, pixels: &[u32]) -> Vec<u8> {
 }
 
 /// Write `pixels` to `path` as a PNG.
-pub fn write(path: &std::path::Path, width: u32, height: u32, pixels: &[u32]) -> std::io::Result<()> {
+pub fn write(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    pixels: &[u32],
+) -> std::io::Result<()> {
     std::fs::write(path, encode(width, height, pixels))
 }
 

@@ -171,7 +171,8 @@ mod tests {
         // An edit through the shared editor is what the viewer is watching for.
         {
             let mut live = shared.lock();
-            live.editor_mut().apply_batch("t", 5, |_, _| vec![[4, 4, 4]], |_, _| {});
+            live.editor_mut()
+                .apply_batch("t", 5, |_, _| vec![[4, 4, 4]], |_, _| {});
             live.bump();
         }
         protocol::write_sync_request(&mut writer, revision).unwrap();
@@ -179,7 +180,9 @@ mod tests {
             panic!("expected the changed model");
         };
         assert_eq!(
-            voxel_core::format::native::decode(&bytes).unwrap().get(4, 4, 4),
+            voxel_core::format::native::decode(&bytes)
+                .unwrap()
+                .get(4, 4, 4),
             5
         );
 

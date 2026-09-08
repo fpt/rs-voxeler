@@ -24,8 +24,8 @@
 mod app;
 mod attach;
 mod editor;
-mod mcp;
 mod hud;
+mod mcp;
 mod view;
 
 use std::path::PathBuf;
@@ -86,9 +86,11 @@ fn run() -> Result<(), String> {
         // be nobody to serve and nothing to watch.
         Some(out) if args.mcp.is_some() => {
             let _ = out;
-            Err("--mcp and --thumbnail are opposites: one opens a window to watch, \
+            Err(
+                "--mcp and --thumbnail are opposites: one opens a window to watch, \
                  the other exits without one"
-                .into())
+                    .into(),
+            )
         }
         Some(out) => thumbnail(model, args.path, &out, args.width, args.height),
         None => app::launch(model, args.path, args.mcp),
@@ -131,9 +133,15 @@ fn serve_mcp(args: &[String]) -> Result<(), String> {
         dirs.push(cwd);
     }
     let root = mcp::Roots::new(dirs);
-    let primary = root.primary().expect("at least one directory").to_path_buf();
+    let primary = root
+        .primary()
+        .expect("at least one directory")
+        .to_path_buf();
 
-    let editor = editor::Editor::new(editor::new_model(DEFAULT_SIZE), primary.join("untitled.vxm"));
+    let editor = editor::Editor::new(
+        editor::new_model(DEFAULT_SIZE),
+        primary.join("untitled.vxm"),
+    );
     let shared = mcp::stdio::Shared::new(editor);
 
     // Held until this returns, so the session file goes away when the server
@@ -168,7 +176,10 @@ fn attach_to_session(args: &[String]) -> Result<(), String> {
     };
     match mcp::session::discover(wanted.as_deref()) {
         mcp::session::Discovery::Found(session) => {
-            eprintln!("voxeler: attaching to {} (pid {})", session.root, session.pid);
+            eprintln!(
+                "voxeler: attaching to {} (pid {})",
+                session.root, session.pid
+            );
             app::attach(&session)
         }
         mcp::session::Discovery::None => Err(match &wanted {
@@ -209,7 +220,12 @@ fn thumbnail(
     view::render_with_options(&mut fb, &mut editor, None, view::RenderOptions::default());
     voxel_render::png::write(out, fb.width(), fb.height(), fb.color())
         .map_err(|e| format!("{}: {e}", out.display()))?;
-    eprintln!("voxeler: wrote {} ({}x{})", out.display(), fb.width(), fb.height());
+    eprintln!(
+        "voxeler: wrote {} ({}x{})",
+        out.display(),
+        fb.width(),
+        fb.height()
+    );
     Ok(())
 }
 
@@ -376,8 +392,16 @@ mod tests {
 
     #[test]
     fn a_thumbnail_request_carries_its_path_and_size() {
-        let a = parse(&["r.vxm", "--thumbnail", "out.png", "--width", "320", "--height", "240"])
-            .unwrap();
+        let a = parse(&[
+            "r.vxm",
+            "--thumbnail",
+            "out.png",
+            "--width",
+            "320",
+            "--height",
+            "240",
+        ])
+        .unwrap();
         assert_eq!(a.thumbnail, Some(PathBuf::from("out.png")));
         assert_eq!((a.width, a.height), (320, 240));
     }

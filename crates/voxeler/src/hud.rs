@@ -202,7 +202,14 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
         PANEL_BG,
         220,
     );
-    overlay::text(fb, x0 + PAD as i32, top + PAD as i32, "LAYERS", DIM, TEXT_SCALE);
+    overlay::text(
+        fb,
+        x0 + PAD as i32,
+        top + PAD as i32,
+        "LAYERS",
+        DIM,
+        TEXT_SCALE,
+    );
 
     let (ox, oy) = layers_origin(fb.width());
     let inner = panel_width() - PAD * 2;
@@ -292,7 +299,14 @@ fn draw_rename(fb: &mut Framebuffer, editor: &Editor, name: &str) {
     overlay::stroke_rect(fb, x, y, w, h, ACCENT);
     let tx = x + (PAD * 2) as i32;
     overlay::text(fb, tx, y + PAD as i32, &heading, ACCENT, TEXT_SCALE);
-    overlay::text(fb, tx, y + PAD as i32 + line_h as i32, &typed, TEXT, TEXT_SCALE);
+    overlay::text(
+        fb,
+        tx,
+        y + PAD as i32 + line_h as i32,
+        &typed,
+        TEXT,
+        TEXT_SCALE,
+    );
     overlay::text(
         fb,
         tx,
@@ -313,10 +327,7 @@ fn draw_palette(fb: &mut Framebuffer, editor: &Editor) {
     for index in 1..=255u32 {
         let i = index - 1;
         let (col, row) = (i % COLUMNS, i / COLUMNS);
-        let (x, y) = (
-            ox + (col * SWATCH) as i32,
-            oy + (row * SWATCH) as i32,
-        );
+        let (x, y) = (ox + (col * SWATCH) as i32, oy + (row * SWATCH) as i32);
         let color = editor.model().palette().get(index as u8).to_u32();
         overlay::fill_rect(fb, x, y, SWATCH, SWATCH, color);
         if index as u8 == editor.color {
@@ -358,7 +369,14 @@ fn draw_status(fb: &mut Framebuffer, editor: &Editor) {
     let hint_w = text_width(hint, TEXT_SCALE) + PAD * 2;
     let room = fit_chars(bar_w.saturating_sub(hint_w + PAD));
 
-    overlay::text(fb, PAD as i32, y, &fit_head(&editor.summary(), room), TEXT, TEXT_SCALE);
+    overlay::text(
+        fb,
+        PAD as i32,
+        y,
+        &fit_head(&editor.summary(), room),
+        TEXT,
+        TEXT_SCALE,
+    );
     overlay::text(
         fb,
         PAD as i32,
@@ -533,7 +551,11 @@ mod tests {
         assert_eq!(palette_hit(fb_w, ox as f32 + 1.0, oy as f32 - 1.0), None);
         // Past the right-hand column.
         assert_eq!(
-            palette_hit(fb_w, ox as f32 + (COLUMNS * SWATCH) as f32 + 1.0, oy as f32 + 1.0),
+            palette_hit(
+                fb_w,
+                ox as f32 + (COLUMNS * SWATCH) as f32 + 1.0,
+                oy as f32 + 1.0
+            ),
             None
         );
         // Past the last row: 255 colours in 16 columns leaves the 256th cell
@@ -555,10 +577,21 @@ mod tests {
     fn the_panel_covers_its_own_box_and_nothing_else() {
         let fb_w = 800;
         assert!(over_panel(fb_w, 1, 799.0, 10.0));
-        assert!(!over_panel(fb_w, 1, (fb_w - panel_width()) as f32 - 1.0, 10.0));
+        assert!(!over_panel(
+            fb_w,
+            1,
+            (fb_w - panel_width()) as f32 - 1.0,
+            10.0
+        ));
         let bottom = (palette_height() + layers_panel_height(1)) as f32;
-        assert!(over_panel(fb_w, 1, 799.0, bottom - 1.0), "the layer list is panel");
-        assert!(!over_panel(fb_w, 1, 799.0, bottom + 1.0), "below it is viewport");
+        assert!(
+            over_panel(fb_w, 1, 799.0, bottom - 1.0),
+            "the layer list is panel"
+        );
+        assert!(
+            !over_panel(fb_w, 1, 799.0, bottom + 1.0),
+            "below it is viewport"
+        );
         // And it grows with the stack, or the lower rows swallow no clicks and
         // pass them to the model behind.
         assert!(over_panel(fb_w, 8, 799.0, bottom + 1.0));
@@ -590,7 +623,11 @@ mod tests {
         let (ox, oy) = layers_origin(fb_w);
         let y = oy as f32 + ROW as f32 / 2.0;
         assert!(layer_hit(fb_w, 3, ox as f32 + 2.0, y).unwrap().on_eye);
-        assert!(!layer_hit(fb_w, 3, ox as f32 + EYE as f32 + 1.0, y).unwrap().on_eye);
+        assert!(
+            !layer_hit(fb_w, 3, ox as f32 + EYE as f32 + 1.0, y)
+                .unwrap()
+                .on_eye
+        );
     }
 
     #[test]
@@ -622,7 +659,11 @@ mod tests {
         assert_eq!(fit("short", 20), "short");
         let cut = fit("/a/very/long/path/robot.vxm", 15);
         assert_eq!(cut, "..ath/robot.vxm");
-        assert_eq!(cut.chars().count(), 15, "the result must fill exactly the room given");
+        assert_eq!(
+            cut.chars().count(),
+            15,
+            "the result must fill exactly the room given"
+        );
         assert_eq!(fit("abcdef", 6), "abcdef");
         // No room at all is empty, not a panic or a lone marker.
         assert_eq!(fit("abcdef", 2), "");

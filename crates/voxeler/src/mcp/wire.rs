@@ -118,8 +118,7 @@ pub enum Content {
 /// Hand-rolled for the reason the PNG writer is: it is twenty lines against a
 /// dependency, and this is the only place in the program that needs it.
 pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -250,7 +249,8 @@ mod tests {
 
     #[test]
     fn an_error_response_carries_no_result_field() {
-        let s = serde_json::to_string(&Response::error(json!(1), METHOD_NOT_FOUND, "nope")).unwrap();
+        let s =
+            serde_json::to_string(&Response::error(json!(1), METHOD_NOT_FOUND, "nope")).unwrap();
         assert!(!s.contains("result"), "{s}");
         assert!(s.contains("-32601"), "{s}");
     }

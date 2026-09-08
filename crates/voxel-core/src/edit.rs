@@ -361,7 +361,11 @@ mod tests {
 
         m.set_active_layer(0);
         h.undo(&mut m);
-        assert_eq!(m.get_in(1, 1, 1, 1), 0, "undone on the layer it was made on");
+        assert_eq!(
+            m.get_in(1, 1, 1, 1),
+            0,
+            "undone on the layer it was made on"
+        );
         h.redo(&mut m);
         assert_eq!(m.get_in(1, 1, 1, 1), 5);
         assert_eq!(m.get_in(0, 1, 1, 1), 0, "and never on the active one");
@@ -405,7 +409,11 @@ mod tests {
         h.redo(&mut m);
         h.redo(&mut m);
         assert_eq!(m.layer_count(), 1);
-        assert_eq!(m.get_in(0, 1, 1, 1), 5, "and it came back on the merged stack");
+        assert_eq!(
+            m.get_in(0, 1, 1, 1),
+            5,
+            "and it came back on the merged stack"
+        );
     }
 
     #[test]

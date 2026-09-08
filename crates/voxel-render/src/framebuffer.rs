@@ -116,7 +116,9 @@ impl Framebuffer {
 fn lerp_rgb(a: u32, b: u32, t: f32) -> u32 {
     let ch = |shift: u32| {
         let (a, b) = ((a >> shift) & 0xFF, (b >> shift) & 0xFF);
-        (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u32
+        (a as f32 + (b as f32 - a as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u32
     };
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }

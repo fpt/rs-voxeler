@@ -411,7 +411,10 @@ mod tests {
         let along_x = cells(&m, Span::Axis, reach([4, 0, 3], Face::PosX, 2));
         // Colour 2 occupies x = 4..8 of the floor, and the run stops at the
         // colour boundary rather than running the whole width.
-        assert_eq!(sorted(along_x), vec![[4, 0, 3], [5, 0, 3], [6, 0, 3], [7, 0, 3]]);
+        assert_eq!(
+            sorted(along_x),
+            vec![[4, 0, 3], [5, 0, 3], [6, 0, 3], [7, 0, 3]]
+        );
     }
 
     /// The bounded-by-colour rule, which is the whole reason a region is not
@@ -438,7 +441,11 @@ mod tests {
         m.set(0, 1, 0, 1);
 
         let top = cells(&m, Span::Plane, reach([4, 0, 4], Face::PosY, 1));
-        assert_eq!(top.len(), 63, "the covered cell is not part of the top face");
+        assert_eq!(
+            top.len(),
+            63,
+            "the covered cell is not part of the top face"
+        );
         assert!(!top.contains(&[0, 0, 0]));
     }
 
@@ -586,9 +593,17 @@ mod tests {
     fn a_solid_region_crosses_a_colour_boundary_where_an_index_region_stops() {
         let m = floor();
         let index = cells(&m, Span::Volume, reach([1, 0, 1], Face::PosY, 1));
-        assert_eq!(index.len(), 4 * 8, "half the floor, where the colour changes");
+        assert_eq!(
+            index.len(),
+            4 * 8,
+            "half the floor, where the colour changes"
+        );
 
-        let solid = cells(&m, Span::Volume, reach_for([1, 0, 1], Face::PosY, Match::Solid));
+        let solid = cells(
+            &m,
+            Span::Volume,
+            reach_for([1, 0, 1], Face::PosY, Match::Solid),
+        );
         assert_eq!(solid.len(), 8 * 8, "the whole floor, both colours");
     }
 
@@ -599,7 +614,11 @@ mod tests {
         m.set(1, 1, 1, 3);
         m.set(2, 1, 1, 9);
         m.set(5, 1, 1, 3);
-        let got = cells(&m, Span::Volume, reach_for([1, 1, 1], Face::PosY, Match::Solid));
+        let got = cells(
+            &m,
+            Span::Volume,
+            reach_for([1, 1, 1], Face::PosY, Match::Solid),
+        );
         assert_eq!(sorted(got), vec![[1, 1, 1], [2, 1, 1]]);
     }
 
@@ -617,7 +636,10 @@ mod tests {
 
         r.within = Some(Bounds::new([2, 0, 0], [4, 16, 16]));
         let held = cells(&m, Span::Volume, r);
-        assert_eq!(sorted(held), vec![[2, 1, 1], [3, 1, 1], [4, 1, 1], [5, 1, 1]]);
+        assert_eq!(
+            sorted(held),
+            vec![[2, 1, 1], [3, 1, 1], [4, 1, 1], [5, 1, 1]]
+        );
     }
 
     /// Bounded during growth, not trimmed after: a flood that spread through

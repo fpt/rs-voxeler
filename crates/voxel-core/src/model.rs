@@ -313,7 +313,11 @@ impl Layer {
             if *v == 0 {
                 continue;
             }
-            let local = [i % sx.max(1), i / sx.max(1) % sy.max(1), i / (sx * sy).max(1)];
+            let local = [
+                i % sx.max(1),
+                i / sx.max(1) % sy.max(1),
+                i / (sx * sy).max(1),
+            ];
             self.filled += 1;
             for (axis, at) in self.planes.iter_mut().zip(local) {
                 axis[at] += 1;
@@ -370,7 +374,11 @@ impl Layer {
             .enumerate()
             .filter(|(_, v)| **v != 0)
             .map(move |(i, v)| {
-                let (lx, ly, lz) = (i % sx.max(1), i / sx.max(1) % sy.max(1), i / (sx * sy).max(1));
+                let (lx, ly, lz) = (
+                    i % sx.max(1),
+                    i / sx.max(1) % sy.max(1),
+                    i / (sx * sy).max(1),
+                );
                 (
                     [
                         b.origin[0] + lx as u16,
@@ -456,8 +464,7 @@ impl Layer {
         }
         // Only now can this not go negative: the box holds the old one, so each
         // origin moved down or stayed.
-        let shift: [usize; 3] =
-            std::array::from_fn(|a| (cur.origin[a] - next.origin[a]) as usize);
+        let shift: [usize; 3] = std::array::from_fn(|a| (cur.origin[a] - next.origin[a]) as usize);
 
         let mut voxels = vec![0u8; next.cells()];
         let (sx, sy) = (cur.size[0] as usize, cur.size[1] as usize);
@@ -704,11 +711,7 @@ impl VoxelModel {
             z as usize / CHUNK as usize,
         ];
         self.mark_chunk(c, dims);
-        let local = [
-            x as u16 % CHUNK,
-            y as u16 % CHUNK,
-            z as u16 % CHUNK,
-        ];
+        let local = [x as u16 % CHUNK, y as u16 % CHUNK, z as u16 % CHUNK];
         for a in 0..3 {
             if local[a] == 0 && c[a] > 0 {
                 let mut n = c;
@@ -830,8 +833,7 @@ impl VoxelModel {
             .flat_map(move |(n, layer)| {
                 layer.iter_filled().filter_map(move |(p, v)| {
                     let (x, y, z) = (p[0] as i32, p[1] as i32, p[2] as i32);
-                    (self.contains(x, y, z) && self.owner_at(x, y, z) == Some(n))
-                        .then_some((p, v))
+                    (self.contains(x, y, z) && self.owner_at(x, y, z) == Some(n)).then_some((p, v))
                 })
             })
     }
@@ -861,7 +863,9 @@ impl VoxelModel {
     }
 
     pub fn layer_bounds(&self, layer: usize) -> Bounds {
-        self.layers.get(layer).map_or(Bounds::default(), |l| l.bounds)
+        self.layers
+            .get(layer)
+            .map_or(Bounds::default(), |l| l.bounds)
     }
 
     /// One layer's own index at a scene cell, whatever is above or below it.
@@ -872,7 +876,10 @@ impl VoxelModel {
     /// Every cell one layer alone fills, in scene coordinates. What the file
     /// writer walks: a save records each layer's own grid, not the composite.
     pub fn iter_filled_in(&self, layer: usize) -> impl Iterator<Item = ([u16; 3], u8)> + '_ {
-        self.layers.get(layer).into_iter().flat_map(|l| l.iter_filled())
+        self.layers
+            .get(layer)
+            .into_iter()
+            .flat_map(|l| l.iter_filled())
     }
 
     /// Write one layer's cell, returning what that layer held.
@@ -959,9 +966,8 @@ impl VoxelModel {
         if !occupied.is_empty() {
             let end = occupied.end();
             let new_end = bounds.end();
-            let fits = (0..3).all(|a| {
-                occupied.origin[a] >= bounds.origin[a] && end[a] <= new_end[a]
-            });
+            let fits =
+                (0..3).all(|a| occupied.origin[a] >= bounds.origin[a] && end[a] <= new_end[a]);
             if !fits {
                 return false;
             }
@@ -1050,7 +1056,11 @@ impl VoxelModel {
 
     /// Move a layer one step up or down the stack, changing what covers what.
     pub fn move_layer(&mut self, i: usize, up: bool) -> Option<usize> {
-        let j = if up { i.checked_add(1)? } else { i.checked_sub(1)? };
+        let j = if up {
+            i.checked_add(1)?
+        } else {
+            i.checked_sub(1)?
+        };
         if i >= self.layers.len() || j >= self.layers.len() {
             return None;
         }
@@ -1768,7 +1778,9 @@ impl VoxelModel {
     /// an undo step on it.
     pub fn subdivide(&mut self, factor: u16) -> Result<(), String> {
         if factor < 2 {
-            return Err(format!("a subdivide needs a factor of 2 or more, got {factor}"));
+            return Err(format!(
+                "a subdivide needs a factor of 2 or more, got {factor}"
+            ));
         }
         let f = factor as u32;
         for (a, d) in self.size.iter().enumerate() {
@@ -1791,7 +1803,11 @@ impl VoxelModel {
                 continue;
             }
             let scaled = Bounds::new(
-                [b.origin[0] * factor, b.origin[1] * factor, b.origin[2] * factor],
+                [
+                    b.origin[0] * factor,
+                    b.origin[1] * factor,
+                    b.origin[2] * factor,
+                ],
                 [b.size[0] * factor, b.size[1] * factor, b.size[2] * factor],
             );
             let mut voxels = vec![0u8; scaled.cells()];
@@ -2123,7 +2139,11 @@ mod tests {
     #[test]
     fn an_empty_layer_allocates_nothing_and_grows_to_what_is_written() {
         let mut m = VoxelModel::new(64, 64, 64);
-        assert_eq!(m.allocated_cells(), 0, "a 64-cubed scene, and nothing in it");
+        assert_eq!(
+            m.allocated_cells(),
+            0,
+            "a 64-cubed scene, and nothing in it"
+        );
 
         m.set(20, 5, 10, 1);
         assert_eq!(m.layer_bounds(0), Bounds::new([20, 5, 10], [1, 1, 1]));
@@ -2403,7 +2423,10 @@ mod tests {
         assert_eq!(m.get(2, 1, 1), 3);
         assert_eq!(m.get(20, 1, 1), 9, "and the far one came along");
         assert!(m.layer_bounds(0).contains(20, 1, 1));
-        assert!(!m.merge_down(0), "the bottom layer has nothing to merge into");
+        assert!(
+            !m.merge_down(0),
+            "the bottom layer has nothing to merge into"
+        );
     }
 
     #[test]
@@ -2424,7 +2447,9 @@ mod tests {
     fn a_snapshot_restores_the_stack_the_boxes_and_the_cursor() {
         let mut m = VoxelModel::new(32, 32, 32);
         m.set(1, 1, 1, 3);
-        let top = m.add_layer_with(0, "cover", Bounds::new([8, 8, 8], [4, 4, 4])).unwrap();
+        let top = m
+            .add_layer_with(0, "cover", Bounds::new([8, 8, 8], [4, 4, 4]))
+            .unwrap();
         m.set_active_layer(top);
         m.set(9, 9, 9, 8);
         let saved = m.layer_snapshot();
@@ -2558,7 +2583,11 @@ mod tests {
         assert_eq!(m.get(2, 2, 2), 5, "the voxels are untouched");
         // Removing `arm` renumbers everything above it, `hand` included.
         assert_eq!(m.objects()[hand - 1].name, "HAND");
-        assert_eq!(m.objects()[hand - 1].parent, Some(robot), "the child moved up");
+        assert_eq!(
+            m.objects()[hand - 1].parent,
+            Some(robot),
+            "the child moved up"
+        );
         assert_eq!(m.layers()[l].object, robot, "and so did the layer");
     }
 
@@ -2597,7 +2626,11 @@ mod tests {
         assert_eq!(m.get(7, 4, 5), 1, "the body went with it");
         assert_eq!(m.get(9, 4, 5), 2, "and so did the child object's layer");
         assert_eq!(m.get(4, 4, 4), 0, "nothing was left behind");
-        assert_eq!(m.allocated_cells(), allocated, "and nothing was reallocated");
+        assert_eq!(
+            m.allocated_cells(),
+            allocated,
+            "and nothing was reallocated"
+        );
         assert_eq!(m.filled_count(), 2);
     }
 
@@ -2664,7 +2697,10 @@ mod tests {
         assert_eq!(m.layers()[0].filled_count(), 6);
         // `occupied` reads the plane tallies, so a shifted plane vector that
         // landed at the wrong offset shows up here and nowhere else.
-        assert_eq!(m.layers()[0].occupied(), Bounds::new([5, 6, 7], [46, 28, 49]));
+        assert_eq!(
+            m.layers()[0].occupied(),
+            Bounds::new([5, 6, 7], [46, 28, 49])
+        );
         assert_eq!(m.filled_count(), 6);
     }
 
@@ -2705,7 +2741,10 @@ mod tests {
                     }
                 }
                 let want = if any {
-                    Bounds::new(lo, [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1])
+                    Bounds::new(
+                        lo,
+                        [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1],
+                    )
                 } else {
                     Bounds::default()
                 };

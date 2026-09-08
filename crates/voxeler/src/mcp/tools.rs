@@ -134,9 +134,11 @@ impl Roots {
     /// Resolve a path the agent gave, or say why not.
     pub fn resolve(&self, given: &str) -> Result<PathBuf, String> {
         if self.0.is_empty() {
-            return Err("this server edits the document the user already has open, and cannot \
+            return Err(
+                "this server edits the document the user already has open, and cannot \
                         reach the filesystem. The user saves it."
-                .into());
+                    .into(),
+            );
         }
         let path = Path::new(given);
         for part in path.components() {
@@ -688,8 +690,7 @@ pub fn list() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "trim_layer",
-            description:
-                "Shrink a layer's box to the voxels it actually holds. Boxes keep their \
+            description: "Shrink a layer's box to the voxels it actually holds. Boxes keep their \
                  high-water mark while you work so that erasing and redrawing does not churn \
                  them; this is how you hand the space back when a part is finished.",
             input_schema: json!({
@@ -1112,10 +1113,7 @@ fn dispatch(
             let before = editor.model().layer_count();
             let bounds = match (args.get("origin"), args.get("size")) {
                 (None, None) => Bounds::default(),
-                _ => Bounds::new(
-                    u16_triple(args, "origin")?,
-                    u16_triple(args, "size")?,
-                ),
+                _ => Bounds::new(u16_triple(args, "origin")?, u16_triple(args, "size")?),
             };
             match args.get("name").and_then(Value::as_str) {
                 Some(name) => editor.add_named_layer(name, bounds),
@@ -1180,7 +1178,11 @@ fn dispatch(
         "duplicate_selection" => {
             let delta = [axis(args, "dx")?, axis(args, "dy")?, axis(args, "dz")?];
             let report = editor.duplicate_selection(delta)?;
-            Ok(CallResult::text(transform_text(editor, "duplicated", &report)))
+            Ok(CallResult::text(transform_text(
+                editor,
+                "duplicated",
+                &report,
+            )))
         }
         "flip_selection" => {
             let axis = axis_arg(args)?;
@@ -1608,7 +1610,10 @@ fn dispatch(
             }
             let model = voxel_core::format::load(&path).map_err(|e| format!("{given}: {e}"))?;
             editor.open(model, path);
-            Ok(CallResult::text(format!("opened {given}\n{}", describe(editor))))
+            Ok(CallResult::text(format!(
+                "opened {given}\n{}",
+                describe(editor)
+            )))
         }
         "new_model" => {
             let given = path_arg(args)?;
@@ -1654,7 +1659,10 @@ fn dispatch(
                 "saved {}{}\n{}",
                 root.relative(&path),
                 if flattened {
-                    format!(" — {} layers flattened into one", editor.model().layer_count())
+                    format!(
+                        " — {} layers flattened into one",
+                        editor.model().layer_count()
+                    )
                 } else {
                     String::new()
                 },
@@ -2029,7 +2037,9 @@ fn layer_rows(editor: &Editor) -> Vec<Value> {
             // the row cannot settle: this layer is switched on and still not
             // drawn, because an object above it is hidden.
             if l.shown() == l.visible {
-                row.as_object_mut().expect("a row is an object").remove("shown");
+                row.as_object_mut()
+                    .expect("a row is an object")
+                    .remove("shown");
             }
             row
         })
@@ -2055,7 +2065,9 @@ fn object_rows(editor: &Editor) -> Vec<Value> {
     let path = |mut i: usize| {
         let mut parts = Vec::new();
         for _ in 0..model.object_count() {
-            let Some(o) = model.objects().get(i) else { break };
+            let Some(o) = model.objects().get(i) else {
+                break;
+            };
             parts.push(o.name.clone());
             match o.parent {
                 Some(p) => i = p,
@@ -2424,7 +2436,11 @@ mod tests {
 
         // An edit to the source is one undo step and moves both.
         let depth = e.undo_depth();
-        run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 1, "color": 5}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 1, "color": 5}),
+        );
         assert_eq!(e.undo_depth(), depth + 1, "one step, not two");
         assert_eq!(e.model().get(5, 2, 1), 5, "the copy grew with it");
 
@@ -2500,8 +2516,16 @@ mod tests {
             "set_layer_object",
             json!({"layer": "ARM", "object": "ARM"}),
         );
-        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [2,1,1], "color": 3}));
-        run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 1, "color": 3}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [1,1,1], "to": [2,1,1], "color": 3}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 1, "color": 3}),
+        );
 
         let r = run(
             &mut e,
@@ -2530,14 +2554,21 @@ mod tests {
             .iter()
             .find(|o| o["name"] == "ARM")
             .unwrap();
-        assert!(arm["instanced_by"].is_array(), "the source says it has copies");
+        assert!(
+            arm["instanced_by"].is_array(),
+            "the source says it has copies"
+        );
         assert_eq!(
             rows["layers"].as_array().unwrap()[2]["generated"],
             json!(true)
         );
 
         // All or nothing: a refused placement leaves it exactly where it was.
-        let r = run(&mut e, "place_instance", json!({"object": "ARM R", "dx": 99}));
+        let r = run(
+            &mut e,
+            "place_instance",
+            json!({"object": "ARM R", "dx": 99}),
+        );
         assert_eq!(r.is_error, Some(true));
         assert_eq!(e.model().get(6, 2, 1), 3);
     }
@@ -2568,7 +2599,11 @@ mod tests {
         // Growing the source's box far to the right carries the copy over the
         // edge. The rebuild clips rather than refusing — it is a consequence of
         // an edit somewhere else — so the listing is where it has to show.
-        run(&mut e, "put_voxel", json!({"x": 6, "y": 1, "z": 1, "color": 5}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 6, "y": 1, "z": 1, "color": 5}),
+        );
         assert_eq!(listed(&mut e)["instance"]["clipped"], json!(true));
         assert!(listed(&mut e)["instance"]["note"]
             .as_str()
@@ -2588,8 +2623,16 @@ mod tests {
     #[test]
     fn count_by_color_says_what_the_model_is_made_of() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "put_rect", json!({"from": [0,1,0], "to": [1,1,1], "color": 9}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,1,0], "to": [1,1,1], "color": 9}),
+        );
 
         let j = json_of(&run(&mut e, "count_by_color", json!({})));
         assert_eq!(j["colors"][0]["color"], 4, "most first");
@@ -2597,7 +2640,11 @@ mod tests {
         assert_eq!(j["colors"][1]["color"], 9);
         assert_eq!(j["colors"][1]["voxels"], 4);
         assert_eq!(j["voxels"], 20);
-        assert_eq!(j["colors"].as_array().unwrap().len(), 2, "and air is not a colour");
+        assert_eq!(
+            j["colors"].as_array().unwrap().len(),
+            2,
+            "and air is not a colour"
+        );
     }
 
     /// Colour names a part in a way a box does not, so a colour selection has
@@ -2605,8 +2652,16 @@ mod tests {
     #[test]
     fn select_by_color_hands_the_voxels_to_a_transform() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [2,1,2], "color": 9}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [1,1,1], "to": [2,1,2], "color": 9}),
+        );
 
         let j = json_of(&run(&mut e, "select_by_color", json!({"color": 9})));
         assert_eq!(j["voxels"], 4);
@@ -2621,7 +2676,11 @@ mod tests {
     #[test]
     fn selecting_a_colour_the_layer_does_not_hold_says_so() {
         let mut e = editor();
-        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 4}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 1, "z": 1, "color": 4}),
+        );
         let r = run(&mut e, "select_by_color", json!({"color": 200}));
         assert_eq!(r.is_error, Some(true));
         assert!(text_of(&r).contains("count_by_color"), "{}", text_of(&r));
@@ -2633,13 +2692,24 @@ mod tests {
     #[test]
     fn replace_color_moves_voxels_between_slots_and_leaves_the_palette_alone() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
         run(&mut e, "add_layer", json!({"name": "TOP"}));
-        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 4}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 0, "y": 1, "z": 0, "color": 4}),
+        );
         let was = rgb_of(&e, 4);
 
         let j = json_of(&run(&mut e, "replace_color", json!({"from": 4, "to": 9})));
-        assert_eq!(j["voxels"], 17, "across every layer, not just the active one");
+        assert_eq!(
+            j["voxels"], 17,
+            "across every layer, not just the active one"
+        );
         assert_eq!(e.model().get(0, 0, 0), 9);
         assert_eq!(e.model().get(0, 1, 0), 9);
         assert_eq!(rgb_of(&e, 4), was, "index 4 still means what it meant");
@@ -2652,9 +2722,17 @@ mod tests {
     fn merge_colors_folds_several_into_one_and_reports_each() {
         let mut e = editor();
         for (n, c) in [(0, 4u64), (1, 5), (2, 6)] {
-            run(&mut e, "put_rect", json!({"from": [0,n,0], "to": [1,n,1], "color": c}));
+            run(
+                &mut e,
+                "put_rect",
+                json!({"from": [0,n,0], "to": [1,n,1], "color": c}),
+            );
         }
-        let j = json_of(&run(&mut e, "merge_colors", json!({"colors": [4, 5], "into": 6})));
+        let j = json_of(&run(
+            &mut e,
+            "merge_colors",
+            json!({"colors": [4, 5], "into": 6}),
+        ));
         assert_eq!(j["voxels"], 8);
         let from = j["from"].as_array().unwrap();
         assert_eq!(from.len(), 2, "each source index is reported");
@@ -2669,8 +2747,16 @@ mod tests {
     #[test]
     fn swap_colors_moves_the_voxels_and_not_the_palette() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 9}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 0, "y": 1, "z": 0, "color": 9}),
+        );
         let (four, nine) = (rgb_of(&e, 4), rgb_of(&e, 9));
 
         let j = json_of(&run(&mut e, "swap_colors", json!({"a": 4, "b": 9})));
@@ -2678,7 +2764,11 @@ mod tests {
         assert_eq!(j["b_to_a"], 1);
         assert_eq!(e.model().get(0, 0, 0), 9);
         assert_eq!(e.model().get(0, 1, 0), 4);
-        assert_eq!((rgb_of(&e, 4), rgb_of(&e, 9)), (four, nine), "the palette did not move");
+        assert_eq!(
+            (rgb_of(&e, 4), rgb_of(&e, 9)),
+            (four, nine),
+            "the palette did not move"
+        );
     }
 
     /// A compact renumbers, which means it changes the palette *and* every
@@ -2687,8 +2777,16 @@ mod tests {
     #[test]
     fn compact_palette_renumbers_both_halves_and_undoes_as_one() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [1,0,1], "color": 40}));
-        run(&mut e, "put_voxel", json!({"x": 0, "y": 1, "z": 0, "color": 200}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [1,0,1], "color": 40}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 0, "y": 1, "z": 0, "color": 200}),
+        );
         let (was_40, was_200) = (rgb_of(&e, 40), rgb_of(&e, 200));
 
         let j = json_of(&run(&mut e, "compact_palette", json!({})));
@@ -2708,7 +2806,11 @@ mod tests {
     #[test]
     fn compacting_an_already_compact_palette_is_a_refusal_not_an_undo_step() {
         let mut e = editor();
-        run(&mut e, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 1}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 0, "y": 0, "z": 0, "color": 1}),
+        );
         let before = e.undo_depth();
         let r = run(&mut e, "compact_palette", json!({}));
         assert_eq!(r.is_error, Some(true));
@@ -2720,7 +2822,11 @@ mod tests {
     #[test]
     fn no_palette_operation_will_take_air_for_a_colour() {
         let mut e = editor();
-        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 4}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 1, "z": 1, "color": 4}),
+        );
         for (tool, args) in [
             ("replace_color", json!({"from": 0, "to": 4})),
             ("replace_color", json!({"from": 4, "to": 0})),
@@ -2745,16 +2851,28 @@ mod tests {
     fn objects_group_layers_and_report_where_each_one_sits() {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "ROBOT"}));
-        run(&mut e, "create_object", json!({"name": "LEFT ARM", "parent": "ROBOT"}));
+        run(
+            &mut e,
+            "create_object",
+            json!({"name": "LEFT ARM", "parent": "ROBOT"}),
+        );
         run(&mut e, "add_layer", json!({"name": "SKIN"}));
-        run(&mut e, "set_layer_object", json!({"layer": "SKIN", "object": "LEFT ARM"}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": "SKIN", "object": "LEFT ARM"}),
+        );
 
         let j = json_of(&run(&mut e, "list_objects", json!({})));
         assert_eq!(j["objects"][0]["path"], "SCENE");
         assert_eq!(j["objects"][2]["path"], "SCENE/ROBOT/LEFT ARM");
         assert_eq!(j["objects"][2]["parent"], 1);
         assert_eq!(j["objects"][2]["layers"], json!([1]), "SKIN is in the arm");
-        assert_eq!(j["objects"][0]["layers"], json!([0]), "and layer 0 is at the root");
+        assert_eq!(
+            j["objects"][0]["layers"],
+            json!([0]),
+            "and layer 0 is at the root"
+        );
         assert_eq!(j["layers"][1]["object"], 2);
     }
 
@@ -2766,18 +2884,34 @@ mod tests {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "SWORD"}));
         run(&mut e, "add_layer", json!({"name": "BLADE"}));
-        run(&mut e, "set_layer_object", json!({"layer": "BLADE", "object": "SWORD"}));
-        run(&mut e, "put_voxel", json!({"x": 2, "y": 2, "z": 2, "color": 5}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": "BLADE", "object": "SWORD"}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 2, "y": 2, "z": 2, "color": 5}),
+        );
         assert_eq!(e.model().filled_count(), 1);
 
-        run(&mut e, "set_object_visible", json!({"object": "SWORD", "visible": false}));
+        run(
+            &mut e,
+            "set_object_visible",
+            json!({"object": "SWORD", "visible": false}),
+        );
         assert_eq!(e.model().filled_count(), 0, "it is not on screen");
         assert_eq!(e.model().get_in(1, 2, 2, 2), 5, "but it is still there");
 
         let j = json_of(&run(&mut e, "list_objects", json!({})));
         assert_eq!(j["layers"][1]["visible"], true, "the layer's own flag");
         assert_eq!(j["layers"][1]["shown"], false, "and why it is not drawn");
-        assert_eq!(j["layers"][0]["shown"], Value::Null, "quiet when they agree");
+        assert_eq!(
+            j["layers"][0]["shown"],
+            Value::Null,
+            "quiet when they agree"
+        );
     }
 
     /// Moving an object carries its children's layers, costs no reallocation,
@@ -2786,12 +2920,32 @@ mod tests {
     fn moving_an_object_carries_its_subtree_and_undoes_in_one_step() {
         let mut e = Editor::new(VoxelModel::new(32, 32, 32), PathBuf::from("t.vxm"));
         run(&mut e, "create_object", json!({"name": "ROBOT"}));
-        run(&mut e, "create_object", json!({"name": "ARM", "parent": "ROBOT"}));
-        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "ROBOT"}));
-        run(&mut e, "put_rect", json!({"from": [4,4,4], "to": [5,5,5], "color": 1}));
+        run(
+            &mut e,
+            "create_object",
+            json!({"name": "ARM", "parent": "ROBOT"}),
+        );
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": 0, "object": "ROBOT"}),
+        );
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [4,4,4], "to": [5,5,5], "color": 1}),
+        );
         run(&mut e, "add_layer", json!({"name": "HAND"}));
-        run(&mut e, "set_layer_object", json!({"layer": "HAND", "object": "ARM"}));
-        run(&mut e, "put_voxel", json!({"x": 8, "y": 4, "z": 4, "color": 2}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": "HAND", "object": "ARM"}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 8, "y": 4, "z": 4, "color": 2}),
+        );
         let allocated = e.model().allocated_cells();
 
         let j = json_of(&run(
@@ -2801,7 +2955,11 @@ mod tests {
         ));
         assert_eq!(j["moved_layers"], 2);
         assert_eq!(e.model().get(6, 5, 4), 1, "the body moved");
-        assert_eq!(e.model().get(10, 5, 4), 2, "and the child object's layer too");
+        assert_eq!(
+            e.model().get(10, 5, 4),
+            2,
+            "and the child object's layer too"
+        );
         assert_eq!(e.model().get(4, 4, 4), 0, "nothing stayed behind");
         assert_eq!(e.model().allocated_cells(), allocated, "no reallocation");
 
@@ -2816,10 +2974,22 @@ mod tests {
     fn a_move_that_would_leave_the_scene_is_refused_with_a_reason() {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "PART"}));
-        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "PART"}));
-        run(&mut e, "put_voxel", json!({"x": 7, "y": 1, "z": 1, "color": 3}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": 0, "object": "PART"}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 7, "y": 1, "z": 1, "color": 3}),
+        );
 
-        let r = run(&mut e, "move_object", json!({"object": "PART", "dx": 4, "dy": 0, "dz": 0}));
+        let r = run(
+            &mut e,
+            "move_object",
+            json!({"object": "PART", "dx": 4, "dy": 0, "dz": 0}),
+        );
         assert_eq!(r.is_error, Some(true));
         let why = text_of(&r);
         assert!(why.contains("outside the scene"), "{why}");
@@ -2833,8 +3003,16 @@ mod tests {
     fn objects_undo_and_deleting_one_keeps_its_layers() {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "TREE"}));
-        run(&mut e, "set_layer_object", json!({"layer": 0, "object": "TREE"}));
-        run(&mut e, "put_voxel", json!({"x": 1, "y": 1, "z": 1, "color": 6}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": 0, "object": "TREE"}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 1, "z": 1, "color": 6}),
+        );
 
         run(&mut e, "delete_object", json!({"object": "TREE"}));
         assert_eq!(e.model().object_count(), 1, "the label is gone");
@@ -2842,9 +3020,17 @@ mod tests {
         assert_eq!(e.model().layers()[0].object, 0, "the layer moved up");
 
         run(&mut e, "undo", json!({}));
-        assert_eq!(e.model().object_count(), 2, "and undo brings the label back");
+        assert_eq!(
+            e.model().object_count(),
+            2,
+            "and undo brings the label back"
+        );
         assert_eq!(e.model().objects()[1].name, "TREE");
-        assert_eq!(e.model().layers()[0].object, 1, "with the layer back inside it");
+        assert_eq!(
+            e.model().layers()[0].object,
+            1,
+            "with the layer back inside it"
+        );
     }
 
     /// A cycle is refused, and the message is one an agent can act on.
@@ -2853,9 +3039,17 @@ mod tests {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "A"}));
         run(&mut e, "create_object", json!({"name": "B", "parent": "A"}));
-        let r = run(&mut e, "reparent_object", json!({"object": "A", "parent": "B"}));
+        let r = run(
+            &mut e,
+            "reparent_object",
+            json!({"object": "A", "parent": "B"}),
+        );
         assert_eq!(r.is_error, Some(true));
-        assert!(text_of(&r).contains("cannot be part of itself"), "{}", text_of(&r));
+        assert!(
+            text_of(&r).contains("cannot be part of itself"),
+            "{}",
+            text_of(&r)
+        );
         assert_eq!(e.model().objects()[1].parent, Some(0), "and nothing moved");
     }
 
@@ -2864,7 +3058,11 @@ mod tests {
     fn an_unknown_object_name_lists_the_known_ones() {
         let mut e = editor();
         run(&mut e, "create_object", json!({"name": "ROBOT"}));
-        let r = run(&mut e, "set_object_visible", json!({"object": "ROBT", "visible": false}));
+        let r = run(
+            &mut e,
+            "set_object_visible",
+            json!({"object": "ROBT", "visible": false}),
+        );
         assert_eq!(r.is_error, Some(true));
         let why = text_of(&r);
         assert!(why.contains("ROBOT"), "{why}");
@@ -2887,7 +3085,11 @@ mod tests {
     #[test]
     fn put_voxel_reports_what_it_did_to_the_cell() {
         let mut e = editor();
-        let r = run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 3, "color": 7}));
+        let r = run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 3, "color": 7}),
+        );
         let j = json_of(&r);
         assert_eq!(j["targeted"], 1);
         assert_eq!(j["added"], 1);
@@ -2895,15 +3097,27 @@ mod tests {
         assert_eq!(e.model().get(1, 2, 3), 7);
 
         // The same write again changes nothing, and says so.
-        let j = json_of(&run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 3, "color": 7})));
+        let j = json_of(&run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 3, "color": 7}),
+        ));
         assert_eq!(j["unchanged"], 1);
         assert_eq!(j["added"], 0);
 
-        let j = json_of(&run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 3, "color": 9})));
+        let j = json_of(&run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 3, "color": 9}),
+        ));
         assert_eq!(j["repainted"], 1);
 
         // Colour 0 is air, so it erases.
-        let j = json_of(&run(&mut e, "put_voxel", json!({"x": 1, "y": 2, "z": 3, "color": 0})));
+        let j = json_of(&run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 3, "color": 0}),
+        ));
         assert_eq!(j["removed"], 1);
         assert_eq!(j["model_voxels"], 0);
     }
@@ -2913,8 +3127,16 @@ mod tests {
     #[test]
     fn the_outcomes_account_for_every_cell_targeted() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 5}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 0, "y": 0, "z": 0, "color": 5}),
+        );
 
         let j = json_of(&run(
             &mut e,
@@ -2935,7 +3157,11 @@ mod tests {
     #[test]
     fn a_whole_tool_call_is_one_undo_step() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [7,7,7], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [7,7,7], "color": 4}),
+        );
         assert_eq!(e.model().filled_count(), 512);
         assert_eq!(e.undo_depth(), 1, "one ctrl+Z, not five hundred");
         e.undo();
@@ -2947,8 +3173,16 @@ mod tests {
     #[test]
     fn paint_recolours_material_and_creates_none() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [2,2,2], "color": 4}));
-        let j = json_of(&run(&mut e, "paint", json!({"from": [0,0,0], "to": [7,7,7], "color": 9})));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [1,1,1], "to": [2,2,2], "color": 4}),
+        );
+        let j = json_of(&run(
+            &mut e,
+            "paint",
+            json!({"from": [0,0,0], "to": [7,7,7], "color": 9}),
+        ));
 
         assert_eq!(j["targeted"], 8, "only the solid cells were in range");
         assert_eq!(j["repainted"], 8);
@@ -2960,7 +3194,11 @@ mod tests {
     #[test]
     fn paint_refuses_colour_zero_rather_than_erasing_by_surprise() {
         let mut e = editor();
-        let r = run(&mut e, "paint", json!({"from": [0,0,0], "to": [1,1,1], "color": 0}));
+        let r = run(
+            &mut e,
+            "paint",
+            json!({"from": [0,0,0], "to": [1,1,1], "color": 0}),
+        );
         assert_eq!(r.is_error, Some(true));
     }
 
@@ -2971,18 +3209,29 @@ mod tests {
     #[test]
     fn fill_refuses_a_cell_another_layer_owns() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
         run(&mut e, "add_layer", json!({"name": "TOWER"}));
 
         let r = run(&mut e, "fill", json!({"x": 0, "y": 0, "z": 0, "color": 9}));
         assert_eq!(r.is_error, Some(true));
         let text = text_of(&r);
-        assert!(text.contains("TOWER") || text.contains("select_layer"), "{text}");
+        assert!(
+            text.contains("TOWER") || text.contains("select_layer"),
+            "{text}"
+        );
         assert_eq!(e.model().layers()[1].filled_count(), 0, "no ghost copy");
 
         // Told where to go, it works.
         run(&mut e, "select_layer", json!({"layer": 0}));
-        let j = json_of(&run(&mut e, "fill", json!({"x": 0, "y": 0, "z": 0, "color": 9})));
+        let j = json_of(&run(
+            &mut e,
+            "fill",
+            json!({"x": 0, "y": 0, "z": 0, "color": 9}),
+        ));
         assert_eq!(j["repainted"], 16);
     }
 
@@ -2991,30 +3240,64 @@ mod tests {
     #[test]
     fn fill_follows_only_the_active_layers_own_shape() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
         run(&mut e, "add_layer", json!({"name": "TOWER"}));
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [1,0,1], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [1,0,1], "color": 4}),
+        );
 
-        let j = json_of(&run(&mut e, "fill", json!({"x": 0, "y": 0, "z": 0, "color": 9})));
-        assert_eq!(j["repainted"], 4, "the four cells this layer holds, not the sixteen below");
+        let j = json_of(&run(
+            &mut e,
+            "fill",
+            json!({"x": 0, "y": 0, "z": 0, "color": 9}),
+        ));
+        assert_eq!(
+            j["repainted"], 4,
+            "the four cells this layer holds, not the sixteen below"
+        );
         assert_eq!(e.model().get_in(0, 3, 0, 3), 4, "the slab is untouched");
     }
 
     #[test]
     fn fill_follows_the_connected_region_it_was_seeded_in() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "put_voxel", json!({"x": 7, "y": 0, "z": 7, "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 7, "y": 0, "z": 7, "color": 4}),
+        );
 
-        let j = json_of(&run(&mut e, "fill", json!({"x": 0, "y": 0, "z": 0, "color": 9})));
-        assert_eq!(j["repainted"], 16, "the slab, and not the speck across the floor");
+        let j = json_of(&run(
+            &mut e,
+            "fill",
+            json!({"x": 0, "y": 0, "z": 0, "color": 9}),
+        ));
+        assert_eq!(
+            j["repainted"], 16,
+            "the slab, and not the speck across the floor"
+        );
         assert_eq!(e.model().get(7, 0, 7), 4);
     }
 
     #[test]
     fn a_box_outside_the_volume_is_refused_rather_than_clipped() {
         let mut e = editor();
-        let r = run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [8,1,1], "color": 4}));
+        let r = run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [8,1,1], "color": 4}),
+        );
         assert_eq!(r.is_error, Some(true));
         let text = text_of(&r);
         assert!(text.contains("8x8x8"), "{text}");
@@ -3024,21 +3307,37 @@ mod tests {
     #[test]
     fn corners_may_be_given_in_either_order() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [3,3,3], "to": [1,1,1], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [3,3,3], "to": [1,1,1], "color": 4}),
+        );
         assert_eq!(e.model().filled_count(), 27);
     }
 
     #[test]
     fn edits_land_on_the_active_layer_and_the_report_names_it() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
         run(&mut e, "add_layer", json!({"name": "ARMOUR"}));
-        let j = json_of(&run(&mut e, "put_rect", json!({"from": [0,1,0], "to": [3,1,3], "color": 9})));
+        let j = json_of(&run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,1,0], "to": [3,1,3], "color": 9}),
+        ));
 
         assert_eq!(j["layer"], "ARMOUR");
         assert_eq!(j["layer_voxels"], 16);
         assert_eq!(j["model_voxels"], 32);
-        assert_eq!(e.model().get_in(0, 0, 1, 0), 0, "nothing landed on the layer below");
+        assert_eq!(
+            e.model().get_in(0, 0, 1, 0),
+            0,
+            "nothing landed on the layer below"
+        );
     }
 
     #[test]
@@ -3061,20 +3360,35 @@ mod tests {
     #[test]
     fn hiding_a_layer_keeps_its_voxels_out_of_the_visible_count() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,0,3], "color": 4}));
-        run(&mut e, "set_layer_visible", json!({"layer": 0, "visible": false}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,0,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "set_layer_visible",
+            json!({"layer": 0, "visible": false}),
+        );
         assert_eq!(e.model().filled_count(), 0);
 
         let j = json_of(&run(&mut e, "describe_model", json!({})));
         assert_eq!(j["voxels"], 0);
-        assert_eq!(j["layers"][0]["voxels"], 16, "but the layer still holds them");
+        assert_eq!(
+            j["layers"][0]["voxels"], 16,
+            "but the layer still holds them"
+        );
         assert_eq!(j["layers"][0]["visible"], false);
     }
 
     #[test]
     fn describe_model_carries_what_the_other_tools_need() {
         let mut e = editor();
-        run(&mut e, "put_voxel", json!({"x": 2, "y": 3, "z": 4, "color": 7}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 2, "y": 3, "z": 4, "color": 7}),
+        );
         let j = json_of(&run(&mut e, "describe_model", json!({})));
 
         assert_eq!(j["size"], json!([8, 8, 8]));
@@ -3111,13 +3425,20 @@ mod tests {
         run(&mut e, "put_voxel", json!({"x": 0, "y": 0, "z": 0}));
         assert_eq!(e.model().get(0, 0, 0), 42);
 
-        assert_eq!(run(&mut e, "set_color", json!({"color": 0})).is_error, Some(true));
+        assert_eq!(
+            run(&mut e, "set_color", json!({"color": 0})).is_error,
+            Some(true)
+        );
     }
 
     #[test]
     fn subdivide_scales_the_scene_and_reports_it() {
         let mut e = Editor::new(VoxelModel::new(16, 16, 16), PathBuf::from("t.vxm"));
-        run(&mut e, "put_rect", json!({"from": [2,2,2], "to": [5,5,5], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [2,2,2], "to": [5,5,5], "color": 4}),
+        );
         let voxels = e.model().filled_count();
 
         let j = json_of(&run(&mut e, "subdivide", json!({})));
@@ -3141,8 +3462,14 @@ mod tests {
         assert!(text_of(&r).contains("256"), "{}", text_of(&r));
 
         let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
-        assert_eq!(run(&mut e, "subdivide", json!({"factor": 1})).is_error, Some(true));
-        assert_eq!(run(&mut e, "subdivide", json!({"factor": 99})).is_error, Some(true));
+        assert_eq!(
+            run(&mut e, "subdivide", json!({"factor": 1})).is_error,
+            Some(true)
+        );
+        assert_eq!(
+            run(&mut e, "subdivide", json!({"factor": 99})).is_error,
+            Some(true)
+        );
         assert_eq!(e.model().size(), [8, 8, 8]);
     }
 
@@ -3152,9 +3479,21 @@ mod tests {
     #[test]
     fn layers_can_be_declared_with_their_own_boxes() {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
-        run(&mut e, "add_layer", json!({"name": "GROUND", "origin": [0,0,0], "size": [64,5,64]}));
-        run(&mut e, "add_layer", json!({"name": "TREE", "origin": [20,5,10], "size": [16,32,16]}));
-        run(&mut e, "add_layer", json!({"name": "CHARACTER", "origin": [40,5,40], "size": [16,16,16]}));
+        run(
+            &mut e,
+            "add_layer",
+            json!({"name": "GROUND", "origin": [0,0,0], "size": [64,5,64]}),
+        );
+        run(
+            &mut e,
+            "add_layer",
+            json!({"name": "TREE", "origin": [20,5,10], "size": [16,32,16]}),
+        );
+        run(
+            &mut e,
+            "add_layer",
+            json!({"name": "CHARACTER", "origin": [40,5,40], "size": [16,16,16]}),
+        );
 
         let j = json_of(&run(&mut e, "describe_model", json!({})));
         assert_eq!(j["size"], json!([64, 64, 64]));
@@ -3175,8 +3514,16 @@ mod tests {
     #[test]
     fn a_write_outside_a_declared_box_grows_it_rather_than_failing() {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
-        run(&mut e, "add_layer", json!({"name": "TREE", "origin": [20,5,10], "size": [4,4,4]}));
-        let r = run(&mut e, "put_voxel", json!({"x": 19, "y": 5, "z": 10, "color": 7}));
+        run(
+            &mut e,
+            "add_layer",
+            json!({"name": "TREE", "origin": [20,5,10], "size": [4,4,4]}),
+        );
+        let r = run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 19, "y": 5, "z": 10, "color": 7}),
+        );
         assert_eq!(r.is_error, None);
         assert_eq!(json_of(&r)["added"], 1);
 
@@ -3188,19 +3535,35 @@ mod tests {
     #[test]
     fn trim_layer_reports_the_space_it_gave_back() {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,15], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [15,15,15], "color": 4}),
+        );
         // Two partial erases, leaving the far corner column standing. A layer
         // emptied outright hands its box back by itself, so a trim there would
         // have nothing left to report.
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [11,15,15], "color": 0}));
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [15,15,11], "color": 0}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [11,15,15], "color": 0}),
+        );
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [15,15,11], "color": 0}),
+        );
 
         let j = json_of(&run(&mut e, "trim_layer", json!({})));
         assert_eq!(j["cells_before"], 4096, "the box the erases left standing");
         assert_eq!(j["cells_after"], 4 * 16 * 4);
         assert_eq!(j["origin"], json!([12, 0, 12]));
         assert_eq!(j["allocated_cells"], 4 * 16 * 4);
-        assert_eq!(e.model().get(12, 0, 12), 4, "and the voxels are still there");
+        assert_eq!(
+            e.model().get(12, 0, 12),
+            4,
+            "and the voxels are still there"
+        );
     }
 
     #[test]
@@ -3268,7 +3631,9 @@ mod tests {
         assert_eq!(root.resolve(deep.to_str().unwrap()).unwrap(), deep);
 
         let outside = temp_root("absolute-elsewhere").canonicalize().unwrap();
-        assert!(root.resolve(outside.join("x.vxm").to_str().unwrap()).is_err());
+        assert!(root
+            .resolve(outside.join("x.vxm").to_str().unwrap())
+            .is_err());
     }
 
     #[test]
@@ -3302,8 +3667,15 @@ mod tests {
         let root = Roots::new([dir.clone()]);
 
         assert!(root.resolve("escape/stolen.vxm").is_err(), "by name");
-        let via = dir.canonicalize().unwrap().join("escape").join("stolen.vxm");
-        assert!(root.resolve(via.to_str().unwrap()).is_err(), "and absolutely");
+        let via = dir
+            .canonicalize()
+            .unwrap()
+            .join("escape")
+            .join("stolen.vxm");
+        assert!(
+            root.resolve(via.to_str().unwrap()).is_err(),
+            "and absolutely"
+        );
     }
 
     /// And a link that stays *inside* a root is refused too. It would survive a
@@ -3334,7 +3706,10 @@ mod tests {
         assert!(text.contains("absolute"), "{text}");
 
         let none = Roots::none().instructions();
-        assert!(none.contains("no access") || none.contains("The user"), "{none}");
+        assert!(
+            none.contains("no access") || none.contains("The user"),
+            "{none}"
+        );
     }
 
     /// A listing with no directory named covers every root, or a model in the
@@ -3369,7 +3744,12 @@ mod tests {
         let mut e = editor();
         for (dir, size) in [(&a, 8), (&b, 16)] {
             let path = dir.canonicalize().unwrap().join("same.vxm");
-            let r = run_in(&mut e, &root, "new_model", json!({"path": path, "size": size}));
+            let r = run_in(
+                &mut e,
+                &root,
+                "new_model",
+                json!({"path": path, "size": size}),
+            );
             assert_eq!(r.is_error, None);
             for args in [json!({"path": path}), json!({})] {
                 let saved = run_in(&mut e, &root, "save_model", args);
@@ -3390,7 +3770,11 @@ mod tests {
             assert_eq!(path, PathBuf::from(row["absolute"].as_str().unwrap()));
             let opened = run_in(&mut e, &root, "open_model", json!({"path": row["path"]}));
             assert_eq!(opened.is_error, None);
-            let size = if path.starts_with(a.canonicalize().unwrap()) { 8 } else { 16 };
+            let size = if path.starts_with(a.canonicalize().unwrap()) {
+                8
+            } else {
+                16
+            };
             assert_eq!(e.model().size(), [size; 3]);
         }
         let _ = std::fs::remove_dir_all(a);
@@ -3404,10 +3788,18 @@ mod tests {
         let root = Roots::new([a.clone(), b.clone()]);
         let mut e = editor();
         let path = b.canonicalize().unwrap().join("preview.png");
-        let r = run_in(&mut e, &root, "screenshot", json!({"path": path, "width": 64, "height": 64}));
+        let r = run_in(
+            &mut e,
+            &root,
+            "screenshot",
+            json!({"path": path, "width": 64, "height": 64}),
+        );
         assert_eq!(r.is_error, None);
         let report = json_of(&r);
-        assert_eq!(root.resolve(report["path"].as_str().unwrap()).unwrap(), path);
+        assert_eq!(
+            root.resolve(report["path"].as_str().unwrap()).unwrap(),
+            path
+        );
         assert_eq!(base64(&std::fs::read(&path).unwrap()), image_of(&r));
         assert!(!a.join("preview.png").exists());
         let _ = std::fs::remove_dir_all(a);
@@ -3432,7 +3824,10 @@ mod tests {
         let r = call(&mut e, "open_model", &json!({"path": "anything.vxm"}));
         assert_eq!(r.is_error, Some(true));
         let text = text_of(&r);
-        assert!(!text.contains("no tool named"), "the tool exists, it is confined: {text}");
+        assert!(
+            !text.contains("no tool named"),
+            "the tool exists, it is confined: {text}"
+        );
     }
 
     #[test]
@@ -3441,11 +3836,24 @@ mod tests {
         let root = Roots::new([dir.clone()]);
         let mut e = editor();
 
-        run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 16}));
+        run_in(
+            &mut e,
+            &root,
+            "new_model",
+            json!({"path": "robot.vxm", "size": 16}),
+        );
         assert_eq!(e.model().size(), [16, 16, 16]);
-        assert!(!dir.join("robot.vxm").exists(), "new_model writes nothing yet");
+        assert!(
+            !dir.join("robot.vxm").exists(),
+            "new_model writes nothing yet"
+        );
 
-        run_in(&mut e, &root, "put_rect", json!({"from": [0,0,0], "to": [3,3,3], "color": 4}));
+        run_in(
+            &mut e,
+            &root,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,3,3], "color": 4}),
+        );
         let r = run_in(&mut e, &root, "save_model", json!({}));
         assert_eq!(r.is_error, None);
         assert!(dir.join("robot.vxm").exists(), "and save_model writes it");
@@ -3471,15 +3879,35 @@ mod tests {
         let dir = temp_root("flatten");
         let root = Roots::new([dir.clone()]);
         let mut e = editor();
-        run_in(&mut e, &root, "new_model", json!({"path": "m.vxm", "size": 8}));
+        run_in(
+            &mut e,
+            &root,
+            "new_model",
+            json!({"path": "m.vxm", "size": 8}),
+        );
         run_in(&mut e, &root, "add_layer", json!({"name": "TOP"}));
-        run_in(&mut e, &root, "put_voxel", json!({"x": 2, "y": 2, "z": 2, "color": 9}));
+        run_in(
+            &mut e,
+            &root,
+            "put_voxel",
+            json!({"x": 2, "y": 2, "z": 2, "color": 9}),
+        );
 
-        let j = json_of(&run_in(&mut e, &root, "save_model", json!({"path": "m.vox"})));
+        let j = json_of(&run_in(
+            &mut e,
+            &root,
+            "save_model",
+            json!({"path": "m.vox"}),
+        ));
         assert_eq!(j["flattened"], true);
         assert_eq!(j["layers"], 2);
 
-        let j = json_of(&run_in(&mut e, &root, "save_model", json!({"path": "m.vxm"})));
+        let j = json_of(&run_in(
+            &mut e,
+            &root,
+            "save_model",
+            json!({"path": "m.vxm"}),
+        ));
         assert_eq!(j["flattened"], false);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3499,8 +3927,18 @@ mod tests {
         let dir = temp_root("describe");
         let root = Roots::new([dir.clone()]);
         let mut e = editor();
-        run_in(&mut e, &root, "new_model", json!({"path": "robot.vxm", "size": 8}));
-        run_in(&mut e, &root, "put_voxel", json!({"x": 0, "y": 0, "z": 0, "color": 3}));
+        run_in(
+            &mut e,
+            &root,
+            "new_model",
+            json!({"path": "robot.vxm", "size": 8}),
+        );
+        run_in(
+            &mut e,
+            &root,
+            "put_voxel",
+            json!({"x": 0, "y": 0, "z": 0, "color": 3}),
+        );
 
         let j = json_of(&run_in(&mut e, &root, "describe_model", json!({})));
         assert_eq!(j["path"], "robot.vxm");
@@ -3532,7 +3970,11 @@ mod tests {
     #[test]
     fn a_screenshot_comes_back_as_a_png_image_block() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [1,1,1], "to": [6,3,4], "color": 4}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [1,1,1], "to": [6,3,4], "color": 4}),
+        );
         let r = run(&mut e, "screenshot", json!({"width": 128, "height": 96}));
 
         assert_eq!(r.is_error, None);
@@ -3540,7 +3982,11 @@ mod tests {
         assert!(data.len() > 100, "an empty picture is not a picture");
         // Base64 of a real PNG: the signature is the first eight bytes, which
         // is the first eleven base64 characters plus a bit.
-        assert!(data.starts_with("iVBORw0KG"), "not a PNG: {}", &data[..16.min(data.len())]);
+        assert!(
+            data.starts_with("iVBORw0KG"),
+            "not a PNG: {}",
+            &data[..16.min(data.len())]
+        );
         // And the text block says what was rendered, for a transcript to read.
         assert!(text_of(&r).contains("128x96"), "{}", text_of(&r));
     }
@@ -3550,13 +3996,21 @@ mod tests {
     #[test]
     fn a_screenshot_puts_the_camera_back_where_it_found_it() {
         let mut e = editor();
-        run(&mut e, "put_voxel", json!({"x": 4, "y": 4, "z": 4, "color": 1}));
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 4, "y": 4, "z": 4, "color": 1}),
+        );
         e.camera.yaw = 0.25;
         e.camera.pitch = 0.5;
         let before = (e.camera.yaw, e.camera.pitch, e.camera.distance);
         let grid = e.show_grid;
 
-        run(&mut e, "screenshot", json!({"yaw": 90, "pitch": 30, "width": 64, "height": 64}));
+        run(
+            &mut e,
+            "screenshot",
+            json!({"yaw": 90, "pitch": 30, "width": 64, "height": 64}),
+        );
         assert_eq!((e.camera.yaw, e.camera.pitch, e.camera.distance), before);
         assert_eq!(e.show_grid, grid, "and the grid setting too");
     }
@@ -3564,8 +4018,14 @@ mod tests {
     #[test]
     fn a_screenshot_of_a_size_it_cannot_render_is_refused() {
         let mut e = editor();
-        assert_eq!(run(&mut e, "screenshot", json!({"width": 4})).is_error, Some(true));
-        assert_eq!(run(&mut e, "screenshot", json!({"height": 99999})).is_error, Some(true));
+        assert_eq!(
+            run(&mut e, "screenshot", json!({"width": 4})).is_error,
+            Some(true)
+        );
+        assert_eq!(
+            run(&mut e, "screenshot", json!({"height": 99999})).is_error,
+            Some(true)
+        );
     }
 
     /// One tool call is one step, so an agent that regrets a fill takes it back
@@ -3573,13 +4033,25 @@ mod tests {
     #[test]
     fn undo_takes_back_whole_tool_calls_and_redo_puts_them_again() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from": [0,0,0], "to": [3,3,3], "color": 4}));
-        run(&mut e, "put_voxel", json!({"x": 7, "y": 7, "z": 7, "color": 9}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [3,3,3], "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 7, "y": 7, "z": 7, "color": 9}),
+        );
         assert_eq!(e.model().filled_count(), 65);
 
         let j = json_of(&run(&mut e, "undo", json!({})));
         assert_eq!(j["steps"], 1);
-        assert_eq!(e.model().filled_count(), 64, "one call, whatever it touched");
+        assert_eq!(
+            e.model().filled_count(),
+            64,
+            "one call, whatever it touched"
+        );
 
         let j = json_of(&run(&mut e, "undo", json!({"steps": 5})));
         assert_eq!(j["steps"], 1, "there was only one left to take");
@@ -3747,16 +4219,23 @@ mod tests {
 
     #[test]
     fn rotation_schema_and_non_square_rotation_agree_on_the_anchor() {
-        let tool = list().into_iter().find(|t| t.name == "rotate_selection").unwrap();
+        let tool = list()
+            .into_iter()
+            .find(|t| t.name == "rotate_selection")
+            .unwrap();
         assert!(tool.description.contains("low corner, NOT its centre"));
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from":[1,2,3],"to":[5,3,4],"color":7}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from":[1,2,3],"to":[5,3,4],"color":7}),
+        );
         run(&mut e, "select_box", json!({"from":[1,2,3],"to":[5,3,4]}));
         let before: Vec<_> = e.model().iter_filled().collect();
         let r = json_of(&run(&mut e, "rotate_selection", json!({"axis":"y"})));
         assert_eq!(r["dropped"], 0);
-        assert_eq!(r["selection"]["min"], json!([1,2,3]));
-        assert_eq!(r["selection"]["max"], json!([2,3,7]));
+        assert_eq!(r["selection"]["min"], json!([1, 2, 3]));
+        assert_eq!(r["selection"]["max"], json!([2, 3, 7]));
         run(&mut e, "rotate_selection", json!({"axis":"y","turns":-1}));
         assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
     }
@@ -3764,16 +4243,20 @@ mod tests {
     #[test]
     fn tapered_line_has_a_point_and_perpendicular_flat_caps() {
         let mut e = editor();
-        let r = run(&mut e, "put_tapered_line", json!({
-            "from":[1,3,3],"to":[5,3,3],"radius_from":2,"radius_to":0,"color":7
-        }));
+        let r = run(
+            &mut e,
+            "put_tapered_line",
+            json!({
+                "from":[1,3,3],"to":[5,3,3],"radius_from":2,"radius_to":0,"color":7
+            }),
+        );
         assert_eq!(r.is_error, None, "{}", text_of(&r));
-        assert_eq!(e.model().get(1,5,3), 7, "wide base");
-        assert_eq!(e.model().get(3,4,3), 7, "linear taper");
-        assert_eq!(e.model().get(5,3,3), 7, "the pointed tip is included");
-        assert_eq!(e.model().get(5,4,3), 0, "the tip has no upright stub");
-        assert_eq!(e.model().get(0,3,3), 0, "no rounded cap behind the base");
-        assert_eq!(e.model().get(6,3,3), 0, "nothing beyond the tip");
+        assert_eq!(e.model().get(1, 5, 3), 7, "wide base");
+        assert_eq!(e.model().get(3, 4, 3), 7, "linear taper");
+        assert_eq!(e.model().get(5, 3, 3), 7, "the pointed tip is included");
+        assert_eq!(e.model().get(5, 4, 3), 0, "the tip has no upright stub");
+        assert_eq!(e.model().get(0, 3, 3), 0, "no rounded cap behind the base");
+        assert_eq!(e.model().get(6, 3, 3), 0, "nothing beyond the tip");
         let count = e.model().filled_count();
         assert_eq!(e.undo_depth(), 1);
         e.undo();
@@ -3787,7 +4270,10 @@ mod tests {
         let mut e = editor();
         let shape = json!({"from":[1.5,1.,2.],"to":[5.5,6.,4.5],
             "radius_from":2.25,"radius_to":0.5,"color":7});
-        assert_eq!(run(&mut e, "put_tapered_line", shape.clone()).is_error, None);
+        assert_eq!(
+            run(&mut e, "put_tapered_line", shape.clone()).is_error,
+            None
+        );
         let before: std::collections::BTreeSet<_> = e.model().iter_filled().collect();
         e.undo();
         let mut reverse = shape.clone();
@@ -3796,29 +4282,53 @@ mod tests {
         reverse["radius_from"] = shape["radius_to"].clone();
         reverse["radius_to"] = shape["radius_from"].clone();
         assert_eq!(run(&mut e, "put_tapered_line", reverse).is_error, None);
-        assert_eq!(e.model().iter_filled().collect::<std::collections::BTreeSet<_>>(), before);
+        assert_eq!(
+            e.model()
+                .iter_filled()
+                .collect::<std::collections::BTreeSet<_>>(),
+            before
+        );
         e.undo();
         let mut rotated = shape.clone();
         for key in ["from", "to"] {
             rotated[key] = json!([shape[key][2], shape[key][0], shape[key][1]]);
         }
         run(&mut e, "put_tapered_line", rotated);
-        let expected = before.into_iter().map(|([x,y,z], c)| ([z,x,y], c)).collect();
-        assert_eq!(e.model().iter_filled().collect::<std::collections::BTreeSet<_>>(), expected);
+        let expected = before
+            .into_iter()
+            .map(|([x, y, z], c)| ([z, x, y], c))
+            .collect();
+        assert_eq!(
+            e.model()
+                .iter_filled()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
     }
 
     #[test]
     fn tapered_batch_matches_standalone_and_erases_only_its_layer() {
         let mut e = editor();
-        run(&mut e, "put_rect", json!({"from":[0,0,0],"to":[7,7,7],"color":3}));
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from":[0,0,0],"to":[7,7,7],"color":3}),
+        );
         run(&mut e, "add_layer", json!({"name":"BRANCH"}));
         run(&mut e, "select_layer", json!({"layer":0}));
         let shape = json!({"from":[0,0,0],"to":[6,0,0],
             "radius_from":2,"radius_to":2,"layer":"BRANCH","color":7});
-        assert_eq!(run(&mut e, "put_tapered_line", shape.clone()).is_error, None);
+        assert_eq!(
+            run(&mut e, "put_tapered_line", shape.clone()).is_error,
+            None
+        );
         let expected: Vec<_> = e.model().iter_filled_in(1).collect();
         assert!(!expected.is_empty());
-        assert_eq!(e.model().get_in(1, 6, 2, 0), 7, "flat cylinder clipped at scene edge");
+        assert_eq!(
+            e.model().get_in(1, 6, 2, 0),
+            7,
+            "flat cylinder clipped at scene edge"
+        );
         assert_eq!(e.model().get_in(1, 7, 0, 0), 0);
         e.undo();
         let mut operation = shape.clone();
@@ -3846,19 +4356,26 @@ mod tests {
         let shape = json!({"op":"tapered_line","from":[1,1,1],"to":[5,5,5],
             "radius_from":2,"radius_to":0});
         for (key, value) in [
-            ("radius_from", json!(-1)), ("radius_to", json!(257)),
-            ("radius_from", json!(0)), ("radius_to", json!("1")),
-            ("radius_to", Value::Null), ("to", json!([1,1,1])),
-            ("from", json!([8,1,1])), ("to", json!([2,3])),
+            ("radius_from", json!(-1)),
+            ("radius_to", json!(257)),
+            ("radius_from", json!(0)),
+            ("radius_to", json!("1")),
+            ("radius_to", Value::Null),
+            ("to", json!([1, 1, 1])),
+            ("from", json!([8, 1, 1])),
+            ("to", json!([2, 3])),
         ] {
             let mut invalid = shape.clone();
             invalid[key] = value;
             let before = voxel_core::format::native::encode(e.model());
             for (name, args) in [
                 ("put_tapered_line", invalid.clone()),
-                ("apply_edits", json!({"edits":[
-                    {"op":"voxel","x":2,"y":2,"z":2}, invalid
-                ]})),
+                (
+                    "apply_edits",
+                    json!({"edits":[
+                        {"op":"voxel","x":2,"y":2,"z":2}, invalid
+                    ]}),
+                ),
             ] {
                 let r = run(&mut e, name, args);
                 assert_eq!(r.is_error, Some(true), "{key}: {}", text_of(&r));
@@ -3872,9 +4389,13 @@ mod tests {
     #[test]
     fn tapered_line_charges_its_candidate_box_before_writing() {
         let mut e = Editor::new(VoxelModel::new(256, 256, 256), PathBuf::from("t.vxm"));
-        let r = run(&mut e, "put_tapered_line", json!({
-            "from":[0,0,0],"to":[255,255,255],"radius_from":256,"radius_to":0
-        }));
+        let r = run(
+            &mut e,
+            "put_tapered_line",
+            json!({
+                "from":[0,0,0],"to":[255,255,255],"radius_from":256,"radius_to":0
+            }),
+        );
         assert_eq!(r.is_error, Some(true));
         assert!(text_of(&r).contains("candidate cells"));
         assert_eq!(e.model().filled_count(), 0);

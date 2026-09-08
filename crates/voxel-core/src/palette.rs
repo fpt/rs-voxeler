@@ -131,6 +131,9 @@ mod tests {
 
     #[test]
     fn scaling_saturates_rather_than_wrapping() {
-        assert_eq!(Rgb8::new(200, 200, 200).scaled(4.0), Rgb8::new(255, 255, 255));
+        assert_eq!(
+            Rgb8::new(200, 200, 200).scaled(4.0),
+            Rgb8::new(255, 255, 255)
+        );
     }
 }
