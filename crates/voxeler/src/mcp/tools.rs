@@ -28,9 +28,10 @@ use voxel_core::{Bounds, Face, VoxelModel};
 use super::wire::{base64, CallResult, Content, ToolInfo};
 use crate::editor::Editor;
 
-mod modeling;
 mod checking;
+mod modeling;
 mod preview;
+
 #[cfg(test)]
 mod inspection_tests;
 
@@ -919,8 +920,12 @@ fn dispatch(
         "describe_model" => Ok(CallResult::text(describe(editor))),
         "check_symmetry" | "check_components" => checking::check(editor, name, args),
         "compare_saved_model" => checking::compare_saved(editor, root, args),
-        "preview_model" | "screenshot_views" => preview::render(editor, root, args, name == "screenshot_views"),
-        "apply_edits" | "put_ellipsoid" | "put_line" | "put_tapered_line" | "put_prism" => modeling::apply(editor, name, args),
+        "preview_model" | "screenshot_views" => {
+            preview::render(editor, root, args, name == "screenshot_views")
+        }
+        "apply_edits" | "put_ellipsoid" | "put_line" | "put_tapered_line" | "put_prism" => {
+            modeling::apply(editor, name, args)
+        }
         "set_palette_color" => {
             let index = channel(args, "index")?;
             if index == 0 {
@@ -1761,7 +1766,8 @@ fn describe(editor: &Editor) -> String {
             "document_id": editor.document_id(),
             "session_id": session_identity(),
             "unsaved": editor.is_dirty(),
-            "note": "basic edits write to the active layer; apply_edits and procedural shape tools accept explicit layers; palette edits affect all uses of an index",
+            "note": "basic edits write to the active layer; apply_edits and procedural shape \
+                     tools accept explicit layers; palette edits affect all uses of an index",
         })
     )
 }
@@ -1776,7 +1782,12 @@ fn model_path(editor: &Editor) -> String {
 
 fn session_identity() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ID.get_or_init(|| format!("{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()))
+    ID.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}-{}", std::process::id(), started.as_nanos())
+    })
 }
 
 /// An axis named the way an agent would say it.

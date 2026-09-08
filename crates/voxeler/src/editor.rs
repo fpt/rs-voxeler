@@ -307,7 +307,9 @@ impl Editor {
 
     /// Changes on document replacement, not on edits or saves. Paired with
     /// the MCP process identity, this lets an agent detect a restarted session.
-    pub fn document_id(&self) -> u64 { self.document_id }
+    pub fn document_id(&self) -> u64 {
+        self.document_id
+    }
 
     pub fn path(&self) -> &Path {
         &self.path
