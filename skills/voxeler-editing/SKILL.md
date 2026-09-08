@@ -147,8 +147,25 @@ select it and `paint`.
 
 ## Finish
 
-- `screenshot` and compare against the before.
-- `save_model` only when the user asked for it, or say that you have not. An
+- Use `preview_model` with the same scope and view before/after a local change;
+  `screenshot_views` also checks the whole silhouette without touching the view.
+  If available, use `voxeler-checking` for requested symmetry, connection or
+  saved-content checks. Separate components can be intentional.
+- Save when requested or part of the established file-editing workflow;
+  otherwise state that the edit remains unsaved. A review alone does not
+  authorize saving or fixing findings. An
   export to `.vox` flattens layers; `.vxm` keeps them.
+- Use `compare_saved_model` instead of reopening merely to verify a save:
+  reopening clears history, selection and clipboard.
 - One tool call is one undo step, and the history is shared with whoever has the
   window. If you got it wrong, `undo` — do not paper over it with more edits.
+
+For reshaping instead of transforming, `put_tapered_line` keeps branch tips and
+flat ends aligned with the branch; `put_prism` extrudes a polygonal armour plate.
+Both support explicit layers and batch operations. Inspect live schemas first.
+
+Record `session_id`, `document_id` and `document_path` from `describe_model`.
+Recheck after reconnects or unexpected results. An unexpected identity change
+means the old selection, layer indices and queued edits may no longer apply;
+stop and establish the current document before continuing. Do not recover by
+blindly replaying writes or opening over unsaved work. Stop on a tool error.

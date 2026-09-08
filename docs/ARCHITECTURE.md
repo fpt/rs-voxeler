@@ -1,5 +1,24 @@
 # Architecture
 
+## Read-only model inspection
+
+MCP checking and focused previews share a scoped occupied-cell collector. It
+composites layers in stack order within the selected scope, filters effective
+visibility (including ancestors), and includes descendants for object scopes.
+The source-cell budget is 2,097,152; reports retain only bounded samples or the
+largest components. A region limits the inspected cells, not a scene allocation.
+Colour symmetry compares palette slots; connectivity ignores colour seams.
+Neither asymmetric cells nor separate components are inherently defects.
+
+Focused previews render a temporary editor with a shared camera frame for all
+views. They ignore the live slice and cannot disturb visibility, history or
+selection. Saved comparisons trim cloned models and compare native encodings,
+including hidden geometry, hierarchy and palette without reopening a document.
+Process/session and document identities let callers detect replacement before
+continuing an old edit sequence; successful replacement clears transient cell
+references. Polygon extrusion includes edge centres in either winding, and
+validates all geometry before the existing atomic batch write path runs.
+
 How rs-voxeler is put together, and why each load-bearing piece is the shape it
 is. Decisions are recorded with the reasoning that produced them and, where one
 was settled by running it, the numbers that settled it.
@@ -408,6 +427,23 @@ Three rules the ~34 tools depend on:
   it something false.
 - **`screenshot` is the exception**, and the reason `Content::Image` exists.
   Counts cannot tell an agent the arm is on backwards.
+
+### Procedural branches carry their end radii
+
+`put_tapered_line` (and `tapered_line` in `apply_edits`) samples a cone frustum
+along an arbitrary segment. The radius varies linearly from `radius_from` to
+`radius_to`; a zero radius is a pointed tip, equal radii are a cylinder. The end
+planes follow the segment axis, so angled branches do not acquire upright tips.
+Coincident endpoints and two zero radii are refused; the existing rounded
+`put_line` still makes capsules and coincident-endpoint spheres.
+
+The shape lives in the MCP modeling module, not the renderer or the model. It
+expands only its clipped bounding box, under the shared candidate-cell budget,
+then joins the same validate-first, one-undo-step pipeline as all batch shapes.
+This was driven by a five-pronged accessory: adjusting its thickness and tip
+direction had required over a thousand individual voxel operations. Two joined
+segments can now keep a branch thick until close to its tip without a custom
+voxel generator.
 
 ### A region can be read from one layer or from the composite
 

@@ -15,6 +15,16 @@ then collision/chunks/animation) do not.
 
 ## Architecture
 
+Read-only MCP inspection lives in `mcp/tools/checking.rs` and `preview.rs`.
+Scopes composite only their chosen layers, including object descendants; walk
+layer storage, never the scene range. Bounded symmetry/component reports are
+observations, not automatic repair instructions. Focused previews render a
+temporary editor, never toggle the working model's visibility or slice.
+Saved-file comparisons canonicalize copies and retain undo. Document replacement
+changes `document_id` and clears selection/clipboard; ordinary edits do not.
+`session_id` distinguishes process restarts. `put_prism` includes polygon
+boundaries and uses the same prevalidated one-undo batch path as other shapes.
+
 ```text
 voxeler  (the window, an MCP server over stdio or SSE, and `attach`)
    │
@@ -756,10 +766,17 @@ from the one that was asked for.
 ## Key patterns
 
 - **Procedural edits validate before writing.** `mcp/tools/modeling.rs` expands
-  voxel, rect, ellipsoid and capsule operations under a candidate-cell budget.
+  voxel, rect, ellipsoid, capsule and tapered-line operations under a candidate-cell budget.
   Only once every argument is valid does `Editor::apply_writes` commit the ordered
   writes through one `History::edit`. Layer/color defaults can be overridden per
   operation; selection is unchanged. Reports count attempts, including overlaps.
+- **Tapered ends follow the branch, not world-up.** `put_tapered_line` and the
+  batch `tapered_line` operation interpolate `radius_from` to `radius_to` along
+  distinct endpoints. End discs are perpendicular to that axis; a zero radius
+  makes a point. Equal radii make a flat-ended cylinder, leaving `put_line`'s
+  capsule semantics unchanged. Both-zero radii and coincident endpoints are
+  refused. This replaces the per-voxel arithmetic a pointed, oblique accessory
+  needed in a real modeling session.
 - **Palette history stores colours, not grids.** `Change::Palette` records one
   index's old/new RGB. An unchanged RGB adds no undo step. Palette changes dirty
   the document and are included in the existing native/VOX serializers.

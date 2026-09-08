@@ -80,7 +80,7 @@ sticking out at its sides.
   it before a scheme change rather than assuming an index, and use
   `replace_color` to move a part to another slot — `set_palette_color` changes
   what the slot means everywhere, which is a different edit.
-- `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid` and `line`
+- `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid`, `line`, `tapered_line` and `prism`
   operations. Top-level `layer`/`color` supply defaults; individual operations
   override them. Explicit layer arguments do not change the active selection.
   Basic tools such as `put_rect`, `paint` and `fill` use the active layer.
@@ -148,8 +148,24 @@ tool without changing document save state or camera settings:
 {"view":"front","yaw":12,"pitch":4,"width":640,"height":768,"ambient":0.8,"diffuse":0.2,"path":"models/character.png"}
 ```
 
-After saving, confirm size, layers and save state. Reopen for a round-trip check
-when useful, remembering that it discards undo history. Deliver the model link
+Use `put_tapered_line` for branches and pointed antennas: its `radius_from` and
+`radius_to` follow the endpoint direction, with perpendicular flat ends; zero
+makes a tip. Use `put_prism` for polygonal armour plates: `axis` is extrusion,
+vertices are [y,z] for X, [x,z] for Y, [x,y] for Z; `start`/`end` are inclusive.
+Concave polygons are supported, but holes and crossing edges are not.
+
+For visual QA, `screenshot_views` makes a labelled multi-view sheet;
+`preview_model` focuses on a part without changing the live camera or visibility.
+Use the available `voxeler-checking` skill when checking symmetry, connections,
+or saved content. Check only the symmetries the design actually intends.
+
+Record `describe_model.session_id`, `document_id` and `document_path`. After a
+reconnect or unexpected result, describe again before writing. If identity has
+changed unexpectedly, stop the edit sequence and establish the working document;
+do not blindly replay edits or replace unsaved work. Stop batches on tool errors.
+
+After saving, confirm size, layers and save state. Prefer `compare_saved_model`
+for native document equality without discarding undo history. Deliver the model link
 and an actual voxeler-rendered preview, noting any material differences from
 the request. Follow the user's choice about committing generated assets;
 creating a model does not by itself authorize a commit.
