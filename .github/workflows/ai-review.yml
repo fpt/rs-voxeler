@@ -1,0 +1,37 @@
+# AI-reviews this repo's PRs by calling klein-cli's reusable review workflow.
+#
+# Trust model: this uses `on: pull_request` (NOT pull_request_target), and the
+# job is gated to same-repository branches (the `if:` below), so the API-key
+# secret is only ever exposed to code from contributors who already have push
+# access. Fork PRs get no secrets and are skipped. The reusable workflow
+# enforces that gate again on its own side; keeping it here as well means a
+# reader of this file can see the rule without going and reading that one.
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# `contents: write` is not used to push anything — the review writes no code. It
+# is what GitHub requires for the `resolveReviewThread` GraphQL mutation; under
+# `contents: read` that call fails with "Resource not accessible by integration"
+# and threads the reviewer verified as fixed stay open forever (see
+# fpt/rs-kessel#70 and fpt/klein-cli#111). A reusable workflow can only narrow
+# inherited permissions, so the scope has to be granted here. It does not reach
+# this repo's code: the reusable workflow narrows the job that checks the PR out
+# back to `contents: read`, and resolves threads from a second job that checks
+# nothing out.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: fpt/klein-cli/.github/workflows/ai-review-reusable.yml@main
+    with:
+      backend: openai
+      language: en
+      klein-version: latest
+    secrets:
+      openai-api-key: ${{ secrets.OPENAI_API_KEY }}
