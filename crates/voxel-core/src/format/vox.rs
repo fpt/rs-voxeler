@@ -139,7 +139,9 @@ pub fn export(model: &VoxelModel) -> Result<Vec<u8>> {
     let [sx, sy, sz] = model.size();
     let filled: Vec<_> = model.iter_filled().collect();
     if filled.len() > u32::MAX as usize {
-        return Err(VoxelError::Format("too many voxels for one XYZI chunk".into()));
+        return Err(VoxelError::Format(
+            "too many voxels for one XYZI chunk".into(),
+        ));
     }
 
     let mut size_body = Vec::with_capacity(12);
@@ -215,7 +217,11 @@ mod tests {
 
         let back = import(&export(&m).unwrap()).unwrap();
         assert_eq!(back.layer_count(), 1, "a .vox comes back as one layer");
-        assert_eq!(back.get(1, 1, 1), 8, "the covering layer won, as it was drawn");
+        assert_eq!(
+            back.get(1, 1, 1),
+            8,
+            "the covering layer won, as it was drawn"
+        );
         assert_eq!(back.get(2, 1, 1), 3);
         assert_eq!(back.get(3, 3, 3), 0, "a hidden layer is not exported");
         assert_eq!(back.filled_count(), 2);

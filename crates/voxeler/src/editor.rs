@@ -80,7 +80,6 @@ impl Selection {
         }
         (!self.cells.is_empty()).then_some((lo, hi))
     }
-
 }
 
 fn no_selection() -> String {
@@ -395,7 +394,11 @@ impl Editor {
         let offset = self.offset();
         // The raycaster works in the grid's own coordinates, so the ray is
         // moved into model space rather than the model into world space.
-        let origin = [origin.x - offset.x, origin.y - offset.y, origin.z - offset.z];
+        let origin = [
+            origin.x - offset.x,
+            origin.y - offset.y,
+            origin.z - offset.z,
+        ];
         let dir = [dir.x, dir.y, dir.z];
 
         // While a stroke is in progress the ray must not see what that stroke
@@ -403,7 +406,8 @@ impl Editor {
         let empty = std::collections::HashMap::new();
         let before = self.drag.as_ref().map_or(&empty, |d| &d.before);
         let mask = |cell: [i32; 3]| before.get(&cell).copied();
-        let hit = voxel_core::raycast::cast_masked(&self.model, origin, dir, self.camera.far, &mask);
+        let hit =
+            voxel_core::raycast::cast_masked(&self.model, origin, dir, self.camera.far, &mask);
         // A slice hides the layers above the cut, and a ray must not pick a
         // voxel that is not on screen. Re-cast from just under the cut instead,
         // so clicking through the opening reaches the cross-section.
@@ -624,7 +628,11 @@ impl Editor {
             face: target.face,
             // Building grows over air; erasing and painting grow over the
             // colour under the cursor, so a region stops where the colour does.
-            matches: region::Match::Index(if self.tool == Tool::Build { 0 } else { target.index }),
+            matches: region::Match::Index(if self.tool == Tool::Build {
+                0
+            } else {
+                target.index
+            }),
             brush: self.brush,
             grounded: target.is_ground(),
             // An edit must not reach a layer the slice has taken off screen.
@@ -830,7 +838,11 @@ impl Editor {
     /// Move the selected voxels, as one undo step.
     pub fn move_selection(&mut self, delta: [i32; 3]) -> Result<MoveReport, String> {
         if delta == [0, 0, 0] {
-            return self.selection.as_ref().map(|_| MoveReport::default()).ok_or_else(no_selection);
+            return self
+                .selection
+                .as_ref()
+                .map(|_| MoveReport::default())
+                .ok_or_else(no_selection);
         }
         self.transform_selection("move selection", |c| {
             [c[0] + delta[0], c[1] + delta[1], c[2] + delta[2]]
@@ -873,7 +885,11 @@ impl Editor {
     ///
     /// A square footprint pivots identically either way, which is most
     /// rotations. For one that is not square, follow with `move_selection`.
-    pub fn rotate_selection(&mut self, axis: usize, quarter_turns: i32) -> Result<MoveReport, String> {
+    pub fn rotate_selection(
+        &mut self,
+        axis: usize,
+        quarter_turns: i32,
+    ) -> Result<MoveReport, String> {
         let Some((lo, hi)) = self.selection.as_ref().and_then(|s| s.bounds()) else {
             return Err(no_selection());
         };
@@ -1132,13 +1148,15 @@ impl Editor {
         let filled: Vec<Vec<_>> = (0..self.model.layer_count())
             .map(|n| self.model.iter_filled_in(n).map(|(p, _)| p).collect())
             .collect();
-        let changed = self.history.edit(&mut self.model, "clear", |model, stroke| {
-            for (n, cells) in filled.into_iter().enumerate() {
-                for [x, y, z] in cells {
-                    stroke.set_in(model, n, x as i32, y as i32, z as i32, 0);
+        let changed = self
+            .history
+            .edit(&mut self.model, "clear", |model, stroke| {
+                for (n, cells) in filled.into_iter().enumerate() {
+                    for [x, y, z] in cells {
+                        stroke.set_in(model, n, x as i32, y as i32, z as i32, 0);
+                    }
                 }
-            }
-        });
+            });
         if changed {
             self.dirty = true;
             self.invalidate_mesh();
@@ -1272,12 +1290,14 @@ impl Editor {
 
     fn insert_layer(&mut self, name: String, bounds: Bounds) {
         let mut added = None;
-        let changed = self.history.restructure(&mut self.model, "add layer", |model| {
-            added = model.add_layer_with(model.active_layer(), name, bounds);
-            if let Some(i) = added {
-                model.set_active_layer(i);
-            }
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "add layer", |model| {
+                added = model.add_layer_with(model.active_layer(), name, bounds);
+                if let Some(i) = added {
+                    model.set_active_layer(i);
+                }
+            });
         if changed {
             self.after_structural();
             self.report_layer();
@@ -1288,9 +1308,11 @@ impl Editor {
 
     pub fn delete_layer(&mut self) {
         let name = self.layer_name(self.model.active_layer());
-        let changed = self.history.restructure(&mut self.model, "delete layer", |model| {
-            model.remove_layer(model.active_layer());
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "delete layer", |model| {
+                model.remove_layer(model.active_layer());
+            });
         if changed {
             self.after_structural();
             self.status = format!("deleted {name} — ctrl+Z brings it back");
@@ -1301,22 +1323,31 @@ impl Editor {
 
     /// Move the active layer up or down the stack, changing what covers what.
     pub fn move_layer(&mut self, up: bool) {
-        let changed = self.history.restructure(&mut self.model, "move layer", |model| {
-            model.move_layer(model.active_layer(), up);
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "move layer", |model| {
+                model.move_layer(model.active_layer(), up);
+            });
         if changed {
             self.after_structural();
             self.report_layer();
         } else {
-            self.status = if up { "already on top" } else { "already at the bottom" }.into();
+            self.status = if up {
+                "already on top"
+            } else {
+                "already at the bottom"
+            }
+            .into();
         }
     }
 
     pub fn merge_layer_down(&mut self) {
         let name = self.layer_name(self.model.active_layer());
-        let changed = self.history.restructure(&mut self.model, "merge layer", |model| {
-            model.merge_down(model.active_layer());
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "merge layer", |model| {
+                model.merge_down(model.active_layer());
+            });
         if changed {
             self.after_structural();
             self.status = format!("merged {name} down");
@@ -1330,9 +1361,11 @@ impl Editor {
     /// Add an object under `parent`. Structural, so it is one undo step.
     pub fn add_object(&mut self, parent: usize, name: &str) -> bool {
         let name = name.to_string();
-        let changed = self.history.restructure(&mut self.model, "add object", |model| {
-            model.add_object(parent, name);
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "add object", |model| {
+                model.add_object(parent, name);
+            });
         if changed {
             self.after_structural();
             self.status = format!("added {}", self.object_name(self.model.object_count() - 1));
@@ -1345,9 +1378,11 @@ impl Editor {
     /// Remove an object, leaving its children and layers with its parent.
     pub fn remove_object(&mut self, i: usize) -> bool {
         let name = self.object_name(i);
-        let changed = self.history.restructure(&mut self.model, "delete object", |model| {
-            model.remove_object(i);
-        });
+        let changed = self
+            .history
+            .restructure(&mut self.model, "delete object", |model| {
+                model.remove_object(i);
+            });
         if changed {
             self.after_structural();
             self.status = format!("removed {name} — its layers moved up, ctrl+Z brings it back");
@@ -1362,9 +1397,10 @@ impl Editor {
             return false;
         }
         let name = name.to_string();
-        self.history.restructure(&mut self.model, "rename object", |model| {
-            model.rename_object(i, name);
-        });
+        self.history
+            .restructure(&mut self.model, "rename object", |model| {
+                model.rename_object(i, name);
+            });
         self.after_structural();
         true
     }
@@ -1393,12 +1429,17 @@ impl Editor {
 
     pub fn reparent_object(&mut self, i: usize, parent: usize) -> bool {
         let mut ok = false;
-        self.history.restructure(&mut self.model, "reparent object", |model| {
-            ok = model.reparent_object(i, parent);
-        });
+        self.history
+            .restructure(&mut self.model, "reparent object", |model| {
+                ok = model.reparent_object(i, parent);
+            });
         if ok {
             self.after_structural();
-            self.status = format!("{} is now part of {}", self.object_name(i), self.object_name(parent));
+            self.status = format!(
+                "{} is now part of {}",
+                self.object_name(i),
+                self.object_name(parent)
+            );
         } else {
             self.status = "an object cannot be part of itself".into();
         }
@@ -1407,12 +1448,17 @@ impl Editor {
 
     pub fn set_layer_object(&mut self, layer: usize, object: usize) -> bool {
         let mut ok = false;
-        self.history.restructure(&mut self.model, "move layer to object", |model| {
-            ok = model.set_layer_object(layer, object);
-        });
+        self.history
+            .restructure(&mut self.model, "move layer to object", |model| {
+                ok = model.set_layer_object(layer, object);
+            });
         if ok {
             self.after_structural();
-            self.status = format!("{} is now part of {}", self.layer_name(layer), self.object_name(object));
+            self.status = format!(
+                "{} is now part of {}",
+                self.layer_name(layer),
+                self.object_name(object)
+            );
         }
         ok
     }
@@ -1420,9 +1466,10 @@ impl Editor {
     /// Move an object and everything under it. One undo step for the lot.
     pub fn move_object(&mut self, i: usize, delta: [i32; 3]) -> Result<usize, String> {
         let mut result = Err("nothing happened".to_string());
-        self.history.restructure(&mut self.model, "move object", |model| {
-            result = model.move_object(i, delta);
-        });
+        self.history
+            .restructure(&mut self.model, "move object", |model| {
+                result = model.move_object(i, delta);
+            });
         match &result {
             Ok(n) => {
                 self.after_structural();
@@ -1595,7 +1642,11 @@ impl Editor {
             })
             .map(|(layer, pos, v)| {
                 moved[v as usize] += 1;
-                CellWrite { layer, pos, color: to }
+                CellWrite {
+                    layer,
+                    pos,
+                    color: to,
+                }
             })
             .collect();
         self.apply_writes("recolour", writes, |_, _| {});
@@ -1651,7 +1702,11 @@ impl Editor {
     ///
     /// Index 0 stays index 0: it is air, not a colour.
     pub fn compact_palette(&mut self) -> Vec<(u8, u8)> {
-        let used: Vec<u8> = self.color_counts(None).into_iter().map(|(i, _)| i).collect();
+        let used: Vec<u8> = self
+            .color_counts(None)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
         if used.len() > 255 {
             return Vec::new();
         }
@@ -1669,25 +1724,28 @@ impl Editor {
         for (old, new) in &mapping {
             lookup[*old as usize] = *new;
         }
-        let colors: Vec<voxel_core::Rgb8> =
-            mapping.iter().map(|(old, _)| self.model.palette().get(*old)).collect();
+        let colors: Vec<voxel_core::Rgb8> = mapping
+            .iter()
+            .map(|(old, _)| self.model.palette().get(*old))
+            .collect();
 
-        self.history.restructure(&mut self.model, "compact palette", |model| {
-            for layer in 0..model.layer_count() {
-                let cells: Vec<_> = model
-                    .iter_filled_in(layer)
-                    .map(|([x, y, z], v)| ([x as i32, y as i32, z as i32], lookup[v as usize]))
-                    .collect();
-                for ([x, y, z], v) in cells {
-                    model.set_in(layer, x, y, z, v);
+        self.history
+            .restructure(&mut self.model, "compact palette", |model| {
+                for layer in 0..model.layer_count() {
+                    let cells: Vec<_> = model
+                        .iter_filled_in(layer)
+                        .map(|([x, y, z], v)| ([x as i32, y as i32, z as i32], lookup[v as usize]))
+                        .collect();
+                    for ([x, y, z], v) in cells {
+                        model.set_in(layer, x, y, z, v);
+                    }
                 }
-            }
-            let mut next = [voxel_core::Rgb8::default(); 256];
-            for (n, c) in colors.iter().enumerate() {
-                next[n + 1] = *c;
-            }
-            model.set_palette(voxel_core::Palette::from_colors(next));
-        });
+                let mut next = [voxel_core::Rgb8::default(); 256];
+                for (n, c) in colors.iter().enumerate() {
+                    next[n + 1] = *c;
+                }
+                model.set_palette(voxel_core::Palette::from_colors(next));
+            });
         // The selected colour is an index, and every index has just moved.
         self.color = lookup[self.color as usize].max(1);
         self.after_structural();
@@ -1855,7 +1913,9 @@ impl Editor {
     }
 
     pub fn commit_rename(&mut self) {
-        let Some(name) = self.rename.take() else { return };
+        let Some(name) = self.rename.take() else {
+            return;
+        };
         let name = name.trim().to_string();
         if name.is_empty() {
             self.status = "a layer needs a name".into();
@@ -1984,7 +2044,10 @@ impl Editor {
         self.status = match span {
             Span::Voxel if self.brush.radius > 0 => {
                 let e = self.brush.edge();
-                format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase())
+                format!(
+                    "{} brush {e}x{e}x{e}",
+                    self.brush.shape.name().to_lowercase()
+                )
             }
             _ => format!("span {}", span.name().to_lowercase()),
         };
@@ -2000,7 +2063,10 @@ impl Editor {
         self.brush.radius = (self.brush.radius as i32 + delta).clamp(0, MAX_BRUSH as i32) as u8;
         self.span = Span::Voxel;
         let e = self.brush.edge();
-        self.status = format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase());
+        self.status = format!(
+            "{} brush {e}x{e}x{e}",
+            self.brush.shape.name().to_lowercase()
+        );
     }
 
     pub fn toggle_brush_shape(&mut self) {
@@ -2010,7 +2076,10 @@ impl Editor {
         };
         self.span = Span::Voxel;
         let e = self.brush.edge();
-        self.status = format!("{} brush {e}x{e}x{e}", self.brush.shape.name().to_lowercase());
+        self.status = format!(
+            "{} brush {e}x{e}x{e}",
+            self.brush.shape.name().to_lowercase()
+        );
     }
 
     /// Step the palette index, wrapping within the paintable range 1..=255.
@@ -2143,7 +2212,11 @@ impl Editor {
             "{}  {x}x{y}x{z}  {} VOX  {}",
             if self.dirty { "*" } else { " " },
             self.model.filled_count(),
-            if self.viewing { "VIEWING" } else { self.tool.name() },
+            if self.viewing {
+                "VIEWING"
+            } else {
+                self.tool.name()
+            },
         );
         if self.viewing {
             // Nothing after this is a choice the watcher can make, so the line
@@ -2173,7 +2246,11 @@ impl Editor {
             s.push_str(&format!("  SLICE {cut}"));
         }
         // Whether undo has anywhere to go is worth a glance before a big edit.
-        s.push_str(&format!("  UNDO {}/{}", self.undo_depth(), self.redo_depth()));
+        s.push_str(&format!(
+            "  UNDO {}/{}",
+            self.undo_depth(),
+            self.redo_depth()
+        ));
         s
     }
 }
@@ -2268,7 +2345,9 @@ mod tests {
             e.camera.pitch = pitch;
             let before = e.model().filled_count();
 
-            let Some(t) = e.target_at(160.0, 120.0, 320, 240) else { continue };
+            let Some(t) = e.target_at(160.0, 120.0, 320, 240) else {
+                continue;
+            };
             e.begin_stroke(t);
             // The same pixel, several times: no movement at all, which is the
             // most a click can honestly claim.
@@ -2377,9 +2456,15 @@ mod tests {
         e.camera.yaw = 0.0;
         e.camera.pitch = 0.9;
 
-        let t = e.target_at(160.0, 120.0, 320, 240).expect("the work plane is a target");
+        let t = e
+            .target_at(160.0, 120.0, 320, 240)
+            .expect("the work plane is a target");
         assert!(t.is_ground());
-        assert_eq!(t.cell[1], e.ground_y(), "a ground build lands on the work plane");
+        assert_eq!(
+            t.cell[1],
+            e.ground_y(),
+            "a ground build lands on the work plane"
+        );
         assert!(e.model().contains(t.cell[0], t.cell[1], t.cell[2]));
 
         e.begin_stroke(t);
@@ -2397,7 +2482,9 @@ mod tests {
         e.camera.yaw = 0.0;
         e.camera.pitch = -0.9; // orbited below the plane, looking up at it
 
-        let t = e.target_at(160.0, 120.0, 320, 240).expect("the plane has an underside");
+        let t = e
+            .target_at(160.0, 120.0, 320, 240)
+            .expect("the plane has an underside");
         assert_eq!(t.face, Face::NegY);
         assert_eq!(t.cell[1], e.ground_y() - 1);
     }
@@ -2410,7 +2497,8 @@ mod tests {
         e.camera.yaw = 0.0;
         e.camera.pitch = 0.9;
         assert!(
-            e.target_at(160.0, 120.0, 320, 240).is_some_and(|t| t.is_ground()),
+            e.target_at(160.0, 120.0, 320, 240)
+                .is_some_and(|t| t.is_ground()),
             "an empty layer has nothing to aim at, so the plane is how you start"
         );
 
@@ -2434,11 +2522,16 @@ mod tests {
         assert!(e.target_at(160.0, 120.0, 320, 240).is_none());
 
         e.add_layer();
-        let t = e.target_at(160.0, 120.0, 320, 240).expect("a layer with nothing in it");
+        let t = e
+            .target_at(160.0, 120.0, 320, 240)
+            .expect("a layer with nothing in it");
         assert!(t.is_ground());
         e.begin_stroke(t);
         e.end_stroke();
-        assert_eq!(e.model().get_in(1, t.cell[0], t.cell[1], t.cell[2]), e.color);
+        assert_eq!(
+            e.model().get_in(1, t.cell[0], t.cell[1], t.cell[2]),
+            e.color
+        );
     }
 
     /// A stroke that started on the plane has to finish there: its own first
@@ -2506,7 +2599,9 @@ mod tests {
         assert_eq!(e.model().filled_count(), 0);
 
         e.tool = Tool::Build;
-        let t = e.target_at(160.0, 120.0, 320, 240).expect("the floor is still there");
+        let t = e
+            .target_at(160.0, 120.0, 320, 240)
+            .expect("the floor is still there");
         e.begin_stroke(t);
         e.end_stroke();
         assert_eq!(e.model().filled_count(), 1);
@@ -2577,8 +2672,14 @@ mod tests {
             .filter(|(p, _)| p[1] > 0)
             .map(|(p, _)| p[1])
             .collect();
-        assert!(placed.len() > 1, "the drag should have placed several voxels");
-        assert!(placed.iter().all(|y| *y == 1), "climbed off the plane: {placed:?}");
+        assert!(
+            placed.len() > 1,
+            "the drag should have placed several voxels"
+        );
+        assert!(
+            placed.iter().all(|y| *y == 1),
+            "climbed off the plane: {placed:?}"
+        );
         assert_eq!(e.undo_depth(), 1, "a drag is one undo step");
     }
 
@@ -2668,7 +2769,10 @@ mod tests {
         e.tool = Tool::Erase;
 
         let full = e.target_at(160.0, 120.0, 320, 240).unwrap();
-        assert!(full.voxel[1] >= 3, "the unsliced pick must be above the cut");
+        assert!(
+            full.voxel[1] >= 3,
+            "the unsliced pick must be above the cut"
+        );
 
         e.set_slice(Some(3));
         assert!(e.mesh().quads().all(|q| q.voxel[1] < 3));
@@ -2785,7 +2889,11 @@ mod tests {
         e.begin_stroke(build_on([3, 0, 3], 4));
         e.end_stroke();
 
-        assert_eq!(e.model().filled_count(), 128, "a second layer over the floor");
+        assert_eq!(
+            e.model().filled_count(),
+            128,
+            "a second layer over the floor"
+        );
         assert!(e.model().iter_filled().all(|(p, _)| p[1] < 2));
         e.undo();
         assert_eq!(e.model().filled_count(), 64);
@@ -2821,12 +2929,18 @@ mod tests {
     fn a_box_selects_the_voxels_inside_it_and_not_the_air() {
         let mut e = editor_with_floor();
         e.model.set(2, 3, 2, 7);
-        assert_eq!(e.select_box([0, 0, 0], [7, 7, 7]), 65, "the floor and the speck");
+        assert_eq!(
+            e.select_box([0, 0, 0], [7, 7, 7]),
+            65,
+            "the floor and the speck"
+        );
 
         let sel = e.selection.as_ref().unwrap();
         assert_eq!(sel.layer(), 0);
         assert_eq!(sel.bounds(), Some(([0, 0, 0], [7, 3, 7])));
-        assert!(sel.cells().all(|c| e.model().get_in(0, c[0], c[1], c[2]) != 0));
+        assert!(sel
+            .cells()
+            .all(|c| e.model().get_in(0, c[0], c[1], c[2]) != 0));
     }
 
     /// Connected by material, not by colour — a part made of two colours is one
@@ -2839,8 +2953,15 @@ mod tests {
         }
         e.model.set(12, 1, 1, 3); // a separate piece
 
-        assert_eq!(e.select_connected([2, 1, 1], None), 4, "both colours, one part");
-        assert_eq!(e.selection.as_ref().unwrap().bounds(), Some(([2, 1, 1], [5, 1, 1])));
+        assert_eq!(
+            e.select_connected([2, 1, 1], None),
+            4,
+            "both colours, one part"
+        );
+        assert_eq!(
+            e.selection.as_ref().unwrap().bounds(),
+            Some(([2, 1, 1], [5, 1, 1]))
+        );
 
         // Air is not a part.
         assert_eq!(e.select_connected([8, 8, 8], None), 0);
@@ -2868,12 +2989,12 @@ mod tests {
             }
         }
         let whole = e.select_connected([8, 12, 11], None);
-        assert!(whole > 200, "unbounded, the arm is the whole figure: {whole}");
-
-        let arm = e.select_connected(
-            [8, 12, 11],
-            Some(Bounds::new([7, 0, 0], [3, 24, 24])),
+        assert!(
+            whole > 200,
+            "unbounded, the arm is the whole figure: {whole}"
         );
+
+        let arm = e.select_connected([8, 12, 11], Some(Bounds::new([7, 0, 0], [3, 24, 24])));
         assert_eq!(arm, 3 * 6 * 2, "just the arm");
         assert_eq!(
             e.selection.as_ref().unwrap().bounds(),
@@ -2901,7 +3022,10 @@ mod tests {
         assert_eq!(e.undo_depth(), 1);
 
         // The selection follows, so the move can be repeated.
-        assert_eq!(e.selection.as_ref().unwrap().bounds(), Some(([2, 6, 1], [4, 6, 1])));
+        assert_eq!(
+            e.selection.as_ref().unwrap().bounds(),
+            Some(([2, 6, 1], [4, 6, 1]))
+        );
         e.move_selection([0, 1, 0]).unwrap();
         assert_eq!(e.model().get(2, 7, 1), 4);
     }
@@ -3050,8 +3174,16 @@ mod tests {
 
         e.add_layer();
         e.paste([0, 4, 0]).unwrap();
-        assert_eq!(e.model().layers()[1].filled_count(), 64, "landed on the new layer");
-        assert_eq!(e.model().layers()[0].filled_count(), 64, "the floor is untouched");
+        assert_eq!(
+            e.model().layers()[1].filled_count(),
+            64,
+            "landed on the new layer"
+        );
+        assert_eq!(
+            e.model().layers()[0].filled_count(),
+            64,
+            "the floor is untouched"
+        );
         assert_eq!(e.selection.as_ref().unwrap().layer(), 1);
     }
 
@@ -3087,7 +3219,11 @@ mod tests {
         e.undo();
         assert_eq!(e.model().get(5, 5, 5), 0, "the paste was undone");
         assert!(e.selection.is_none());
-        assert_eq!(e.clipboard.as_ref().unwrap().len(), 1, "the clipboard stands");
+        assert_eq!(
+            e.clipboard.as_ref().unwrap().len(),
+            1,
+            "the clipboard stands"
+        );
         // And it can be pasted again.
         e.paste([5, 5, 5]).unwrap();
         assert_eq!(e.model().get(5, 5, 5), 7);
@@ -3180,7 +3316,8 @@ mod tests {
             let mut e = Editor::new(VoxelModel::new(24, 8, 24), PathBuf::from("t.vxm"));
             for z in 0..d {
                 for x in 0..w {
-                    e.model.set(4 + x as i32, 1, 4 + z as i32, (x + z * 8 + 1) as u8);
+                    e.model
+                        .set(4 + x as i32, 1, 4 + z as i32, (x + z * 8 + 1) as u8);
                 }
             }
             e.select_box([0, 0, 0], [23, 7, 23]);
@@ -3256,7 +3393,11 @@ mod tests {
         e.flip_selection(0).unwrap();
         assert_eq!(e.model().get(4, 1, 1), 9, "the two swapped");
         assert_eq!(e.model().get(5, 1, 1), 3);
-        assert_eq!(e.model().filled_count(), 2, "and nothing moved across the scene");
+        assert_eq!(
+            e.model().filled_count(),
+            2,
+            "and nothing moved across the scene"
+        );
     }
 
     /// An even extent has no centre cell, and `lo + hi - v` needs none — the
@@ -3312,7 +3453,11 @@ mod tests {
         assert_eq!(e.model().size(), [16, 16, 16]);
         assert_eq!(e.model().filled_count(), before_voxels * 8);
         assert_eq!(e.model().layer_count(), 2);
-        assert_eq!(e.model().get_in(1, 6, 2, 6), 6, "the upper layer scaled too");
+        assert_eq!(
+            e.model().get_in(1, 6, 2, 6),
+            6,
+            "the upper layer scaled too"
+        );
         assert_eq!(e.undo_depth(), steps + 1, "one step, not one per layer");
         assert!(e.is_dirty());
 
@@ -3389,7 +3534,11 @@ mod tests {
         // the air above it.
         assert_eq!(e.model().filled_count(), 64 + 18);
         assert_eq!(e.model().get(2, 2, 2), 6);
-        assert_eq!(e.model().get(3, 0, 3), 4, "the floor under the brush is not repainted");
+        assert_eq!(
+            e.model().get(3, 0, 3),
+            4,
+            "the floor under the brush is not repainted"
+        );
         assert_eq!(e.undo_depth(), 1);
     }
 
@@ -3665,9 +3814,21 @@ mod tests {
         e.begin_stroke(build_on([3, 0, 3], 4));
         e.end_stroke();
 
-        assert_eq!(e.model().filled_count(), 128, "the whole floor, seen from above");
-        assert_eq!(e.model().layers()[1].filled_count(), 64, "all of it on the new layer");
-        assert_eq!(e.model().layers()[0].filled_count(), 64, "and none of it on the old");
+        assert_eq!(
+            e.model().filled_count(),
+            128,
+            "the whole floor, seen from above"
+        );
+        assert_eq!(
+            e.model().layers()[1].filled_count(),
+            64,
+            "all of it on the new layer"
+        );
+        assert_eq!(
+            e.model().layers()[0].filled_count(),
+            64,
+            "and none of it on the old"
+        );
     }
 
     #[test]
@@ -3691,10 +3852,16 @@ mod tests {
             e.rename_backspace();
         }
         for c in "body
-".chars() {
+"
+        .chars()
+        {
             e.rename_push(c);
         }
-        assert_eq!(e.renaming(), Some("body"), "a control character is not a name");
+        assert_eq!(
+            e.renaming(),
+            Some("body"),
+            "a control character is not a name"
+        );
         e.commit_rename();
         assert_eq!(e.model().layers()[0].name, "body");
         assert!(e.is_dirty());
@@ -3747,7 +3914,10 @@ mod tests {
         e.reload();
         assert_eq!(e.model().layer_count(), 2);
         assert_eq!(e.model().layers()[1].name, "ARMOUR");
-        assert!(!e.model().layers()[1].visible, "hidden, and still holding its work");
+        assert!(
+            !e.model().layers()[1].visible,
+            "hidden, and still holding its work"
+        );
         assert_eq!(e.model().get_in(1, 3, 1, 3), 6);
         assert_eq!(e.active_layer(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -3758,7 +3928,11 @@ mod tests {
     #[test]
     fn a_layer_grows_to_what_is_drawn_and_costs_only_that() {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
-        assert_eq!(e.model().allocated_cells(), 0, "an empty scene allocates nothing");
+        assert_eq!(
+            e.model().allocated_cells(),
+            0,
+            "an empty scene allocates nothing"
+        );
 
         e.begin_stroke(hit([20, 5, 10], 0));
         e.end_stroke();
@@ -3766,7 +3940,10 @@ mod tests {
         assert!(e.model().layer_bounds(0).contains(20, 5, 10));
 
         e.span = Span::Voxel;
-        e.brush = Brush { radius: 2, shape: BrushShape::Cube };
+        e.brush = Brush {
+            radius: 2,
+            shape: BrushShape::Cube,
+        };
         e.begin_stroke(hit([20, 5, 10], 0));
         e.end_stroke();
         assert_eq!(e.model().layer_bounds(0).size, [5, 5, 5]);
@@ -3799,10 +3976,18 @@ mod tests {
         );
 
         e.trim_layer();
-        assert_eq!(e.model().allocated_cells(), 24, "the trim gives the rest back");
+        assert_eq!(
+            e.model().allocated_cells(),
+            24,
+            "the trim gives the rest back"
+        );
         assert_eq!(e.model().filled_count(), 24, "and loses no voxel doing it");
         assert!(e.is_dirty());
-        assert_eq!(e.undo_depth(), 1, "a trim moves no voxels, so it is no undo step");
+        assert_eq!(
+            e.undo_depth(),
+            1,
+            "a trim moves no voxels, so it is no undo step"
+        );
     }
 
     /// A declared box is where a layer is expected to live, and the status line
@@ -3812,7 +3997,10 @@ mod tests {
         let mut e = Editor::new(VoxelModel::new(64, 64, 64), PathBuf::from("t.vxm"));
         e.add_named_layer("TREE", Bounds::new([20, 5, 10], [16, 32, 16]));
         assert_eq!(e.active_layer(), 1);
-        assert_eq!(e.model().layer_bounds(1), Bounds::new([20, 5, 10], [16, 32, 16]));
+        assert_eq!(
+            e.model().layer_bounds(1),
+            Bounds::new([20, 5, 10], [16, 32, 16])
+        );
         assert!(e.status().contains("16x32x16"), "{}", e.status());
 
         e.begin_stroke(hit([19, 5, 10], 0));

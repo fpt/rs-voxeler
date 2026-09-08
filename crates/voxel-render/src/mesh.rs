@@ -211,19 +211,11 @@ fn touches_a_layer(model: &VoxelModel, origin: [i32; 3], chunk: i32) -> bool {
         }
         let b = l.bounds();
         let end = b.end();
-        (0..3).all(|a| {
-            (b.origin[a] as i32) < origin[a] + chunk && end[a] > origin[a]
-        })
+        (0..3).all(|a| (b.origin[a] as i32) < origin[a] + chunk && end[a] > origin[a])
     })
 }
 
-fn fill_chunk(
-    model: &VoxelModel,
-    cut: i32,
-    origin: [i32; 3],
-    chunk: i32,
-    out: &mut Vec<FaceQuad>,
-) {
+fn fill_chunk(model: &VoxelModel, cut: i32, origin: [i32; 3], chunk: i32, out: &mut Vec<FaceQuad>) {
     let size = model.size();
     let hi = [
         (origin[0] + chunk).min(size[0] as i32),
@@ -269,10 +261,7 @@ mod tests {
     #[test]
     fn an_incremental_rebuild_matches_a_full_one() {
         fn sorted(m: &FaceMesh) -> Vec<(([u16; 3], Face), u8)> {
-            let mut v: Vec<_> = m
-                .quads()
-                .map(|q| ((q.voxel, q.face), q.index))
-                .collect();
+            let mut v: Vec<_> = m.quads().map(|q| ((q.voxel, q.face), q.index)).collect();
             v.sort_by_key(|(k, _)| (k.0, format!("{:?}", k.1)));
             v
         }
@@ -288,7 +277,10 @@ mod tests {
         let mut incremental = FaceMesh::default();
         extract_dirty(&m, ExtractOptions::default(), &mut incremental);
         m.clear_dirty();
-        assert_eq!(sorted(&incremental), sorted(&extract(&m, ExtractOptions::default())));
+        assert_eq!(
+            sorted(&incremental),
+            sorted(&extract(&m, ExtractOptions::default()))
+        );
 
         // Every edit that could leave a chunk stale: interior, on a chunk face,
         // on an edge, on a corner, an erase, and a recolour.
@@ -375,15 +367,27 @@ mod tests {
 
         m.clear_dirty();
         m.set(31, 31, 31, 1);
-        assert_eq!(m.dirty_chunk_count(), 4, "a corner: itself and three across");
+        assert_eq!(
+            m.dirty_chunk_count(),
+            4,
+            "a corner: itself and three across"
+        );
 
         m.clear_dirty();
         m.set(0, 0, 0, 1);
-        assert_eq!(m.dirty_chunk_count(), 1, "the scene's own corner has no neighbours");
+        assert_eq!(
+            m.dirty_chunk_count(),
+            1,
+            "the scene's own corner has no neighbours"
+        );
 
         m.clear_dirty();
         m.set(20, 20, 20, 1);
-        assert_eq!(m.dirty_chunk_count(), 0, "writing what is already there is not a change");
+        assert_eq!(
+            m.dirty_chunk_count(),
+            0,
+            "writing what is already there is not a change"
+        );
     }
 
     /// Two layers sharing a cell must mesh it once, from the one on top —
@@ -419,9 +423,12 @@ mod tests {
 
         let mesh = extract(&m, ExtractOptions::default());
         assert_eq!(mesh.len(), 12, "two lone voxels, six faces each");
-        assert_eq!(m.allocated_cells(), 2, "and the scene between them costs nothing");
+        assert_eq!(
+            m.allocated_cells(),
+            2,
+            "and the scene between them costs nothing"
+        );
     }
-
 
     #[test]
     fn a_lone_voxel_has_six_faces() {

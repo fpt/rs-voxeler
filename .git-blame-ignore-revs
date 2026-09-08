@@ -1,0 +1,11 @@
+# Commits that only reformat. Teach git to look past them:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Both are from #35, which made the tree rustfmt-clean so CI could check it.
+
+# style: cargo fmt over the whole tree
+1bb4bc1b6070d13a448e625b9a180d0cd47d431e
+
+# style: re-align the string continuations rustfmt cannot reach
+393e855d6c70c548b6ca584166378a0d31b8735d

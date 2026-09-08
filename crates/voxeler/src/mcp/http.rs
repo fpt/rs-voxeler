@@ -229,7 +229,8 @@ mod tests {
 
     #[test]
     fn a_request_line_splits_into_path_and_query() {
-        let (r, len) = parse_head("GET /message?sessionId=abc&x=1 HTTP/1.1\r\nHost: x\r\n").unwrap();
+        let (r, len) =
+            parse_head("GET /message?sessionId=abc&x=1 HTTP/1.1\r\nHost: x\r\n").unwrap();
         assert_eq!(r.method, "GET");
         assert_eq!(r.path, "/message");
         assert_eq!(r.param("sessionId"), Some("abc"));
@@ -282,7 +283,10 @@ mod tests {
 
         assert!(sessions.send("abc", "hello"));
         assert_eq!(rx.recv().unwrap(), "hello");
-        assert!(!sessions.send("other", "hello"), "an unknown session is not an error");
+        assert!(
+            !sessions.send("other", "hello"),
+            "an unknown session is not an error"
+        );
 
         sessions.remove("abc");
         assert!(!sessions.send("abc", "hello"));

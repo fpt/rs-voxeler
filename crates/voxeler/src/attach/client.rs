@@ -82,7 +82,9 @@ pub fn connect(
                 .map_err(|e| format!("the session sent a model this build cannot read: {e}"))?;
             (revision, model)
         }
-        SyncReply::Unchanged => return Err("the session answered a first sync with 'unchanged'".into()),
+        SyncReply::Unchanged => {
+            return Err("the session answered a first sync with 'unchanged'".into())
+        }
     };
 
     let (tx, rx) = mpsc::channel();
@@ -144,7 +146,11 @@ mod tests {
             version: crate::VERSION.into(),
         };
         let (attached, first) = connect(&session, Arc::new(|| {})).unwrap();
-        assert_eq!(first.get(1, 1, 1), 3, "the window opens on what is there now");
+        assert_eq!(
+            first.get(1, 1, 1),
+            3,
+            "the window opens on what is there now"
+        );
         assert!(attached.latest().is_none(), "and nothing has changed yet");
 
         {

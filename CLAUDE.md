@@ -952,6 +952,7 @@ from the one that was asked for.
 cd crates && cargo build --release
 cd crates && cargo test
 cd crates && cargo clippy --all-targets
+cd crates && cargo fmt --check   # CI gates this; `cargo fmt` fixes it
 
 ./crates/target/release/voxeler models/robot.vxm
 ./crates/target/release/voxeler models/robot.vxm --thumbnail shot.png

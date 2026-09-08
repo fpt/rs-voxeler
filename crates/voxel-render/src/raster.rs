@@ -87,12 +87,7 @@ pub fn draw_mesh(
             .scaled(scene.light.intensity(normal))
             .to_u32();
         let c = quad.corners();
-        let world = [
-            c[0] + offset,
-            c[1] + offset,
-            c[2] + offset,
-            c[3] + offset,
-        ];
+        let world = [c[0] + offset, c[1] + offset, c[2] + offset, c[3] + offset];
         fill_polygon(fb, scene, &world, color, 0.0);
     }
 }
@@ -102,13 +97,7 @@ pub fn draw_mesh(
 /// `bias` is subtracted from the depth, in ndc units: pass a small positive
 /// value to lay something (a highlight, a wireframe) on top of coplanar
 /// geometry without it fighting for the pixel.
-pub fn fill_polygon(
-    fb: &mut Framebuffer,
-    scene: &Scene,
-    poly: &[Vec3],
-    color: u32,
-    bias: f32,
-) {
+pub fn fill_polygon(fb: &mut Framebuffer, scene: &Scene, poly: &[Vec3], color: u32, bias: f32) {
     let mut clip = [Vec4::default(); 8];
     let n = to_clip_space(&scene.view_proj, poly, &mut clip);
     let Some(n) = clip_near(&mut clip, n) else {
@@ -288,7 +277,11 @@ mod tests {
     use voxel_core::VoxelModel;
 
     fn scene(fb: &Framebuffer, camera: &OrbitCamera) -> Scene {
-        Scene::new(camera, fb.width() as f32 / fb.height() as f32, Light::default())
+        Scene::new(
+            camera,
+            fb.width() as f32 / fb.height() as f32,
+            Light::default(),
+        )
     }
 
     fn one_voxel_scene() -> (Framebuffer, Scene, FaceMesh, Palette) {
@@ -315,7 +308,11 @@ mod tests {
         fb.clear(0);
         draw_mesh(&mut fb, &s, &mesh, &pal, Vec3::ZERO);
         assert_ne!(fb.color_at(32, 32), 0);
-        assert_eq!(fb.color_at(0, 0), 0, "the corner should still be background");
+        assert_eq!(
+            fb.color_at(0, 0),
+            0,
+            "the corner should still be background"
+        );
     }
 
     /// Back-face culling plus the depth buffer must leave only the three faces
@@ -359,7 +356,10 @@ mod tests {
 
         // The colours travel with the geometry, not with the draw order --
         // that is the whole point of the assertion.
-        for order in [[(&far, 0x111111u32), (&near, 0x222222u32)], [(&near, 0x222222), (&far, 0x111111)]] {
+        for order in [
+            [(&far, 0x111111u32), (&near, 0x222222u32)],
+            [(&near, 0x222222), (&far, 0x111111)],
+        ] {
             fb.clear(0);
             for (poly, color) in order {
                 fill_polygon(&mut fb, &s, poly, color, 0.0);
@@ -452,7 +452,14 @@ mod tests {
         ];
         fb.clear(0);
         fill_polygon(&mut fb, &s, &quad, 0x111111, 0.0);
-        draw_line(&mut fb, &s, vec3(-2.0, 0.0, 0.0), vec3(2.0, 0.0, 0.0), 0xFF0000, 1e-3);
+        draw_line(
+            &mut fb,
+            &s,
+            vec3(-2.0, 0.0, 0.0),
+            vec3(2.0, 0.0, 0.0),
+            0xFF0000,
+            1e-3,
+        );
         assert_eq!(fb.color_at(16, 16), 0xFF0000);
     }
 

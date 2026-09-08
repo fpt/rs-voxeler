@@ -239,7 +239,10 @@ mod tests {
         Session::unpublish(&path, 1111).unwrap();
         let found = Session::list_in(&dir);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1.port, 2222, "the newer server is still advertised");
+        assert_eq!(
+            found[0].1.port, 2222,
+            "the newer server is still advertised"
+        );
     }
 
     /// A file whose socket answers nobody describes a server that has gone.

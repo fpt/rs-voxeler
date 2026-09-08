@@ -47,7 +47,9 @@ use serde_json::{json, Value};
 
 use crate::editor::Editor;
 use http::{HttpRequest, Sessions};
-use wire::{CallParams, CallResult, Request, Response, INTERNAL_ERROR, METHOD_NOT_FOUND, PARSE_ERROR};
+use wire::{
+    CallParams, CallResult, Request, Response, INTERNAL_ERROR, METHOD_NOT_FOUND, PARSE_ERROR,
+};
 
 /// How long a connection thread waits for the event loop to run its tool call.
 ///
@@ -360,7 +362,10 @@ mod tests {
     #[test]
     fn initialize_reports_a_tools_capability_and_this_server() {
         let (ctx, _rx) = context();
-        let r = ctx.handle(request("initialize", json!({"protocolVersion": "2025-06-18"})));
+        let r = ctx.handle(request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18"}),
+        ));
         let v = serde_json::to_value(r.unwrap()).unwrap();
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
         assert!(v["result"]["capabilities"]["tools"].is_object());
@@ -381,7 +386,8 @@ mod tests {
     #[test]
     fn tools_list_advertises_the_editing_surface() {
         let (ctx, _rx) = context();
-        let v = serde_json::to_value(ctx.handle(request("tools/list", json!({}))).unwrap()).unwrap();
+        let v =
+            serde_json::to_value(ctx.handle(request("tools/list", json!({}))).unwrap()).unwrap();
         let names: Vec<&str> = v["result"]["tools"]
             .as_array()
             .unwrap()
@@ -389,7 +395,10 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         for expected in ["describe_model", "put_voxel", "put_rect", "paint", "fill"] {
-            assert!(names.contains(&expected), "{expected} missing from {names:?}");
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {names:?}"
+            );
         }
     }
 

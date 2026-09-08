@@ -280,7 +280,7 @@ pub(super) fn check(editor: &Editor, name: &str, args: &Value) -> Result<CallRes
                 })
                 .collect::<Vec<_>>(),
             "note": "Components are observations, not automatically defects; \
-                     26-connectivity includes corner-only contact.",
+             26-connectivity includes corner-only contact.",
         })
     };
     Ok(CallResult::text(format!("{name}\n{report}")))
@@ -324,7 +324,7 @@ pub(super) fn compare_saved(
             "saved_voxels": saved.filled_count(),
             "unsaved": editor.is_dirty(),
             "comparison": "native document: geometry, palette, layers, objects and active \
-                           layer; ignores allocated box slack",
+             layer; ignores allocated box slack",
         })
     )))
 }

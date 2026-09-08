@@ -52,7 +52,10 @@ pub const MAX_MODEL_BYTES: u32 = 96 * 1024 * 1024;
 pub enum Sync {
     /// The client's revision is current; nothing to send.
     Unchanged,
-    Model { revision: u64, bytes: Vec<u8> },
+    Model {
+        revision: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 pub fn write_hello(w: &mut impl Write) -> io::Result<()> {
@@ -167,7 +170,10 @@ mod tests {
             read_hello(&mut &[MSG_HELLO, PROTOCOL_VERSION][..], &mut out).unwrap(),
             Some(true)
         );
-        assert_eq!(read_hello_reply(&mut &out[..]).unwrap(), (PROTOCOL_VERSION, true));
+        assert_eq!(
+            read_hello_reply(&mut &out[..]).unwrap(),
+            (PROTOCOL_VERSION, true)
+        );
 
         let mut out = Vec::new();
         assert_eq!(
@@ -176,7 +182,10 @@ mod tests {
         );
         // Refused, but still *answered*: a client that gets silence cannot tell
         // a version mismatch from a crash.
-        assert_eq!(read_hello_reply(&mut &out[..]).unwrap(), (PROTOCOL_VERSION, false));
+        assert_eq!(
+            read_hello_reply(&mut &out[..]).unwrap(),
+            (PROTOCOL_VERSION, false)
+        );
     }
 
     #[test]
@@ -261,7 +270,10 @@ mod tests {
 
         let mut r = &wire[..];
         assert_eq!(read_sync(&mut r).unwrap(), Sync::Unchanged);
-        assert!(matches!(read_sync(&mut r).unwrap(), Sync::Model { revision: 2, .. }));
+        assert!(matches!(
+            read_sync(&mut r).unwrap(),
+            Sync::Model { revision: 2, .. }
+        ));
         assert_eq!(read_sync(&mut r).unwrap(), Sync::Unchanged);
         assert!(r.is_empty());
     }

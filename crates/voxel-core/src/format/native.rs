@@ -514,7 +514,9 @@ mod tests {
         m.set_layer_bounds(0, Bounds::new([0, 0, 0], [64, 5, 64]));
         m.set(3, 1, 3, 4);
 
-        let tree = m.add_layer_with(0, "TREE", Bounds::new([20, 5, 10], [16, 32, 16])).unwrap();
+        let tree = m
+            .add_layer_with(0, "TREE", Bounds::new([20, 5, 10], [16, 32, 16]))
+            .unwrap();
         m.set_active_layer(tree);
         m.set(24, 20, 14, 7);
 
@@ -522,7 +524,11 @@ mod tests {
         assert_eq!(back, m);
         assert_eq!(back.layer_bounds(0), Bounds::new([0, 0, 0], [64, 5, 64]));
         assert_eq!(back.layer_bounds(1), Bounds::new([20, 5, 10], [16, 32, 16]));
-        assert_eq!(back.get(24, 20, 14), 7, "in scene coordinates, wherever the box is");
+        assert_eq!(
+            back.get(24, 20, 14),
+            7,
+            "in scene coordinates, wherever the box is"
+        );
         assert_eq!(back.get(3, 1, 3), 4);
     }
 
@@ -531,11 +537,14 @@ mod tests {
     #[test]
     fn a_layer_far_from_the_origin_round_trips() {
         let mut m = VoxelModel::new(256, 256, 256);
-        m.set_layer_bounds(0, Bounds::new([250, 250, 250], [6, 6, 6])) ;
+        m.set_layer_bounds(0, Bounds::new([250, 250, 250], [6, 6, 6]));
         m.set(255, 255, 255, 9);
         let back = decode(&encode(&m)).unwrap();
         assert_eq!(back.get(255, 255, 255), 9);
-        assert_eq!(back.layer_bounds(0), Bounds::new([250, 250, 250], [6, 6, 6]));
+        assert_eq!(
+            back.layer_bounds(0),
+            Bounds::new([250, 250, 250], [6, 6, 6])
+        );
     }
 
     /// An empty layer costs a header and nothing else, and comes back empty
@@ -583,7 +592,11 @@ mod tests {
             "a layer in a hidden object comes back hidden"
         );
         assert_eq!(back.get(9, 4, 4), 0, "so the composite agrees");
-        assert_eq!(back.get_in(blade, 9, 4, 4), 3, "and the voxel is still there");
+        assert_eq!(
+            back.get_in(blade, 9, 4, 4),
+            3,
+            "and the voxel is still there"
+        );
     }
 
     /// A tree read off a disk is not a tree a caller built. A parent that does

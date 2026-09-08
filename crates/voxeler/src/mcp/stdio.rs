@@ -61,7 +61,6 @@ impl Live {
     pub fn bump(&mut self) {
         self.revision += 1;
     }
-
 }
 
 /// The editor, shared between the stdio loop and the attach listener.

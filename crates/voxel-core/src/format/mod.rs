@@ -17,7 +17,7 @@ pub mod vox;
 
 use std::path::Path;
 
-use crate::{Result, VoxelModel, VoxelError};
+use crate::{Result, VoxelError, VoxelModel};
 
 /// Load by extension: `.vox` is MagicaVoxel's, anything else is ours.
 pub fn load(path: &Path) -> Result<VoxelModel> {
