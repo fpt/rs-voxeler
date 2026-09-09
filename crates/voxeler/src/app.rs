@@ -265,9 +265,14 @@ impl App {
         // colour while it is being chosen. `set_palette_color` drops a no-op,
         // so holding a slider still costs one undo step rather than one per
         // pixel of travel.
-        if let Dialog::Color { index, rgb } = &dialog {
-            self.editor
-                .set_palette_color(*index, voxel_core::Rgb8::new(rgb[0], rgb[1], rgb[2]));
+        // A match rather than `if let`: `Dialog` has one variant today, which
+        // makes an `if let` on it irrefutable and a lint error — and the match
+        // is what the next dialog needs anyway.
+        match &dialog {
+            Dialog::Color { index, rgb } => {
+                self.editor
+                    .set_palette_color(*index, voxel_core::Rgb8::new(rgb[0], rgb[1], rgb[2]));
+            }
         }
         match outcome {
             Outcome::Open => self.editor.dialog = Some(dialog),
@@ -283,8 +288,6 @@ impl App {
         // Edges are consumed by the frame that saw them.
         self.ui_input.pressed = false;
         self.ui_input.released = false;
-        self.ui_input.typed.clear();
-        self.ui_input.backspace = false;
     }
 
     fn on_mouse_down(&mut self, button: MouseButton) {

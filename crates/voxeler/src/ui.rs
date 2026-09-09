@@ -91,11 +91,6 @@ pub struct Input {
     pub down: bool,
     pub pressed: bool,
     pub released: bool,
-    /// Characters typed this frame, from the platform's own text event rather
-    /// than from key codes — a name is what the user's layout produces, the
-    /// rule the rename prompt already follows.
-    pub typed: String,
-    pub backspace: bool,
 }
 
 const TEXT_SCALE: u32 = 2;
@@ -113,12 +108,12 @@ const TRACK: u32 = 0x2A3040;
 pub struct Ui {
     commands: Vec<Command>,
     input: Input,
-    /// The widget under the pointer, and the one holding it.
+    /// The widget holding the pointer, if any.
     ///
-    /// `active` outlives `hot`: a slider keeps the drag once you have grabbed
-    /// it, however far the pointer strays, until the button comes up. Losing it
-    /// at the edge of the track is the failure this pair exists to prevent.
-    hot: u64,
+    /// The one thing that has to persist: hovering is worked out per widget as
+    /// it lays itself out and needs no state, but a *grab* has to outlive the
+    /// pointer leaving the widget. A slider that let go at the edge of its own
+    /// track is the failure this exists to prevent.
     active: u64,
     scope: u64,
     layout: Vec<Cursor>,
@@ -136,7 +131,6 @@ impl Ui {
         Self {
             commands: Vec::new(),
             input,
-            hot: 0,
             active,
             scope: 0,
             layout: Vec::new(),
@@ -222,28 +216,14 @@ impl Ui {
         rect
     }
 
-    pub fn label(&mut self, text: &str) {
-        let r = self.row();
-        self.commands.push(Command::Text {
-            x: r.x,
-            y: r.y + 4,
-            text: text.to_string(),
-            color: DIM,
-            scale: TEXT_SCALE,
-        });
-    }
-
     /// A button. True on the frame it is released over, which is what a click
     /// is — pressing and dragging away should not fire it.
     pub fn button(&mut self, label: &str) -> bool {
         let id = self.id(label);
         let r = self.row();
         let over = r.contains(self.input.mouse.0, self.input.mouse.1);
-        if over {
-            self.hot = id;
-            if self.input.pressed {
-                self.active = id;
-            }
+        if over && self.input.pressed {
+            self.active = id;
         }
         let fired = self.input.released && self.active == id && over;
         let held = self.active == id && self.input.down;
@@ -277,11 +257,8 @@ impl Ui {
             w: r.w.saturating_sub(name_w as u32 + 44),
             h: ROW_H - 8,
         };
-        if track.contains(self.input.mouse.0, self.input.mouse.1) {
-            self.hot = id;
-            if self.input.pressed {
-                self.active = id;
-            }
+        if self.input.pressed && track.contains(self.input.mouse.0, self.input.mouse.1) {
+            self.active = id;
         }
         let mut moved = false;
         // Held, not hovered: once grabbed the track follows the pointer even
@@ -440,8 +417,8 @@ mod tests {
         };
         let mut ui = Ui::new(input, held);
         let outcome = d.run(&mut ui, SCREEN);
-        if let Dialog::Color { rgb: after, .. } = d {
-            *rgb = after;
+        match d {
+            Dialog::Color { rgb: after, .. } => *rgb = after,
         }
         (ui, outcome)
     }
