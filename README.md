@@ -96,12 +96,26 @@ A **region** — plane or volume — grows over cells holding the same palette i
 as the one under the cursor. Building starts on air, so it floods air; erasing
 and painting start on a voxel, so they stop where the colour changes. On a
 one-colour model that is "everything connected"; on a model with a red panel on
-a blue body it is the panel. Nothing reaches past a slice, and a fill is a
-click rather than a drag — it happens once, and undoes in one step.
+a blue body it is the panel. Nothing reaches past a slice.
 
-The **brush** is the voxel span's shape: `9` and `0` size it, `C` switches
+The **brush** is how far an edit reaches: `9` and `0` size it, `C` switches
 between a cube and a ball, and the outline in the viewport shows its extent.
 Radius 0 is the single voxel everything else is measured from.
+
+That radius is also what decides whether an edit is a **click or a drag**. A
+region with no limit happens once — dragging an unlimited flood would re-seed it
+several times a frame and leave a wandering pile of fills. Give the same flood a
+radius and it covers a patch the size you asked for, and you can drag it:
+
+```
+3 PLANE  + radius 0   fill the whole face, one click
+3 PLANE  + radius 3   raise a patch of it, dragged like a brush
+4 VOLUME + radius 0   the whole connected part
+4 VOLUME + radius 3   as much of it as is within three cells
+```
+
+So resizing the brush no longer snaps you back to the voxel span — under a
+flood, the radius is the thing that makes the flood workable by hand.
 
 ## Layers
 

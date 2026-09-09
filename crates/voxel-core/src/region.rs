@@ -156,7 +156,22 @@ pub struct Reach {
     pub face: Face,
     /// What a cell must hold to join the region.
     pub matches: Match,
-    /// Only consulted by [`Span::Voxel`].
+    /// How far the region reaches from the seed.
+    ///
+    /// Two readings that never meet, because they belong to spans that work
+    /// differently. [`Span::Voxel`] does not grow, so the brush *is* the region
+    /// — its shape, and radius 0 meaning the seed alone. Every other span grows,
+    /// and for those this is a **bound on the growth**: radius 0 means no bound
+    /// at all, and a radius stops the flood at that distance from the seed.
+    ///
+    /// A bound applied *during* the growth, in the same place [`Reach::within`]
+    /// is and for the same reason: a flood that spread through cells outside
+    /// the radius and was trimmed at the end would reach round a corner and
+    /// come back, which is not what a disc on a surface means.
+    ///
+    /// This is what makes a bounded [`Span::Plane`] — a patch of surface, of a
+    /// size you chose — expressible without a second flood written beside this
+    /// one.
     pub brush: Brush,
     /// Whether the face is the editor's work plane rather than a surface of the
     /// model. There is no material behind the work plane, so a plane span over
@@ -229,8 +244,29 @@ fn visible(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> u8 {
 fn joins(model: &VoxelModel, reach: &Reach, p: [i32; 3]) -> bool {
     model.contains(p[0], p[1], p[2])
         && reach.within.is_none_or(|b| b.contains(p[0], p[1], p[2]))
+        && reach.reaches(p)
         && p[1] < reach.y_limit as i32
         && reach.matches.accepts(at(model, reach, p))
+}
+
+impl Reach {
+    /// Whether `p` is inside the radius, for the spans that grow.
+    ///
+    /// Radius 0 is *unbounded* here, which is the opposite of what it means to
+    /// [`Span::Voxel`] — where the brush is the region and radius 0 is one
+    /// cell. The two never collide: a voxel span does not grow, so it never
+    /// asks this.
+    ///
+    /// The shape is the brush's own, so "ball" and "cube" mean the same thing
+    /// here as they do there and the radius rule is written once.
+    fn reaches(&self, p: [i32; 3]) -> bool {
+        self.brush.radius == 0
+            || self.brush.covers(
+                p[0] - self.seed[0],
+                p[1] - self.seed[1],
+                p[2] - self.seed[2],
+            )
+    }
 }
 
 /// Whether `p` presents the same face the click landed on.

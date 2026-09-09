@@ -969,10 +969,22 @@ from the one that was asked for.
   entry and a click that changed nothing does not consume an undo. That is also
   what makes a cell lying *on* a mirror plane cost an iteration rather than a
   duplicate entry, at any number of active planes.
-- **A fill is a click; a brush is a drag.** A region span applies once and
-  `continue_stroke` returns early afterwards. Re-flooding as the pointer moves
-  would re-seed several times a frame and turn one intended fill into a
-  wandering pile of them.
+- **An unbounded region is a click; a bounded one is a stroke.** A region with
+  no limit applies once and `continue_stroke` returns early afterwards:
+  re-flooding as the pointer moves would re-seed several times a frame and turn
+  one intended fill into a wandering pile of them. The rule used to read "any
+  span but `Voxel`", which named the wrong thing — what makes a fill
+  unstrokeable is that it has no limit, not that it is a flood. Give a flood a
+  radius and it covers a patch the size you chose, and dragging one is how a
+  surface gets worked. `Editor::region_is_bounded` is the whole of it.
+- **The brush is a reach, not a shape one span happens to own.** For
+  `Span::Voxel` the brush *is* the region — its shape, radius 0 meaning the seed
+  alone. For every span that grows, the radius is a bound on the growth, applied
+  during the flood in the same place `Reach::within` is: a flood trimmed at the
+  end would spread round a corner and come back, which is not what a disc on a
+  surface means. Radius 0 therefore means "unbounded" to a flood and "one cell"
+  to a voxel span, and the two never meet because a voxel span does not grow.
+  Resizing the brush no longer snaps the span back to `Voxel`.
 - **A brush is sized by radius, so it is always odd-edged.** An even edge has to
   round its centre to one side, and the side it rounded to shows up as a
   half-voxel drift every time the brush is resized mid-model. `Brush::covers`

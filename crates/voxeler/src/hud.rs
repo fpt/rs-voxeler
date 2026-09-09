@@ -563,13 +563,21 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         let label = format!("{} {}", i + 1, span.name());
         x += chip(fb, x, y, &label, editor.span == *span) as i32 + 6;
     }
-    // The brush is the voxel span's shape, so it sits at the end of that row
-    // rather than in one of its own — and only once it is bigger than the one
-    // cell every other span is measured from.
+    // The brush sits at the end of the span row because it is what bounds one:
+    // the voxel span's shape, and every other span's reach. Shown only once it
+    // is bigger than the one cell every span is measured from.
+    // Lit when it is actually doing something, which is no longer the same as
+    // "the voxel span is selected": a radius under a flood is what turns that
+    // flood from a click into a stroke, and the chip has to say so or the
+    // difference is invisible until you drag.
     if editor.brush.radius > 0 {
         let e = editor.brush.edge();
-        let label = format!("{} {e}x{e}x{e}", editor.brush.shape.name());
-        chip(fb, x, y, &label, editor.span == Span::Voxel);
+        let label = if editor.span == Span::Voxel {
+            format!("{} {e}x{e}x{e}", editor.brush.shape.name())
+        } else {
+            format!("{} R{}", editor.brush.shape.name(), editor.brush.radius)
+        };
+        chip(fb, x, y, &label, true);
     }
 
     // A third row for the mirror planes.
@@ -618,6 +626,7 @@ const HELP: &[&str] = &[
     "B E P I S    BUILD ERASE PAINT PICK SELECT",
     "1 2 3 4      VOXEL AXIS PLANE VOLUME",
     "9 0          BRUSH SMALLER / BIGGER",
+    "             (A RADIUS MAKES A FILL DRAGGABLE)",
     "C            BRUSH CUBE / BALL",
     "",
     "[ ]          COLOUR -1 / +1",
