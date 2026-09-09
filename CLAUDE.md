@@ -285,6 +285,66 @@ Three rules, all in `Editor::continue_stroke` and its neighbours:
   the stroke was empty. A tool acting only on the active layer is a rule; a tool
   that ignores you with no explanation is a bug report.
 
+### Selecting by hand: a fifth tool, and two grains
+
+The selection and its transforms shipped as MCP tools with no keys behind them,
+so a person could build, erase, paint, fill, mirror and slice by hand and could
+not select anything — while looking at the outline of a selection an agent had
+made. `Tool::Select` closes that.
+
+A **tool** rather than a modifier, because a drag already means "apply the
+current tool", and span and brush then compose with selecting exactly as they do
+with the other four — which is the whole reason `Tool` and `Span` are separate.
+It is the one tool that never writes, so `app.rs` handles its click directly
+rather than through a stroke: a choice, like a click on a panel, costing no
+undo. `begin_stroke` returns early on it as a floor under that.
+
+**Two grains, one question.** `O` switches between cells and objects, because
+"that thing there" is asked at two sizes:
+
+- **Cells** go through `select_with_span`, the same `region` walk the drawing
+  tools use, matched on *material* rather than colour — an arm is one part
+  whether or not the glove is a different index.
+- **Objects** set `Editor::selected_object`, which is an object index and
+  deliberately **not** a `Selection`. A selection is cells on one layer; an
+  object spans as many layers as it likes. Gathering a part's voxels into a
+  selection would silently take only the active layer's share and tear the part
+  in half on the first move. So the transforms it feeds are `move_object` and
+  `rotate_object`, which already carry a whole subtree all-or-nothing.
+
+Both outline in the viewport, in two colours, because both can be set at once
+and they mean different things.
+
+The arrow keys move whatever is selected, deciding by *what is actually
+selected* rather than by which mode is showing — pressing an arrow with a part
+outlined and having some cells move instead would be the surprising answer.
+`shift+X/Y/Z` turns, `alt+X/Y/Z` flips. Flip is cells only: an object has no
+stored transform to hold a reflection, and `create_instance`'s `mirror` is where
+a mirrored part lives.
+
+There is no duplicate key. Paste puts the clipboard back at the corner it was
+copied from — `Clipboard::origin` exists for that — so copy, paste, arrows *is*
+`duplicate_selection`, with the offset chosen by eye instead of typed as an
+argument.
+
+**A click on nothing clears both selections.** Pointing at empty space and
+pressing is how everything else with a selection says "never mind", and the
+alternative is an outline on screen with no obvious way to be rid of it. Both go
+rather than only the one the mode is showing, because "nothing selected" is one
+idea and leaving the other outline up would make the click look like it had
+missed. The select tool gets no work-plane fallback for the same reason: that
+exists so build has something to aim at on an empty layer, and here it would
+make a click on the sky select a cell of air instead of clearing.
+
+The tool's click sits *after* the alt and shift branches in `on_mouse_down`, not
+before. An early return there swallowed alt-orbit and shift-pan — looking at the
+thing you are about to select is part of selecting it, and a tool you cannot aim
+is not a tool.
+
+The select mode gets a chip, and only while the tool is running: "cells" and
+"objects" look identical until you press an arrow, and by then the wrong thing
+has moved. A setting with no chip is a setting nobody finds.
+
 ### A selection is cells, on one layer, and not part of the document
 
 `Editor::selection` is what makes an existing shape something you can pick up

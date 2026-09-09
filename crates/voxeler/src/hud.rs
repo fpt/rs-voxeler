@@ -549,6 +549,7 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         (Tool::Erase, "E ERASE"),
         (Tool::Paint, "P PAINT"),
         (Tool::Pick, "I PICK"),
+        (Tool::Select, "S SELECT"),
     ];
     let h = text_height(TEXT_SCALE) + 8;
     let mut x = PAD as i32;
@@ -583,6 +584,28 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
     for (axis, key) in ["X", "Y", "Z"].iter().enumerate() {
         x += chip(fb, x, y, key, editor.mirror[axis]) as i32 + 4;
     }
+
+    // The select tool's grain, and what it has hold of. Only while selecting:
+    // a chip for a mode that is not running is a chip in the way. But *while*
+    // it runs it has to be there — "cells" and "objects" look identical until
+    // you press an arrow, and by then the wrong one has moved.
+    if editor.tool == Tool::Select {
+        let y = y + h as i32 + 6;
+        let mut x = PAD as i32;
+        overlay::text(fb, x, y + 4, "O", DIM, TEXT_SCALE);
+        x += text_width("O", TEXT_SCALE) as i32 + 8;
+        x += chip(fb, x, y, "CELLS", !editor.select_objects) as i32 + 4;
+        x += chip(fb, x, y, "OBJECTS", editor.select_objects) as i32 + 8;
+        let held = match (editor.select_objects, editor.selected_object) {
+            (true, Some(i)) => editor.object_name(i),
+            (true, None) => "-".into(),
+            (false, _) => match editor.selection.as_ref() {
+                Some(s) => format!("{} VOXELS", s.len()),
+                None => "-".into(),
+            },
+        };
+        overlay::text(fb, x, y + 4, &held.to_uppercase(), TEXT, TEXT_SCALE);
+    }
 }
 
 const HELP: &[&str] = &[
@@ -592,7 +615,7 @@ const HELP: &[&str] = &[
     "RMB DRAG     ORBIT      MMB DRAG  PAN",
     "ALT+LMB      ORBIT      WHEEL     ZOOM",
     "",
-    "B E P I      BUILD ERASE PAINT PICK",
+    "B E P I S    BUILD ERASE PAINT PICK SELECT",
     "1 2 3 4      VOXEL AXIS PLANE VOLUME",
     "9 0          BRUSH SMALLER / BIGGER",
     "C            BRUSH CUBE / BALL",
@@ -610,6 +633,14 @@ const HELP: &[&str] = &[
     "CTRL+R       RELOAD    CTRL+N  CLEAR",
     "CTRL+D       SUBDIVIDE x2",
     "CTRL+Q       QUIT",
+    "",
+    "O            SELECT CELLS / OBJECTS",
+    "W ESC        SELECT WHOLE LAYER / CLEAR",
+    "             (CLICK EMPTY SPACE CLEARS TOO)",
+    "ARROWS       MOVE   (SHIFT = Z AXIS)",
+    "SHIFT+X Y Z  TURN 90 DEG ABOUT AXIS",
+    "ALT+X Y Z    FLIP  (CELLS ONLY)",
+    "CTRL+C X V   COPY / CUT / PASTE",
     "",
     "L SHIFT+L    NEXT / PREVIOUS LAYER",
     "A D          ADD / DELETE LAYER",

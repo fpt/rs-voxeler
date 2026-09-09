@@ -552,6 +552,17 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "select_layer_all",
+            description: "Select every voxel of a layer — the whole of it, which is the commonest \
+                 selection there is and the one a flood fill needs a seed to reach. Defaults to \
+                 the active layer. Replaces any current selection; selects nothing, and says so, \
+                 on an empty layer.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"layer": layer},
+            }),
+        },
+        ToolInfo {
             name: "select_connected",
             description:
                 "Select the connected piece of the active layer containing a cell — an arm, a \
@@ -1155,6 +1166,14 @@ fn dispatch(
             let from = corner(args, "from")?;
             let to = corner(args, "to")?;
             editor.select_box(from, to);
+            Ok(CallResult::text(selection_text(editor)))
+        }
+        "select_layer_all" => {
+            let layer = match args.get("layer") {
+                None | Some(Value::Null) => editor.active_layer(),
+                _ => layer_arg(editor, args)?,
+            };
+            editor.select_all_in_layer(layer);
             Ok(CallResult::text(selection_text(editor)))
         }
         "select_connected" => {

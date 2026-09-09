@@ -105,6 +105,13 @@ fn no_selection() -> String {
 pub struct Clipboard {
     cells: Vec<([i32; 3], u8)>,
     size: [i32; 3],
+    /// The low corner it was copied from.
+    ///
+    /// Kept so a paste can land exactly where the copy came from without the
+    /// caller having to remember the number. Over MCP the corner is an
+    /// argument; at the keyboard there is nowhere to type one, and "paste puts
+    /// it back where it was, then move it" is the gesture people expect.
+    origin: [i32; 3],
 }
 
 impl Clipboard {
@@ -117,6 +124,11 @@ impl Clipboard {
     /// The extent of what was copied, in cells.
     pub fn size(&self) -> [i32; 3] {
         self.size
+    }
+
+    /// Where it was copied from.
+    pub fn origin(&self) -> [i32; 3] {
+        self.origin
     }
 }
 
@@ -150,6 +162,13 @@ pub enum Tool {
     Paint,
     /// Take the colour of the voxel you clicked, without changing anything.
     Pick,
+    /// Pick out what is already there, rather than changing it.
+    ///
+    /// The one tool that never writes. It is a tool rather than a modifier
+    /// because a drag already means "apply the current tool", and span and
+    /// brush then compose with it exactly as they do with the other four —
+    /// which is the whole reason `Tool` and `Span` are separate.
+    Select,
 }
 
 impl Tool {
@@ -159,6 +178,7 @@ impl Tool {
             Tool::Erase => "ERASE",
             Tool::Paint => "PAINT",
             Tool::Pick => "PICK",
+            Tool::Select => "SELECT",
         }
     }
 }
@@ -256,6 +276,21 @@ pub struct Editor {
     /// identity on `Object` that the file format would have to carry for the
     /// sake of a triangle in a panel.
     collapsed: std::collections::HashSet<usize>,
+    /// Whether the select tool picks whole objects rather than cells.
+    ///
+    /// Two modes rather than two tools: they answer the same question — "that
+    /// thing there" — at two grains, and the row of tools is already the size
+    /// a row of tools should be.
+    pub select_objects: bool,
+    /// The part the select tool last picked, in object mode.
+    ///
+    /// Deliberately *not* a `Selection`. A selection is cells on one layer, and
+    /// an object spans as many layers as it likes: gathering an object's voxels
+    /// into one would silently take only the active layer's share and tear the
+    /// part in half on the first move. So this is an object index, and the
+    /// transforms it feeds are `move_object` and `rotate_object`, which already
+    /// know how to carry a whole subtree.
+    pub selected_object: Option<usize>,
     pub selection: Option<Selection>,
     /// Voxels lifted for a paste, if any. Also not part of the document, but
     /// unlike the selection it *does* survive undo — see [`Clipboard`].
@@ -285,6 +320,8 @@ impl Editor {
         let mut editor = Self {
             document_id: next_document_id(),
             collapsed: Default::default(),
+            select_objects: false,
+            selected_object: None,
             camera: OrbitCamera::default(),
             tool: Tool::Build,
             span: Span::default(),
@@ -331,6 +368,44 @@ impl Editor {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// Run something that reports, and put its answer in the status line.
+    ///
+    /// The keyboard has nowhere else to put a refusal, and a key that silently
+    /// does nothing is the failure this editor keeps designing against.
+    pub fn report(&mut self, f: impl FnOnce(&mut Self) -> Result<String, String>) {
+        self.status = match f(self) {
+            Ok(said) => said,
+            Err(why) => why,
+        };
+    }
+
+    /// Switch the select tool between picking cells and picking parts.
+    pub fn toggle_select_mode(&mut self) {
+        self.select_objects = !self.select_objects;
+        self.tool = Tool::Select;
+        self.status = if self.select_objects {
+            "select: objects".into()
+        } else {
+            "select: cells".into()
+        };
+    }
+
+    /// Drop both selections. One key, because "nothing selected" is one idea.
+    pub fn clear_all_selection(&mut self) {
+        self.selection = None;
+        self.selected_object = None;
+        self.status = "selection cleared".into();
+    }
+
+    /// Paste the clipboard back where it was copied from.
+    pub fn paste_in_place(&mut self) {
+        let Some(at) = self.clipboard.as_ref().map(|c| c.origin()) else {
+            self.status = "nothing copied".into();
+            return;
+        };
+        self.report(|e| e.paste(at).map(|r| format!("pasted {}", r.moved)));
     }
 
     pub fn set_status(&mut self, s: impl Into<String>) {
@@ -440,7 +515,10 @@ impl Editor {
 
         let cell = match self.tool {
             Tool::Build => hit.adjacent(),
-            Tool::Erase | Tool::Paint | Tool::Pick => hit.voxel,
+            // Select acts on the voxel you pointed at, like erase and paint:
+            // it picks out what is there rather than putting something beside
+            // it, so there is no adjacent cell in the question.
+            Tool::Erase | Tool::Paint | Tool::Pick | Tool::Select => hit.voxel,
         };
         Some(Target {
             voxel: hit.voxel,
@@ -549,6 +627,10 @@ impl Editor {
     /// Begin a stroke and apply the tool once.
     pub fn begin_stroke(&mut self, target: Target) {
         let label = match self.tool {
+            // Selecting is not an edit and has no stroke: `app.rs` handles it
+            // on mouse-down, the way a click on a panel is handled — a choice,
+            // never something to undo.
+            Tool::Select => return,
             Tool::Build => "build",
             Tool::Erase => "erase",
             Tool::Paint => "paint",
@@ -598,7 +680,8 @@ impl Editor {
         let value = match self.tool {
             Tool::Build | Tool::Paint => self.color,
             Tool::Erase => 0,
-            Tool::Pick => return,
+            // Neither writes anything, so neither reaches a stroke.
+            Tool::Pick | Tool::Select => return,
         };
 
         // Resolved before the stroke is borrowed: the span reads the model, and
@@ -830,6 +913,104 @@ impl Editor {
         self.set_selection(Selection::new(layer, cells))
     }
 
+    /// Select what the current span reaches from a cell.
+    ///
+    /// The same `region` walk the drawing tools use, so the span row and the
+    /// brush mean here exactly what they mean everywhere else — one cell, a
+    /// run, a face, the connected part. Matched on **material** rather than
+    /// colour, for the reason `select_connected` is: an arm is one part whether
+    /// or not the glove on the end of it is a different index.
+    pub fn select_with_span(&mut self, at: [i32; 3], face: Face) -> usize {
+        let layer = self.model.active_layer();
+        if self.model.get_in(layer, at[0], at[1], at[2]) == 0 {
+            self.selection = None;
+            self.status = match self.model.owner_at(at[0], at[1], at[2]) {
+                Some(owner) => format!(
+                    "{} holds that voxel — select it first",
+                    self.model.layers()[owner].name
+                ),
+                None => "nothing there to select".into(),
+            };
+            return 0;
+        }
+        let cells = region::cells(
+            &self.model,
+            self.span,
+            region::Reach {
+                seed: at,
+                face,
+                matches: region::Match::Solid,
+                brush: self.brush,
+                grounded: false,
+                y_limit: self.slice.unwrap_or(u16::MAX),
+                within: None,
+                layer: Some(layer),
+            },
+        );
+        self.set_selection(Selection::new(layer, cells))
+    }
+
+    /// Select every voxel of a layer.
+    ///
+    /// The one selection tool from the original proposal that never shipped.
+    /// "All of it" is the commonest selection there is, and building it out of
+    /// a flood fill needs a seed the user has to find first.
+    pub fn select_all_in_layer(&mut self, layer: usize) -> usize {
+        if layer >= self.model.layer_count() {
+            self.status = format!("there is no layer {layer}");
+            return 0;
+        }
+        let cells: Vec<[i32; 3]> = self
+            .model
+            .iter_filled_in(layer)
+            .map(|([x, y, z], _)| [i32::from(x), i32::from(y), i32::from(z)])
+            .collect();
+        self.set_selection(Selection::new(layer, cells))
+    }
+
+    // -- picking a part rather than cells ---------------------------------
+
+    /// Pick the object that owns a cell, for the select tool in object mode.
+    pub fn select_object_at(&mut self, at: [i32; 3]) -> Option<usize> {
+        let owner = self.model.owner_at(at[0], at[1], at[2])?;
+        let object = self.model.layers()[owner].object;
+        self.select_object(Some(object));
+        Some(object)
+    }
+
+    /// Set or clear the selected object.
+    pub fn select_object(&mut self, object: Option<usize>) {
+        self.selected_object = object.filter(|i| *i < self.model.object_count());
+        self.status = match self.selected_object {
+            Some(i) => format!("selected {}", self.object_name(i)),
+            None => "no object selected".into(),
+        };
+    }
+
+    /// The box the selected object's voxels occupy, for the outline.
+    ///
+    /// Every layer of the subtree, not just the active one — the outline has to
+    /// show what a move would actually carry.
+    pub fn selected_object_bounds(&self) -> Option<([i32; 3], [i32; 3])> {
+        let object = self.selected_object?;
+        let subtree = self.model.subtree(object);
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for (n, layer) in self.model.layers().iter().enumerate() {
+            if !subtree.contains(&layer.object) || layer.filled_count() == 0 {
+                continue;
+            }
+            let _ = n;
+            let b = layer.occupied();
+            let end = b.end();
+            for a in 0..3 {
+                lo[a] = lo[a].min(i32::from(b.origin[a]));
+                hi[a] = hi[a].max(end[a] - 1);
+            }
+        }
+        (lo[0] <= hi[0]).then_some((lo, hi))
+    }
+
     fn set_selection(&mut self, selection: Selection) -> usize {
         let n = selection.len();
         self.selection = (n > 0).then_some(selection);
@@ -954,6 +1135,7 @@ impl Editor {
         self.clipboard = Some(Clipboard {
             cells,
             size: [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1],
+            origin: lo,
         });
         self.status = format!("copied {n} voxels");
         Ok(n)
@@ -2200,6 +2382,7 @@ impl Editor {
     pub fn open(&mut self, model: VoxelModel, path: PathBuf) {
         self.document_id = next_document_id();
         self.selection = None;
+        self.selected_object = None;
         self.clipboard = None;
         self.collapsed.clear();
         self.model = model;
@@ -2222,6 +2405,7 @@ impl Editor {
     pub fn show(&mut self, model: VoxelModel) {
         self.document_id = next_document_id();
         self.selection = None;
+        self.selected_object = None;
         self.clipboard = None;
         self.collapsed.clear();
         // A slice past the new model's height would hide all of it.
@@ -2381,6 +2565,115 @@ mod tests {
         e.camera.yaw = 0.0;
         e.camera.pitch = 1.4;
         e
+    }
+
+    /// Two parts on two layers inside one object. The case a cell selection
+    /// cannot represent, which is why object mode exists.
+    fn two_layer_part() -> Editor {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let arm = m.add_object(0, "ARM").unwrap();
+        let upper = m.add_layer(0, "UPPER").unwrap();
+        m.set_layer_object(upper, arm);
+        let lower = m.add_layer(upper, "LOWER").unwrap();
+        m.set_layer_object(lower, arm);
+        m.set_in(upper, 4, 8, 4, 7);
+        m.set_in(lower, 4, 4, 4, 9);
+        Editor::new(m, PathBuf::from("t.vxm"))
+    }
+
+    /// The whole reason object mode is not a cell selection: it has to carry
+    /// every layer of the part, and a `Selection` is one layer by design.
+    #[test]
+    fn an_object_selection_spans_the_parts_layers() {
+        let mut e = two_layer_part();
+        assert_eq!(e.select_object_at([4, 8, 4]), Some(1), "picked by a voxel");
+        let (lo, hi) = e.selected_object_bounds().expect("outlined");
+        assert_eq!(lo, [4, 4, 4], "the lower layer is in the box");
+        assert_eq!(hi, [4, 8, 4], "and so is the upper");
+
+        // Moving it moves both layers, which is what a cell selection could
+        // not have done — it would have taken the active layer's share.
+        e.move_object(1, [1, 0, 0]).unwrap();
+        assert_eq!(e.model().get_in(1, 5, 8, 4), 7);
+        assert_eq!(e.model().get_in(2, 5, 4, 4), 9);
+        assert_eq!(e.model().get_in(1, 4, 8, 4), 0);
+
+        e.select_object(None);
+        assert!(e.selected_object_bounds().is_none());
+    }
+
+    /// The select tool never writes. It is the one tool where a click is a
+    /// choice, so it must not reach a stroke or spend an undo.
+    #[test]
+    fn selecting_never_edits_and_never_costs_an_undo() {
+        let mut e = editor_with_floor();
+        e.tool = Tool::Select;
+        let before = e.model().filled_count();
+        let depth = e.undo_depth();
+        let target = e.target_at(160.0, 120.0, 320, 240).expect("a hit");
+
+        // Even driven through the stroke path, which is what `app.rs` avoids.
+        e.begin_stroke(target);
+        e.end_stroke();
+        assert_eq!(e.model().filled_count(), before, "nothing was written");
+        assert_eq!(e.undo_depth(), depth, "and nothing is on the undo stack");
+    }
+
+    /// A click on nothing has to be a way to say "never mind". The select tool
+    /// gets no ground-plane fallback — that exists so build has something to
+    /// aim at on an empty layer, and here it would mean a click on the sky
+    /// selected a cell of air instead of clearing.
+    #[test]
+    fn a_select_click_on_empty_space_has_no_target() {
+        let mut e = editor_with_floor();
+        e.tool = Tool::Select;
+        // Straight down the middle finds the floor.
+        assert!(e.target_at(160.0, 120.0, 320, 240).is_some());
+        // The far corner, well off it, finds nothing — even though `plane_is_open`
+        // would hand Build a target at the same pixel.
+        e.tool = Tool::Build;
+        e.model.clear();
+        assert!(e.plane_is_open(), "the fallback is available to build");
+        e.tool = Tool::Select;
+        assert_eq!(
+            e.target_at(4.0, 236.0, 320, 240),
+            None,
+            "select never falls back to the work plane"
+        );
+    }
+
+    /// "All of it" is the commonest selection there is, and the one a flood
+    /// fill needs a seed to reach.
+    #[test]
+    fn selecting_a_whole_layer_takes_that_layer_only() {
+        let mut e = two_layer_part();
+        assert_eq!(e.select_all_in_layer(1), 1);
+        assert_eq!(e.selection.as_ref().unwrap().layer(), 1);
+        assert_eq!(e.select_all_in_layer(2), 1);
+        assert_eq!(e.selection.as_ref().unwrap().layer(), 2);
+        // An empty layer selects nothing rather than pretending otherwise.
+        e.add_layer();
+        let empty = e.active_layer();
+        assert_eq!(e.select_all_in_layer(empty), 0);
+        assert!(e.selection.is_none());
+    }
+
+    /// Copy then paste is in place, so the arrows are the offset — which is
+    /// what `duplicate_selection` takes as an argument over MCP.
+    #[test]
+    fn paste_puts_it_back_where_it_was_copied_from() {
+        let mut e = two_layer_part();
+        e.select_all_in_layer(1);
+        e.copy_selection().unwrap();
+        let before: Vec<_> = e.model().iter_filled().collect();
+
+        e.paste_in_place();
+        assert_eq!(
+            e.model().iter_filled().collect::<Vec<_>>(),
+            before,
+            "a paste in place changes nothing"
+        );
+        assert_eq!(e.clipboard.as_ref().unwrap().origin(), [4, 8, 4]);
     }
 
     /// A build click must place *outside* the voxel it hit, never inside it.

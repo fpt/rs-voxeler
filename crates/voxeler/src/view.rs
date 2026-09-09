@@ -14,6 +14,10 @@ const VOLUME_BOX: u32 = 0x5C6B8A;
 /// The active layer's own extent, dimmer than the scene's own edge so the two
 /// read as an inner box rather than as two equal frames.
 const LAYER_BOX: u32 = 0x3E6B7A;
+/// The box the selected *object* occupies. Distinct from the cell selection's
+/// colour, because both can be set at once and they mean different things.
+const OBJECT_BOX: u32 = 0x4FD6FF;
+
 /// The box the current selection occupies. Bright, because it is a thing you
 /// are about to act on rather than a boundary you work inside.
 const SELECTION_BOX: u32 = 0xFF9A3C;
@@ -102,6 +106,23 @@ pub fn render_with_options(
             z: offset.z + hi[2] as f32 + 1.0,
         } + Vec3::splat(LIFT);
         raster::draw_box(fb, &scene, min, max, SELECTION_BOX, 0.0);
+    }
+
+    // And what a `move_object` or `rotate_object` would carry. A second colour,
+    // because the two selections are different things that can both be set: one
+    // names cells on a layer, the other names a part across all of them.
+    if let Some((lo, hi)) = editor.selected_object_bounds() {
+        let min = Vec3 {
+            x: offset.x + lo[0] as f32,
+            y: offset.y + lo[1] as f32,
+            z: offset.z + lo[2] as f32,
+        } - Vec3::splat(LIFT * 2.0);
+        let max = Vec3 {
+            x: offset.x + hi[0] as f32 + 1.0,
+            y: offset.y + hi[1] as f32 + 1.0,
+            z: offset.z + hi[2] as f32 + 1.0,
+        } + Vec3::splat(LIFT * 2.0);
+        raster::draw_box(fb, &scene, min, max, OBJECT_BOX, 0.0);
     }
 
     if let Some(target) = hover {
@@ -248,6 +269,10 @@ fn draw_target(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, target: Tar
             (c.to_u32(), 0xFFFFFF)
         }
         Tool::Pick => (0x000000, 0xFFFFFF),
+        // The one tool that changes nothing, so the marker is an outline with
+        // nothing filled in: it says "this is what you would pick out", not
+        // "this is what would land here".
+        Tool::Select => (0x000000, SELECTION_BOX),
     };
 
     // The face is only filled for tools that act on an existing surface. Build

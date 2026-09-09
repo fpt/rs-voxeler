@@ -266,7 +266,7 @@ whoever connects.
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
 | `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
-| `select_box`, `select_connected` | hold voxels for a transform |
+| `select_box`, `select_connected`, `select_layer_all` | hold voxels for a transform |
 | `describe_selection`, `clear_selection` | what is held, and let go |
 | `move_selection` | move the held voxels, one undo step |
 | `rotate_selection`, `flip_selection` | turn or mirror them about their own box |
@@ -401,7 +401,40 @@ the source says *now*.
 
 ## Selecting and moving
 
-Drawing puts voxels down; a selection picks them back up.
+Drawing puts voxels down; a selection picks them back up. `S` is the select
+tool, and `O` switches what it picks:
+
+```
+S            SELECT TOOL
+O            SELECT CELLS / OBJECTS
+W ESC        SELECT WHOLE LAYER / CLEAR
+ARROWS       MOVE   (SHIFT = Z AXIS)
+SHIFT+X Y Z  TURN 90 DEG ABOUT AXIS
+ALT+X Y Z    FLIP  (CELLS ONLY)
+CTRL+C X V   COPY / CUT / PASTE
+```
+
+**In cells mode** the span row means what it always means — one voxel, a run, a
+face, the connected part — and the selection is matched on material, so an arm
+is one part whether or not the glove on the end is a different colour.
+
+**In objects mode** a click picks the whole part under the cursor, across every
+layer it is built from, and the arrows and turns go through `move_object` and
+`rotate_object`. That is the difference that matters: a part built from two
+layers moves as one thing, where a cell selection would take only the layer you
+were on and tear it in half.
+
+Both outline in the viewport, in different colours, because you can have one of
+each. **Clicking empty space clears both** — pointing at nothing and pressing is
+how you say "never mind", and it drops the object and the cells together,
+because "nothing selected" is one idea. `ESC` does the same from the keyboard.
+
+Alt-drag still orbits and shift-drag still pans while the select tool is
+active: looking at the thing you are about to select is part of selecting it.
+
+There is no duplicate key: paste puts the clipboard back where it was copied
+from, so copy, paste, arrows is the same operation with the offset chosen by
+eye.
 
 ```
 select_connected  x=8 y=12 z=11  from=[7,0,0] to=[9,23,23]
