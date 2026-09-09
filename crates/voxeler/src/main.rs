@@ -24,6 +24,7 @@
 mod app;
 mod attach;
 mod editor;
+mod gizmo;
 mod hud;
 mod mcp;
 mod view;

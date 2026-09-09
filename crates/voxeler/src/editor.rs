@@ -329,6 +329,19 @@ pub struct Editor {
     /// transforms it feeds are `move_object` and `rotate_object`, which already
     /// know how to carry a whole subtree.
     pub selected_object: Option<usize>,
+    /// The offset a gizmo drag is currently showing, before it is committed.
+    ///
+    /// View state, and deliberately not an edit: a drag has to cost **one**
+    /// undo step, and committing per cell as the pointer moves would put a
+    /// layer snapshot on the stack for every voxel of travel. So the drag moves
+    /// an outline and nothing else, and `mouse-up` performs the move once. It
+    /// is the same rule that has a brush previewed and a region not — what is
+    /// cheap to show is shown, and what is expensive is done once you ask.
+    pub preview_offset: Option<[i32; 3]>,
+    /// Which axis handle is being held, so the one you have hold of is drawn
+    /// differently. A gizmo whose frame you cannot see is one you have to
+    /// guess at.
+    pub dragging_axis: Option<usize>,
     pub selection: Option<Selection>,
     /// Voxels lifted for a paste, if any. Also not part of the document, but
     /// unlike the selection it *does* survive undo — see [`Clipboard`].
@@ -360,6 +373,8 @@ impl Editor {
             collapsed: Default::default(),
             select_objects: false,
             selected_object: None,
+            preview_offset: None,
+            dragging_axis: None,
             camera: OrbitCamera::default(),
             tool: Tool::Build,
             span: Span::default(),
@@ -1804,6 +1819,28 @@ impl Editor {
         result
     }
 
+    /// Move whatever is selected by `delta`, as one undo step.
+    ///
+    /// What a gizmo drag commits, and the same choice the arrow keys make: the
+    /// part if a part is selected, the cells otherwise. Decided by what is
+    /// *actually* selected rather than by which mode is showing.
+    pub fn move_whatever_is_selected(&mut self, delta: [i32; 3]) {
+        self.preview_offset = None;
+        self.dragging_axis = None;
+        if delta == [0, 0, 0] {
+            return;
+        }
+        match self.selected_object {
+            Some(object) => {
+                let _ = self.move_object(object, delta);
+            }
+            None => self.report(|e| {
+                e.move_selection(delta)
+                    .map(|r| format!("moved {} voxels", r.moved))
+            }),
+        }
+    }
+
     /// Whether an object's row in the layer panel is folded shut.
     pub fn is_collapsed(&self, object: usize) -> bool {
         self.collapsed.contains(&object)
@@ -2559,6 +2596,8 @@ impl Editor {
         self.document_id = next_document_id();
         self.selection = None;
         self.selected_object = None;
+        self.preview_offset = None;
+        self.dragging_axis = None;
         self.clipboard = None;
         self.collapsed.clear();
         self.model = model;
@@ -2582,6 +2621,8 @@ impl Editor {
         self.document_id = next_document_id();
         self.selection = None;
         self.selected_object = None;
+        self.preview_offset = None;
+        self.dragging_axis = None;
         self.clipboard = None;
         self.collapsed.clear();
         // A slice past the new model's height would hide all of it.
@@ -4601,6 +4642,46 @@ mod tests {
         // Far corners, outside a radius of three from the middle: a volume
         // flood would have reached them.
         assert!(e.model().get(0, 0, 0) != 0 && e.model().get(7, 0, 7) != 0);
+    }
+
+    /// What a gizmo drag commits. The drag itself writes nothing — it moves an
+    /// outline — so the whole of it has to cost one undo step, and the preview
+    /// has to be gone once it has.
+    #[test]
+    fn a_committed_drag_is_one_undo_step_and_drops_the_preview() {
+        let mut e = editor_with_floor();
+        e.select_box([2, 0, 2], [3, 0, 3]);
+        let depth = e.undo_depth();
+        e.preview_offset = Some([2, 1, 0]);
+        e.dragging_axis = Some(0);
+
+        e.move_whatever_is_selected([2, 1, 0]);
+        assert_eq!(e.undo_depth(), depth + 1, "one step for the whole drag");
+        assert_eq!(e.preview_offset, None, "the preview is spent");
+        assert_eq!(e.dragging_axis, None);
+        assert_eq!(e.model().get(4, 1, 2), 4, "the cells arrived");
+        assert_eq!(e.model().get(5, 1, 3), 4);
+        assert_eq!(e.model().get(2, 0, 2), 0, "and left");
+
+        // A drag that went nowhere is not an edit.
+        let depth = e.undo_depth();
+        e.preview_offset = Some([0; 3]);
+        e.move_whatever_is_selected([0; 3]);
+        assert_eq!(e.undo_depth(), depth, "no move, no undo step");
+        assert_eq!(e.preview_offset, None);
+    }
+
+    /// The gizmo follows what is *actually* selected, the same question the
+    /// arrow keys ask — a part moves as a part, across every layer it holds.
+    #[test]
+    fn a_drag_on_an_object_moves_the_whole_part() {
+        let mut e = two_layer_part();
+        e.select_object(Some(1));
+        let depth = e.undo_depth();
+        e.move_whatever_is_selected([1, 0, 0]);
+        assert_eq!(e.undo_depth(), depth + 1);
+        assert_eq!(e.model().get_in(1, 5, 8, 4), 7, "the upper layer moved");
+        assert_eq!(e.model().get_in(2, 5, 4, 4), 9, "and the lower one with it");
     }
 
     /// The seam this refactor moved. What makes a fill unstrokeable is that it

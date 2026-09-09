@@ -497,7 +497,19 @@ layers moves as one thing, where a cell selection would take only the layer you
 were on and tear it in half.
 
 Both outline in the viewport, in different colours, because you can have one of
-each. **Clicking empty space clears both** — pointing at nothing and pressing is
+each. Three axis arrows hang off the low corner of whatever is selected — drag
+one to move along that axis:
+
+```
+red / green / blue     x / y / z
+drag                   moves the outline; nothing is written yet
+release                performs the move, as ONE undo step
+```
+
+A drag shows you where it would land and does nothing until you let go, which is
+what keeps a ten-cell move one `ctrl+Z` instead of ten. The arrows follow
+whatever is actually selected, so a handle and an arrow key always move the same
+thing. **Clicking empty space clears both** — pointing at nothing and pressing is
 how you say "never mind", and it drops the object and the cells together,
 because "nothing selected" is one idea. `ESC` does the same from the keyboard.
 

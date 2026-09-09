@@ -18,6 +18,14 @@ const LAYER_BOX: u32 = 0x3E6B7A;
 /// colour, because both can be set at once and they mean different things.
 const OBJECT_BOX: u32 = 0x4FD6FF;
 
+/// One colour per axis, the convention every 3D tool uses.
+const HANDLE: [u32; 3] = [0xFF5A5A, 0x6BE06B, 0x5A8CFF];
+/// The one being dragged, so the frame you are in is legible.
+const HANDLE_HELD: u32 = 0xFFD24A;
+/// Enough depth bias to put a handle in front of anything in the scene. The
+/// depth test passes on "nearer", so this simply always wins.
+const OVER_EVERYTHING: f32 = 2.0;
+
 /// The box the current selection occupies. Bright, because it is a thing you
 /// are about to act on rather than a boundary you work inside.
 const SELECTION_BOX: u32 = 0xFF9A3C;
@@ -94,7 +102,16 @@ pub fn render_with_options(
     // What a transform would move. Only its extent, not every cell: a selection
     // is often thousands of voxels, and an outline per cell is a thicket. The
     // count is in the status line and in `describe_selection`.
-    if let Some((lo, hi)) = editor.selection.as_ref().and_then(|s| s.bounds()) {
+    // A gizmo drag shows where the move would land without performing it, so
+    // both outlines are drawn at the offset rather than where the cells are.
+    let preview = editor.preview_offset.unwrap_or([0; 3]);
+    let shift = |p: [i32; 3]| -> [i32; 3] { std::array::from_fn(|a| p[a] + preview[a]) };
+    if let Some((lo, hi)) = editor
+        .selection
+        .as_ref()
+        .and_then(|s| s.bounds())
+        .map(|(lo, hi)| (shift(lo), shift(hi)))
+    {
         let min = Vec3 {
             x: offset.x + lo[0] as f32,
             y: offset.y + lo[1] as f32,
@@ -111,7 +128,10 @@ pub fn render_with_options(
     // And what a `move_object` or `rotate_object` would carry. A second colour,
     // because the two selections are different things that can both be set: one
     // names cells on a layer, the other names a part across all of them.
-    if let Some((lo, hi)) = editor.selected_object_bounds() {
+    if let Some((lo, hi)) = editor
+        .selected_object_bounds()
+        .map(|(lo, hi)| (shift(lo), shift(hi)))
+    {
         let min = Vec3 {
             x: offset.x + lo[0] as f32,
             y: offset.y + lo[1] as f32,
@@ -123,6 +143,19 @@ pub fn render_with_options(
             z: offset.z + hi[2] as f32 + 1.0,
         } + Vec3::splat(LIFT * 2.0);
         raster::draw_box(fb, &scene, min, max, OBJECT_BOX, 0.0);
+    }
+
+    // The handles, last and over everything. A lift along the normal is enough
+    // for a highlight lying *on* a face; an arrow sticks out through the model,
+    // and no lift saves it — so the depth is biased past anything the scene can
+    // hold rather than nudged.
+    for (i, h) in crate::gizmo::handles(editor).iter().enumerate() {
+        let color = if editor.preview_offset.is_some() && editor.dragging_axis == Some(h.axis) {
+            HANDLE_HELD
+        } else {
+            HANDLE[i]
+        };
+        raster::draw_line(fb, &scene, h.from, h.to, color, OVER_EVERYTHING);
     }
 
     if let Some(target) = hover {
