@@ -141,6 +141,37 @@ recomputed by `refresh_shown` — the single place it moves, for the reason
 inside `get`. The layer's own flag is untouched, so showing an object again
 restores exactly what was shown before.
 
+### A move slides boxes; a rotation has to bake
+
+`move_object` is a translation and therefore free: it slides each layer's
+`Bounds::origin` and re-voxelises nothing, so moving a finished robot costs three
+`u16` per layer. A rotation cannot be that. A quarter turn rewrites the grid, and
+there is deliberately no per-object transform to hide it in — a stored one would
+put a matrix inside `get`.
+
+So `rotate_object` bakes, and borrows `Editor::rotate_selection`'s conventions
+rather than inventing a second set: quarter turns, positive being the right-hand
+rule about the positive axis (the convention face winding already uses), and a
+pivot about the **low corner** rather than the centre. Centring is not
+invertible — a quarter turn swaps two extents, and where those differ in parity
+the centre falls between cells and rounds the same way every time, so a turn and
+its inverse do not come back.
+
+The one thing it has that a selection does not is **more than one grid**, and
+that decides the pivot: the union of the whole subtree's occupied cells,
+computed once and applied to every layer. A pivot per layer would turn each part
+about its own middle, and the arm would leave the body. The occupied cells
+rather than the boxes, because a box is a high-water mark and would drift the
+turn by however much slack it happened to hold.
+
+All or nothing, like a move: every layer's new cells are computed and checked
+against the scene before any of them is written.
+
+An instance cannot be turned. `Instance` holds an offset and a mirror and has
+nowhere to keep a rotation, so `rebuild_instances` would silently undo one on the
+next edit. Refused, pointing at the source — whose rotation turns every copy,
+which is the answer the caller wanted anyway.
+
 ### An instance is a reference, and it is baked
 
 `Object::instance` names another object, an offset and a per-axis mirror. The

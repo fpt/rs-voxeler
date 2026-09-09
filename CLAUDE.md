@@ -114,6 +114,17 @@ Four rules:
   before any of it moves; half a robot moved and half left behind is worse than a
   move that did not happen, and the refusal names the layer and the axis because
   an agent cannot see the scene edge.
+- **A rotation cannot be free, so it bakes.** `rotate_object` rewrites the grids
+  rather than sliding boxes — there is no stored transform for it to live in,
+  which is the rule above — and it reuses `rotate_selection`'s conventions rather
+  than inventing a second set: quarter turns, right-hand rule about the positive
+  axis, pivot about the **low corner** so a turn and its inverse are exact. The
+  pivot is the union of the whole subtree's occupied cells, computed **once**: a
+  pivot per layer would turn every part about its own middle and the robot would
+  come apart. All or nothing, like a move. An **instance cannot be turned** — its
+  placement holds an offset and a mirror and nowhere to keep a rotation, so the
+  next rebuild would undo one; the refusal points at the source, whose rotation
+  turns every copy.
 - **Removing an object removes a label, never the work.** Its children and its
   layers move up to its parent. It also changes what is on screen — a layer that
   was inside a hidden object is not any more — so it recounts, which the drift

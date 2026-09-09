@@ -939,6 +939,30 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "rotate_object",
+            description:
+                "Turn an object and everything under it a quarter turn at a time. Counter-\
+                 clockwise about the positive axis by the right-hand rule; negative turns go \
+                 the other way. Unlike move_object this REWRITES the voxels — there is no \
+                 stored transform — so the whole subtree turns about ONE pivot, the low corner \
+                 of everything it holds, and the parts keep their spacing. Pivoting about the \
+                 low corner rather than the centre is what makes a turn and its inverse exact; \
+                 a non-square footprint therefore lands somewhere new, so check \
+                 list_objects and follow with move_object if you wanted it in place. All or \
+                 nothing: if any part would leave the scene, nothing turns and the reason names \
+                 the layer and the axis. An instance cannot be turned — rotate its source. One \
+                 undo step.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "object": object,
+                    "axis": {"type": "string", "enum": ["x", "y", "z"]},
+                    "turns": {"type": "integer", "default": 1},
+                },
+                "required": ["object", "axis"],
+            }),
+        },
+        ToolInfo {
             name: "move_object",
             description:
                 "Move an object and everything under it by whole voxels. The voxels are not \
@@ -1494,6 +1518,24 @@ fn dispatch(
                 "layer {layer} is part of object {object}\n{}",
                 objects_json(editor)
             )))
+        }
+        "rotate_object" => {
+            let i = object_arg(editor, args, "object")?;
+            let axis = axis_arg(args)?;
+            let turns = match args.get("turns") {
+                None | Some(Value::Null) => 1,
+                Some(v) => v
+                    .as_i64()
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or("`turns` must be a whole number of quarter turns")?,
+            };
+            let turned = editor.rotate_object(i, axis, turns)?;
+            let mut report = objects_json(editor);
+            report["turned_layers"] = json!(turned);
+            report["axis"] = args["axis"].clone();
+            report["turns"] = json!(turns);
+            report["voxels"] = json!(editor.model().filled_count());
+            Ok(CallResult::text(format!("turned an object\n{report}")))
         }
         "move_object" => {
             let i = object_arg(editor, args, "object")?;
@@ -2404,6 +2446,123 @@ mod tests {
 
     fn run(e: &mut Editor, name: &str, args: Value) -> CallResult {
         call(e, name, &args)
+    }
+
+    // -- rotating an object ------------------------------------------------
+
+    /// A rotation rewrites grids where a move slides boxes, so it has to cost
+    /// one undo step for the whole subtree and come back exactly.
+    #[test]
+    fn rotate_object_turns_a_subtree_as_one_undo_step_and_undoes_exactly() {
+        let mut e = editor();
+        run(&mut e, "create_object", json!({"name": "ROBOT"}));
+        run(&mut e, "add_layer", json!({"name": "BODY"}));
+        run(
+            &mut e,
+            "set_layer_object",
+            json!({"layer": "BODY", "object": "ROBOT"}),
+        );
+        // Not square on any pair of axes, so a centring bug would show — and
+        // an L rather than a rectangle, because a rectangle is unchanged by a
+        // half turn and a test of undo would then be undoing nothing.
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [1,1,1], "to": [4,2,1], "color": 6}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 3, "z": 1, "color": 6}),
+        );
+        let before: Vec<_> = e.model().iter_filled().collect();
+        let depth = e.undo_depth();
+
+        let r = run(
+            &mut e,
+            "rotate_object",
+            json!({"object": "ROBOT", "axis": "y"}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        let j = json_of(&r);
+        assert_eq!(j["turned_layers"], 1);
+        assert_eq!(j["turns"], 1);
+        assert_ne!(
+            e.model().iter_filled().collect::<Vec<_>>(),
+            before,
+            "something actually turned"
+        );
+        assert_eq!(e.undo_depth(), depth + 1, "one step for the whole subtree");
+
+        // A turn and its inverse are exact — the reason the pivot is the low
+        // corner rather than the centre.
+        run(
+            &mut e,
+            "rotate_object",
+            json!({"object": "ROBOT", "axis": "y", "turns": -1}),
+        );
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
+
+        // And undo puts it back without needing the inverse.
+        run(
+            &mut e,
+            "rotate_object",
+            json!({"object": "ROBOT", "axis": "z", "turns": 2}),
+        );
+        e.undo();
+        assert_eq!(e.model().iter_filled().collect::<Vec<_>>(), before);
+    }
+
+    /// An instance's placement holds an offset and a mirror and nowhere to keep
+    /// a turn, so the next rebuild would quietly undo one.
+    #[test]
+    fn rotating_an_instance_is_refused_but_rotating_its_source_turns_every_copy() {
+        let mut e = editor();
+        source(&mut e);
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 1, "y": 2, "z": 1, "color": 5}),
+        );
+        run(
+            &mut e,
+            "create_instance",
+            json!({"source": "WHEEL", "name": "WHEEL R", "dx": 4}),
+        );
+
+        let r = run(
+            &mut e,
+            "rotate_object",
+            json!({"object": "WHEEL R", "axis": "z"}),
+        );
+        assert_eq!(r.is_error, Some(true));
+        let why = text_of(&r);
+        assert!(why.contains("WHEEL R") && why.contains("detach"), "{why}");
+
+        // The source turns, and the copy follows it — one undo step for both.
+        let depth = e.undo_depth();
+        let r = run(
+            &mut e,
+            "rotate_object",
+            json!({"object": "WHEEL", "axis": "z"}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.undo_depth(), depth + 1);
+        let src: Vec<_> = e.model().iter_filled_in(1).map(|(p, _)| p).collect();
+        let copy: Vec<_> = e.model().iter_filled_in(2).map(|(p, _)| p).collect();
+        assert_eq!(src.len(), 2);
+        assert_eq!(copy.len(), 2, "the copy turned with its source");
+        for (a, b) in src.iter().zip(&copy) {
+            assert_eq!(
+                [
+                    b[0] as i32 - a[0] as i32,
+                    b[1] as i32 - a[1] as i32,
+                    b[2] as i32 - a[2] as i32
+                ],
+                [4, 0, 0],
+                "and it is still four to the right"
+            );
+        }
     }
 
     // -- instances --------------------------------------------------------

@@ -557,6 +557,12 @@ impl Layer {
     }
 }
 
+/// One layer's cells after a turn: which layer, and where everything landed.
+///
+/// Named so the all-or-nothing check has somewhere to hold every layer's answer
+/// before any of them is written.
+type TurnedLayer = (usize, Vec<([i32; 3], u8)>);
+
 /// The smallest box holding every cell in a list, or an empty one.
 fn box_of(cells: &[([i32; 3], u8)]) -> Bounds {
     let Some(first) = cells.first().map(|(p, _)| *p) else {
@@ -1719,6 +1725,131 @@ impl VoxelModel {
         Ok(moving.len())
     }
 
+    /// Turn an object and everything under it a quarter turn at a time.
+    ///
+    /// A translation is free — [`move_object`](Self::move_object) slides each
+    /// layer's box and re-voxelises nothing. A rotation cannot be: a quarter
+    /// turn rewrites the grid, and there is deliberately no per-object
+    /// transform to hide it in, because a stored one would put a matrix inside
+    /// `get`. So this **bakes**, and reuses the rules
+    /// `Editor::rotate_selection` already settled rather than inventing a
+    /// second set.
+    ///
+    /// **One pivot for the whole subtree.** The union of every layer's occupied
+    /// box, computed once and applied to all of them — a pivot per layer would
+    /// turn each part about its own middle and the robot would come apart.
+    ///
+    /// **About the low corner of that union, not its centre.** Centring reads
+    /// better and is not invertible: a quarter turn swaps two extents, and
+    /// where those differ in parity the centre falls between cells and has to
+    /// be rounded. Rounding the same way every time accumulates, so a turn and
+    /// its inverse would not come back. Turning a part to look at it and
+    /// turning it back has to be exact.
+    ///
+    /// Positive is the right-hand rule about the positive axis — the same
+    /// convention face winding uses, so there is one meaning of "positive
+    /// rotation" in this codebase rather than two.
+    ///
+    /// All or nothing, like a move: the whole subtree is checked before any of
+    /// it turns, and the refusal names the layer and the axis.
+    pub fn rotate_object(
+        &mut self,
+        i: usize,
+        axis: usize,
+        quarter_turns: i32,
+    ) -> Result<usize, String> {
+        if i >= self.objects.len() {
+            return Err(format!("there is no object {i}"));
+        }
+        if axis >= 3 {
+            return Err("axis must be x, y or z".into());
+        }
+        let subtree = self.subtree(i);
+        // An instance's placement holds an offset and a mirror and nowhere to
+        // put a turn, so the next rebuild would undo one. Refused pointing at
+        // the source, the same answer a write to a copy gets.
+        for &o in &subtree {
+            if let Some(at) = self.objects[o].instance {
+                return Err(format!(
+                    "\"{}\" repeats \"{}\" and has nowhere to keep a rotation — rotate \"{}\" \
+                     to turn every copy, or detach it first",
+                    self.objects[o].name,
+                    self.objects[at.source].name,
+                    self.objects[at.source].name
+                ));
+            }
+        }
+        let turning: Vec<usize> = (0..self.layers.len())
+            .filter(|n| subtree.contains(&self.layers[*n].object))
+            .filter(|n| self.layers[*n].filled > 0)
+            .collect();
+        let turns = quarter_turns.rem_euclid(4);
+        if turns == 0 || turning.is_empty() {
+            return Ok(turning.len());
+        }
+
+        // The pivot: the union of what the subtree actually holds, not of the
+        // boxes, which are high-water marks and would drift the turn.
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for &n in &turning {
+            let b = self.layers[n].occupied();
+            let end = b.end();
+            for a in 0..3 {
+                lo[a] = lo[a].min(i32::from(b.origin[a]));
+                hi[a] = hi[a].max(end[a] - 1);
+            }
+        }
+        let (b, c) = ((axis + 1) % 3, (axis + 2) % 3);
+        let (eb, ec) = (hi[b] - lo[b] + 1, hi[c] - lo[c] + 1);
+        let turn = |cell: [i32; 3]| {
+            let (mut db, mut dc) = (cell[b] - lo[b], cell[c] - lo[c]);
+            let (mut wb, mut wc) = (eb, ec);
+            for _ in 0..turns {
+                let (nb, nc) = (wc - 1 - dc, db);
+                db = nb;
+                dc = nc;
+                std::mem::swap(&mut wb, &mut wc);
+            }
+            let mut out = cell;
+            out[b] = lo[b] + db;
+            out[c] = lo[c] + dc;
+            out
+        };
+
+        // Every layer's new cells, and the check, before anything is written.
+        // Half a robot turned and half left behind is worse than a turn that
+        // did not happen.
+        let mut turned: Vec<TurnedLayer> = Vec::with_capacity(turning.len());
+        for &n in &turning {
+            let mut cells = Vec::with_capacity(self.layers[n].filled);
+            for ([x, y, z], v) in self.layers[n].iter_filled() {
+                let p = turn([i32::from(x), i32::from(y), i32::from(z)]);
+                for a in 0..3 {
+                    if p[a] < 0 || p[a] >= i32::from(self.size[a]) {
+                        return Err(format!(
+                            "that turn would put layer {n} outside the scene on {} — it would \
+                             reach {} and the scene is 0..{}",
+                            ["x", "y", "z"][a],
+                            p[a],
+                            self.size[a]
+                        ));
+                    }
+                }
+                cells.push((p, v));
+            }
+            turned.push((n, cells));
+        }
+
+        for (n, cells) in turned {
+            let bounds = box_of(&cells);
+            self.layers[n].refill(bounds, &cells);
+        }
+        self.refresh_count();
+        self.dirty_all();
+        Ok(turning.len())
+    }
+
     /// The whole stack, for a history entry to hold onto.
     ///
     /// A structural change cannot be recorded as a list of changed cells the
@@ -1907,6 +2038,158 @@ mod tests {
             m.set_in(layer, c[0], c[1], c[2], 7);
         }
         (object, layer)
+    }
+
+    /// The reason the pivot is the low corner and not the centre. A quarter
+    /// turn swaps two extents; centring has to round where they differ in
+    /// parity, and rounding the same way each time accumulates.
+    #[test]
+    fn a_turn_and_its_inverse_come_back_exactly() {
+        let mut m = VoxelModel::new(32, 32, 32);
+        // Deliberately not square on any pair of axes, so a centring bug shows.
+        let (part, layer) = part(&mut m, "ARM", &[]);
+        for x in 4..11 {
+            for y in 4..7 {
+                m.set_in(layer, x, y, 4, 7);
+            }
+        }
+        m.set_in(layer, 4, 4, 5, 9);
+        let before: Vec<_> = m.iter_filled().collect();
+
+        for axis in 0..3 {
+            for turns in [1, 2, 3, -1, -2, 5] {
+                m.rotate_object(part, axis, turns).unwrap();
+                m.rotate_object(part, axis, -turns).unwrap();
+                assert_eq!(
+                    m.iter_filled().collect::<Vec<_>>(),
+                    before,
+                    "axis {axis}, {turns} turns and back"
+                );
+            }
+        }
+        // And four quarter turns is the identity on its own.
+        for axis in 0..3 {
+            for _ in 0..4 {
+                m.rotate_object(part, axis, 1).unwrap();
+            }
+            assert_eq!(
+                m.iter_filled().collect::<Vec<_>>(),
+                before,
+                "four turns, axis {axis}"
+            );
+        }
+    }
+
+    /// A description of a rotation's direction is the easiest thing in this
+    /// file to get backwards, so the exact cells are pinned. Positive is the
+    /// right-hand rule about the positive axis, the same convention face
+    /// winding uses.
+    #[test]
+    fn a_positive_turn_follows_the_right_hand_rule() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        // An L in the z = 0 plane: (0,0), (1,0), (0,1).
+        let (part, layer) = part(&mut m, "L", &[]);
+        for c in [[0, 0, 0], [1, 0, 0], [0, 1, 0]] {
+            m.set_in(layer, c[0], c[1], c[2], 7);
+        }
+        // About +z, one quarter turn: b = x, c = y, extents 2 and 2.
+        // (db, dc) -> (wc - 1 - dc, db) gives (0,0)->(1,0), (1,0)->(1,1),
+        // (0,1)->(0,0).
+        m.rotate_object(part, 2, 1).unwrap();
+        let mut got: Vec<_> = m.iter_filled_in(layer).map(|(p, _)| p).collect();
+        got.sort();
+        assert_eq!(got, vec![[0, 0, 0], [1, 0, 0], [1, 1, 0]]);
+    }
+
+    /// Half a robot turned and half left behind is worse than a turn that did
+    /// not happen — and a pivot per layer would be exactly that.
+    #[test]
+    fn a_subtree_turns_about_one_pivot_and_all_or_nothing() {
+        let mut m = VoxelModel::new(32, 32, 32);
+        let robot = m.add_object(0, "ROBOT").unwrap();
+        let (body, body_layer) = part(&mut m, "BODY", &[]);
+        let (arm, arm_layer) = part(&mut m, "ARM", &[]);
+        m.reparent_object(body, robot);
+        m.reparent_object(arm, robot);
+        // Two parts far apart, so a per-layer pivot would move them relative
+        // to each other and this would catch it.
+        m.set_in(body_layer, 10, 10, 10, 3);
+        m.set_in(arm_layer, 20, 10, 10, 4);
+
+        m.rotate_object(robot, 1, 1).unwrap();
+        // Both turn about the union's low corner [10,10,10], extents 11 on x
+        // and 1 on z. About +y: b = z, c = x.
+        let body_at: Vec<_> = m.iter_filled_in(body_layer).collect();
+        let arm_at: Vec<_> = m.iter_filled_in(arm_layer).collect();
+        assert_eq!(body_at.len(), 1);
+        assert_eq!(arm_at.len(), 1);
+        // They stay ten apart, on whichever axis the turn put them.
+        let d: Vec<i32> = (0..3)
+            .map(|a| i32::from(arm_at[0].0[a]) - i32::from(body_at[0].0[a]))
+            .collect();
+        assert_eq!(
+            d.iter().map(|v| v.abs()).sum::<i32>(),
+            10,
+            "the parts kept their spacing"
+        );
+    }
+
+    /// Half a robot turned and half left behind is worse than a turn that did
+    /// not happen.
+    #[test]
+    fn a_turn_that_would_leave_the_scene_moves_nothing() {
+        let mut m = VoxelModel::new(32, 32, 32);
+        let (part_id, layer) = part(&mut m, "BAR", &[]);
+        // A bar 32 long on x, one deep on z, against the far z wall. A quarter
+        // turn about +y swaps those extents, so the 32 has to go where there is
+        // 1 — it reaches z = 61 in a scene of 32.
+        for x in 0..32 {
+            m.set_in(layer, x, 0, 30, 7);
+        }
+        let before: Vec<_> = m.iter_filled().collect();
+
+        let refused = m.rotate_object(part_id, 1, 1).unwrap_err();
+        assert!(refused.contains("outside the scene"), "{refused}");
+        assert!(refused.contains(" z "), "names the axis: {refused}");
+        assert_eq!(
+            m.iter_filled().collect::<Vec<_>>(),
+            before,
+            "and nothing moved"
+        );
+
+        // The same turn about an axis it does fit on is fine, which is what
+        // makes the refusal a rule rather than a wall.
+        assert!(m.rotate_object(part_id, 0, 1).is_ok());
+    }
+
+    /// An instance's placement has an offset and a mirror and nowhere to keep a
+    /// turn, so the next rebuild would undo one.
+    #[test]
+    fn rotating_an_instance_is_refused_and_names_the_source() {
+        let mut m = VoxelModel::new(32, 16, 16);
+        let (wheel, _) = part(&mut m, "WHEEL", &[[1, 1, 1], [2, 1, 1], [1, 2, 1]]);
+        let copy = m
+            .add_instance(wheel, 0, "WHEEL R", [8, 0, 0], [false; 3])
+            .unwrap();
+
+        let why = m.rotate_object(copy, 2, 1).unwrap_err();
+        assert!(why.contains("WHEEL R") && why.contains("WHEEL"), "{why}");
+        assert!(why.contains("detach"), "{why}");
+
+        // But rotating the source turns every copy with it, which is the point.
+        m.rotate_object(wheel, 2, 1).unwrap();
+        m.rebuild_instances();
+        let src: Vec<_> = m.iter_filled_in(1).map(|(p, _)| p).collect();
+        let n = m.generated_layer(copy).unwrap();
+        let dst: Vec<_> = m.iter_filled_in(n).map(|(p, _)| p).collect();
+        assert_eq!(src.len(), 3);
+        assert_eq!(dst.len(), 3);
+        for (a, b) in src.iter().zip(&dst) {
+            assert_eq!(
+                [i32::from(b[0]) - i32::from(a[0]), b[1] as i32 - a[1] as i32],
+                [8, 0]
+            );
+        }
     }
 
     /// The whole point: a copy that follows the thing it copied.
