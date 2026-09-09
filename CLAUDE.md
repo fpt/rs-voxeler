@@ -415,6 +415,48 @@ one name.
 defaults to the first face of the cell with air against it, +Y first; a buried
 cell has none to offer and the refusal says so rather than guessing.
 
+### The gizmo is one list, drawn and hit-tested
+
+Arrow keys move a selection one cell a press. `gizmo.rs` is the other end of the
+same operation: three axis arrows on the selection's box, dragged.
+
+`gizmo::handles` is built once and **both** the drawing and the hit test index
+into it — the rule `hud::panel_rows` follows, for the reason written there. The
+panel's hit test used to be a hand-written inverse of its layout, and an arrow
+in perspective is far harder to invert than a row twenty pixels tall.
+
+Four rules:
+
+- **A drag writes nothing.** `Editor::preview_offset` moves the *outline*, and
+  mouse-up performs the move once. That is not a nicety: `move_selection` is an
+  undo step per call and `move_object` takes a whole **layer snapshot** per
+  call, so committing per cell of travel would put dozens of snapshots on the
+  stack for one drag. It is also the rule that has a brush previewed and a
+  region not — what is cheap to show is shown, what is expensive waits until you
+  ask.
+- **It follows what is *actually* selected**, the same question the arrow keys
+  ask: the part if a part is selected, the cells otherwise. Both go through
+  `move_whatever_is_selected`, so the key and the handle cannot come to differ
+  about what they move.
+- **It is claimed before the tool.** In `on_mouse_down` a handle is taken after
+  the panel and before anything that edits or picks — otherwise grabbing one
+  places a voxel, and the select tool's "a click on nothing clears both
+  selections" fires while you are reaching for an arrow.
+- **The scale comes from the handle's own screen length.** An arrow spans a
+  known number of voxels, so a drag that far along it is that many cells,
+  correct at any angle and any zoom with no second projection to keep in
+  agreement. An arrow pointing nearly at the camera is nearly a point on
+  screen — that one declines rather than returning a wild number.
+
+Drawn over the scene, not lifted. A lift of 0.01 along the normal is enough for
+a highlight lying *on* a face; an arrow sticks out through the model and no lift
+saves it, so the depth is biased past anything the scene can hold.
+
+Rotation handles are the next stage and are deliberately not here. Rotation is
+quarter turns — pivoting about the low corner is what makes a turn and its
+inverse exact — so a continuous ring would promise something the model cannot
+do.
+
 ### A selection is cells, on one layer, and not part of the document
 
 `Editor::selection` is what makes an existing shape something you can pick up

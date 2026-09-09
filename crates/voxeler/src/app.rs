@@ -18,6 +18,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::editor::{Editor, Target, Tool};
+use crate::gizmo;
 use crate::{hud, mcp, view};
 
 /// The rendered image is capped at this many pixels and upscaled to fill the
@@ -55,6 +56,8 @@ pub struct App {
     /// far enough for this to be a drag rather than a click. See [`DEAD_ZONE`].
     press_at: (f32, f32),
     dragging: bool,
+    /// Which handle is held, and where the pointer was when it was grabbed.
+    grabbed: Option<(usize, (f32, f32))>,
     shown_title: String,
     /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
     ///
@@ -111,6 +114,7 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         modifiers: ModifiersState::empty(),
         press_at: (0.0, 0.0),
         dragging: false,
+        grabbed: None,
         shown_title: String::new(),
         bridge,
         viewer: None,
@@ -245,6 +249,23 @@ impl App {
             return;
         }
 
+        // A handle is claimed before the tool gets a look. Otherwise grabbing
+        // one places a voxel, and the select tool's "a click on nothing clears
+        // both selections" fires while you are reaching for an arrow.
+        if button == MouseButton::Left && !self.editor.viewing {
+            let handles = gizmo::handles(&self.editor);
+            let vp = self
+                .editor
+                .view_projection(self.fb.width(), self.fb.height());
+            if let Some(i) = gizmo::hit(&handles, &vp, self.fb.width(), self.fb.height(), x, y) {
+                self.grabbed = Some((i, (x, y)));
+                self.editor.dragging_axis = Some(handles[i].axis);
+                self.editor.preview_offset = Some([0; 3]);
+                self.gesture = Gesture::None;
+                return;
+            }
+        }
+
         self.last_drag = (x, y);
         self.press_at = (x, y);
         self.dragging = false;
@@ -291,6 +312,24 @@ impl App {
         let (dx, dy) = (x - self.last_drag.0, y - self.last_drag.1);
         self.last_drag = (x, y);
         self.cursor = Some((x, y));
+
+        // A gizmo drag writes nothing. It moves an outline, and mouse-up does
+        // the move — once, for one undo step.
+        if let Some((i, from)) = self.grabbed {
+            let handles = gizmo::handles(&self.editor);
+            let vp = self
+                .editor
+                .view_projection(self.fb.width(), self.fb.height());
+            if let Some(h) = handles.get(i) {
+                let n =
+                    gizmo::voxels_dragged(h, &vp, self.fb.width(), self.fb.height(), from, (x, y))
+                        .unwrap_or(0);
+                let mut delta = [0; 3];
+                delta[h.axis] = n;
+                self.editor.preview_offset = Some(delta);
+            }
+            return;
+        }
 
         match self.gesture {
             Gesture::Orbit => {
@@ -675,7 +714,13 @@ impl ApplicationHandler<Wake> for App {
                 if state == ElementState::Pressed {
                     self.on_mouse_down(button);
                 } else {
-                    if self.gesture == Gesture::Editing {
+                    if self.grabbed.take().is_some() {
+                        // One move, one undo step, through the same
+                        // `move_object` / `move_selection` the arrow keys use.
+                        let delta = self.editor.preview_offset.unwrap_or([0; 3]);
+                        self.editor.move_whatever_is_selected(delta);
+                        self.update_hover();
+                    } else if self.gesture == Gesture::Editing {
                         self.editor.end_stroke();
                     }
                     self.gesture = Gesture::None;
@@ -767,6 +812,7 @@ pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
         modifiers: ModifiersState::empty(),
         press_at: (0.0, 0.0),
         dragging: false,
+        grabbed: None,
         shown_title: String::new(),
         bridge: None,
         viewer: Some(viewer),
