@@ -327,6 +327,20 @@ copied from — `Clipboard::origin` exists for that — so copy, paste, arrows *
 `duplicate_selection`, with the offset chosen by eye instead of typed as an
 argument.
 
+**A click on nothing clears both selections.** Pointing at empty space and
+pressing is how everything else with a selection says "never mind", and the
+alternative is an outline on screen with no obvious way to be rid of it. Both go
+rather than only the one the mode is showing, because "nothing selected" is one
+idea and leaving the other outline up would make the click look like it had
+missed. The select tool gets no work-plane fallback for the same reason: that
+exists so build has something to aim at on an empty layer, and here it would
+make a click on the sky select a cell of air instead of clearing.
+
+The tool's click sits *after* the alt and shift branches in `on_mouse_down`, not
+before. An early return there swallowed alt-orbit and shift-pan — looking at the
+thing you are about to select is part of selecting it, and a tool you cannot aim
+is not a tool.
+
 The select mode gets a chip, and only while the tool is running: "cells" and
 "objects" look identical until you press an arrow, and by then the wrong thing
 has moved. A setting with no chip is a setting nobody finds.

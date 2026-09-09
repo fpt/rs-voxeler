@@ -2619,6 +2619,29 @@ mod tests {
         assert_eq!(e.undo_depth(), depth, "and nothing is on the undo stack");
     }
 
+    /// A click on nothing has to be a way to say "never mind". The select tool
+    /// gets no ground-plane fallback — that exists so build has something to
+    /// aim at on an empty layer, and here it would mean a click on the sky
+    /// selected a cell of air instead of clearing.
+    #[test]
+    fn a_select_click_on_empty_space_has_no_target() {
+        let mut e = editor_with_floor();
+        e.tool = Tool::Select;
+        // Straight down the middle finds the floor.
+        assert!(e.target_at(160.0, 120.0, 320, 240).is_some());
+        // The far corner, well off it, finds nothing — even though `plane_is_open`
+        // would hand Build a target at the same pixel.
+        e.tool = Tool::Build;
+        e.model.clear();
+        assert!(e.plane_is_open(), "the fallback is available to build");
+        e.tool = Tool::Select;
+        assert_eq!(
+            e.target_at(4.0, 236.0, 320, 240),
+            None,
+            "select never falls back to the work plane"
+        );
+    }
+
     /// "All of it" is the commonest selection there is, and the one a flood
     /// fill needs a seed to reach.
     #[test]

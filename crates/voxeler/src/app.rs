@@ -245,27 +245,6 @@ impl App {
             return;
         }
 
-        // The select tool never writes, so it is handled here rather than
-        // through a stroke — a click, like a click on a panel, that picks
-        // something out and costs no undo.
-        if button == MouseButton::Left && !self.editor.viewing && self.editor.tool == Tool::Select {
-            if let Some(target) = self
-                .editor
-                .target_at(x, y, self.fb.width(), self.fb.height())
-            {
-                if self.editor.select_objects {
-                    self.editor.select_object_at(target.voxel);
-                } else {
-                    self.editor.select_with_span(target.voxel, target.face);
-                }
-            } else if self.editor.select_objects {
-                self.editor.select_object(None);
-            } else {
-                self.editor.clear_selection();
-            }
-            return;
-        }
-
         self.last_drag = (x, y);
         self.press_at = (x, y);
         self.dragging = false;
@@ -285,6 +264,15 @@ impl App {
             // right button — a laptop trackpad has no comfortable right drag.
             MouseButton::Left if self.modifiers.alt_key() => Gesture::Orbit,
             MouseButton::Left if self.modifiers.shift_key() => Gesture::Pan,
+            // The select tool never writes, so its click is a choice rather
+            // than a stroke — no gesture to continue, and no undo spent. It
+            // sits *after* the modifiers deliberately: alt-orbit and shift-pan
+            // are how you look at the thing you are about to select, and a
+            // tool that swallowed them would be a tool you cannot aim.
+            MouseButton::Left if self.editor.tool == Tool::Select => {
+                self.pick_at(x, y);
+                Gesture::None
+            }
             MouseButton::Left => {
                 if let Some(target) = self.hover {
                     self.editor.begin_stroke(target);
@@ -376,6 +364,31 @@ impl App {
             KeyCode::Backslash => self.editor.set_slice(None),
             KeyCode::Escape if self.editor.show_help => self.editor.show_help = false,
             _ => return,
+        }
+        self.update_hover();
+    }
+
+    /// Pick out whatever is under the cursor, or drop the selection.
+    ///
+    /// **A click on nothing clears.** Pointing at empty space and pressing is
+    /// how everything else with a selection says "never mind", and the
+    /// alternative — a selection you can only drop from the keyboard — leaves
+    /// an outline on screen with no obvious way to be rid of it.
+    fn pick_at(&mut self, x: f32, y: f32) {
+        let target = self
+            .editor
+            .target_at(x, y, self.fb.width(), self.fb.height());
+        match (target, self.editor.select_objects) {
+            (Some(t), true) => {
+                self.editor.select_object_at(t.voxel);
+            }
+            (Some(t), false) => {
+                self.editor.select_with_span(t.voxel, t.face);
+            }
+            // Nothing under the cursor. Both go, not just the one the mode is
+            // showing: "nothing selected" is one idea, and leaving the other
+            // outline up would make the click look like it had missed.
+            (None, _) => self.editor.clear_all_selection(),
         }
         self.update_hover();
     }

@@ -425,7 +425,12 @@ layers moves as one thing, where a cell selection would take only the layer you
 were on and tear it in half.
 
 Both outline in the viewport, in different colours, because you can have one of
-each.
+each. **Clicking empty space clears both** — pointing at nothing and pressing is
+how you say "never mind", and it drops the object and the cells together,
+because "nothing selected" is one idea. `ESC` does the same from the keyboard.
+
+Alt-drag still orbits and shift-drag still pans while the select tool is
+active: looking at the thing you are about to select is part of selecting it.
 
 There is no duplicate key: paste puts the clipboard back where it was copied
 from, so copy, paste, arrows is the same operation with the offset chosen by

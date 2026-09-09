@@ -636,6 +636,7 @@ const HELP: &[&str] = &[
     "",
     "O            SELECT CELLS / OBJECTS",
     "W ESC        SELECT WHOLE LAYER / CLEAR",
+    "             (CLICK EMPTY SPACE CLEARS TOO)",
     "ARROWS       MOVE   (SHIFT = Z AXIS)",
     "SHIFT+X Y Z  TURN 90 DEG ABOUT AXIS",
     "ALT+X Y Z    FLIP  (CELLS ONLY)",
