@@ -12,7 +12,19 @@ pub struct Framebuffer {
     height: u32,
     color: Vec<u32>,
     depth: Vec<f32>,
+    /// Which surface each pixel came from: a face id for the model, and
+    /// [`NOTHING`] where the scene shows through.
+    ///
+    /// One byte per pixel, written only by the mesh. It is what lets an
+    /// outline pass tell a silhouette from a crease without re-projecting
+    /// anything: two neighbouring pixels off different faces have an edge
+    /// between them whatever their colours are, which is exactly the case a
+    /// depth test alone misses on a surface seen edge-on.
+    surface: Vec<u8>,
 }
+
+/// The `surface` value for a pixel no face has written.
+pub const NOTHING: u8 = 0xFF;
 
 impl Framebuffer {
     pub fn new(width: u32, height: u32) -> Self {
@@ -22,6 +34,7 @@ impl Framebuffer {
             height,
             color: vec![0; n],
             depth: vec![f32::INFINITY; n],
+            surface: vec![NOTHING; n],
         }
     }
 
@@ -37,6 +50,45 @@ impl Framebuffer {
         &self.color
     }
 
+    pub fn surface(&self) -> &[u8] {
+        &self.surface
+    }
+
+    pub fn depth(&self) -> &[f32] {
+        &self.depth
+    }
+
+    /// Mix a colour into one pixel by index, for a post-process.
+    ///
+    /// By index rather than by coordinate: a full-screen pass has already done
+    /// the arithmetic, and re-deriving `x` and `y` to multiply them back
+    /// together is work for nothing.
+    pub fn blend_at(&mut self, i: usize, color: u32, amount: f32) {
+        let Some(dst) = self.color.get_mut(i) else {
+            return;
+        };
+        let a = amount.clamp(0.0, 1.0);
+        let mix = |shift: u32| {
+            let old = ((*dst >> shift) & 0xFF) as f32;
+            let new = ((color >> shift) & 0xFF) as f32;
+            ((old + (new - old) * a) as u32) << shift
+        };
+        *dst = mix(16) | mix(8) | mix(0);
+    }
+
+    /// Note which surface a pixel came from, for the outline pass.
+    ///
+    /// Separate from [`test_and_set`](Self::test_and_set) rather than an
+    /// argument to it: the grid, the gizmos and the volume box go through the
+    /// same depth test and are not surfaces an outline should trace. Only the
+    /// mesh calls this.
+    pub fn set_surface(&mut self, x: u32, y: u32, id: u8) {
+        if x < self.width && y < self.height {
+            let i = (y * self.width + x) as usize;
+            self.surface[i] = id;
+        }
+    }
+
     /// Grow or shrink to a new size, reusing the allocation. Contents are not
     /// preserved: every caller clears before drawing anyway, and a resize is
     /// followed by a full redraw by definition.
@@ -49,6 +101,7 @@ impl Framebuffer {
         let n = (width as usize) * (height as usize);
         self.color.resize(n, 0);
         self.depth.resize(n, f32::INFINITY);
+        self.surface.resize(n, NOTHING);
     }
 
     /// Reset for a new frame. Depth goes to infinity so the first fragment at
@@ -56,6 +109,7 @@ impl Framebuffer {
     pub fn clear(&mut self, color: u32) {
         self.color.fill(color);
         self.depth.fill(f32::INFINITY);
+        self.surface.fill(NOTHING);
     }
 
     /// Fill with a vertical gradient — the editor's backdrop. A flat colour

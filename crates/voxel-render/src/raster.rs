@@ -116,7 +116,11 @@ pub fn draw_mesh(
         let c = quad.corners();
         let world = [c[0] + offset, c[1] + offset, c[2] + offset, c[3] + offset];
         let shade = scene.light.corner_shades(quad.ao_levels());
-        fill_polygon_shaded(fb, scene, &world, &shade, color, 0.0);
+        // Which face, so the outline pass can tell one plane from the next.
+        // The *face*, not the voxel: outlining every voxel boundary would draw
+        // a grid over every flat wall, which is a different look and not this
+        // one.
+        fill_polygon_shaded(fb, scene, &world, &shade, color, 0.0, quad.face as u8);
     }
 }
 
@@ -126,7 +130,15 @@ pub fn draw_mesh(
 /// value to lay something (a highlight, a wireframe) on top of coplanar
 /// geometry without it fighting for the pixel.
 pub fn fill_polygon(fb: &mut Framebuffer, scene: &Scene, poly: &[Vec3], color: u32, bias: f32) {
-    fill_polygon_shaded(fb, scene, poly, &[1.0; 8], color, bias);
+    fill_polygon_shaded(
+        fb,
+        scene,
+        poly,
+        &[1.0; 8],
+        color,
+        bias,
+        crate::framebuffer::NOTHING,
+    );
 }
 
 /// The same, with a brightness per corner interpolated across the face.
@@ -142,6 +154,7 @@ pub fn fill_polygon_shaded(
     corner_shade: &[f32],
     color: u32,
     bias: f32,
+    surface: u8,
 ) {
     let mut clip = [Vec4::default(); 8];
     let n = to_clip_space(&scene.view_proj, poly, &mut clip);
@@ -159,7 +172,7 @@ pub fn fill_polygon_shaded(
     // Fan from the first vertex: valid because near-plane clipping of a convex
     // polygon leaves it convex.
     for i in 1..n - 1 {
-        fill_triangle(fb, screen[0], screen[i], screen[i + 1], color);
+        fill_triangle(fb, screen[0], screen[i], screen[i + 1], color, surface);
     }
 }
 
@@ -312,7 +325,7 @@ fn edge(a: Vertex, b: Vertex, x: f32, y: f32) -> f32 {
     (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
 }
 
-fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u32) {
+fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u32, surface: u8) {
     // Nothing to interpolate is the common case — every overlay, and every
     // face whose corners are equally open — so it keeps the loop it always had
     // and the per-pixel work with it. The colour is still scaled once, because
@@ -358,14 +371,154 @@ fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u
                 let (r, g, bl) = (base[0] * s, base[1] * s, base[2] * s);
                 ((r as u32) << 16) | ((g as u32) << 8) | bl as u32
             };
-            fb.test_and_set(px, py, w0 * a.z + w1 * b.z + w2 * c.z, lit);
+            if fb.test_and_set(px, py, w0 * a.z + w1 * b.z + w2 * c.z, lit)
+                && surface != crate::framebuffer::NOTHING
+            {
+                fb.set_surface(px, py, surface);
+            }
         }
+    }
+}
+
+/// Trace an outline where the surface changes.
+///
+/// A post-process, so its cost is the screen rather than the model — the
+/// opposite of everything else here, and fine: one pass over at most 1.4M
+/// pixels. It reads the `surface` buffer the mesh wrote and the depth buffer
+/// the rasterizer already keeps, and needs no geometry at all.
+///
+/// Two things make an edge, and both are needed:
+///
+/// - **The face changes.** That catches a crease between two planes of a solid
+///   and the silhouette against the background, whatever the colours are. It is
+///   the case a depth test alone misses when two faces meet at a shallow angle.
+/// - **The depth jumps.** That catches two pixels on faces pointing the *same*
+///   way at different distances — one step in front of another — where the
+///   surface id is identical and only the distance says they are apart.
+///
+/// The depth threshold is relative to the pixel's own depth, because ndc z is
+/// not linear in distance: a fixed epsilon that reads a step correctly up close
+/// draws an outline round every faint slope far away.
+pub fn draw_outline(fb: &mut Framebuffer, color: u32, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    let (w, h) = (fb.width() as usize, fb.height() as usize);
+    if w < 2 || h < 2 {
+        return;
+    }
+    let surface = fb.surface().to_vec();
+    let depth = fb.depth().to_vec();
+    let mut edges = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if surface[i] == crate::framebuffer::NOTHING {
+                continue;
+            }
+            // Right and down only. Every edge has a pixel on each side, so
+            // testing two of the four neighbours finds all of them once
+            // instead of each of them twice.
+            let neighbours = [(x + 1 < w).then_some(i + 1), (y + 1 < h).then_some(i + w)];
+            for j in neighbours.into_iter().flatten() {
+                let apart = surface[j] != surface[i]
+                    || (depth[i] - depth[j]).abs() > 0.02 * (1.0 - depth[i]).abs().max(0.02);
+                if apart {
+                    edges.push(i);
+                    break;
+                }
+            }
+        }
+    }
+    for i in edges {
+        fb.blend_at(i, color, strength);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An outline traces edges: it must touch the model's boundaries and
+    /// creases, leave the middle of a flat face alone, and never paint the
+    /// background — a pass that tinted everything would "pass" a test that only
+    /// asked whether pixels changed.
+    #[test]
+    fn the_outline_traces_edges_and_not_faces_or_background() {
+        use crate::framebuffer::NOTHING;
+        use crate::mesh::{extract, ExtractOptions};
+        use voxel_core::{Palette, VoxelModel};
+
+        let mut m = VoxelModel::new(32, 32, 32);
+        for x in 11..21 {
+            for y in 11..21 {
+                for z in 11..21 {
+                    m.set(x, y, z, 100);
+                }
+            }
+        }
+        let mesh = extract(&m, ExtractOptions::default());
+        let cam = crate::camera::OrbitCamera {
+            target: Vec3::ZERO,
+            distance: 46.0,
+            yaw: 0.7,
+            pitch: 0.5,
+            ..Default::default()
+        };
+        let mut fb = Framebuffer::new(200, 200);
+        fb.clear(0x203040);
+        let scene = Scene {
+            view_proj: cam.view_projection(1.0),
+            eye: cam.eye(),
+            light: Light::default(),
+        };
+        draw_mesh(
+            &mut fb,
+            &scene,
+            &mesh,
+            &Palette::default(),
+            Vec3::splat(-16.0),
+        );
+
+        let before = fb.color().to_vec();
+        let surface = fb.surface().to_vec();
+        let covered = surface.iter().filter(|s| **s != NOTHING).count();
+        assert!(
+            covered > 2000,
+            "the cube should fill a good part of the view"
+        );
+
+        draw_outline(&mut fb, 0x000000, 0.6);
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|i| before[*i] != fb.color()[*i])
+            .collect();
+
+        assert!(!changed.is_empty(), "the outline drew nothing");
+        // Never the background: an outline belongs to the thing it outlines.
+        for &i in &changed {
+            assert_ne!(surface[i], NOTHING, "the outline painted the backdrop");
+        }
+        // A line, not a fill. A cube seen from a corner shows three faces and
+        // their shared edges; if this ever approached the covered area the pass
+        // would be tinting surfaces rather than tracing them.
+        assert!(
+            changed.len() * 4 < covered,
+            "outlined {} of {covered} covered pixels — that is a wash, not an edge",
+            changed.len()
+        );
+        // And it found the silhouette: some outlined pixel has a background
+        // pixel next to it.
+        let w = fb.width() as usize;
+        assert!(
+            changed.iter().any(|&i| {
+                [i.checked_sub(1), Some(i + 1), i.checked_sub(w), Some(i + w)]
+                    .into_iter()
+                    .flatten()
+                    .any(|j| surface.get(j).is_some_and(|s| *s == NOTHING))
+            }),
+            "no outlined pixel touches the background — the silhouette was missed"
+        );
+    }
 
     /// Ambient occlusion has to reach the pixels, and only darken.
     ///
