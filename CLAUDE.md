@@ -358,6 +358,14 @@ than a method for one reason: the hand and the agent both reach it. A smooth
 that rounded a corner at the window and not over MCP would be two tools wearing
 one name.
 
+- **A flatten fills a dent, not the room under a table.** Every cell below a
+  slab is "behind the plane", so filling all of them was the obvious reading and
+  the wrong one — flattening a table top packed the space beneath it, 147 cells
+  under a 16² slab. An air cell fills only when the cell one step *further* from
+  the plane holds material, already or because this same pass filled it. Cells
+  are therefore walked deepest-first, so a dent two deep still fills from its
+  floor upward in one pass. This is the one place the read-everything-first rule
+  bends, and it bends on purpose: a column has to see itself being built.
 - **`Flatten` needs a frame, not a reach.** `Drag::reference` locks a plane at
   mouse-down — the cell that was hit, and the normal of the face that was hit —
   and never re-estimates it. Re-deriving it per frame would make the direction
@@ -377,6 +385,26 @@ one name.
   application: the cell behind each rounded corner becomes a corner. So one call
   is one pass, and going further means calling again. The same rule
   `transform_selection` follows, for the same reason.
+- **Smooth rounds a sheet's corners, not a block's.** Two-or-fewer is a rule
+  about *thin* material: a one-cell sheet's corner has two solid neighbours and
+  goes, where a solid block's corner has three and stays. That is consistent and
+  predictable, and the description says so rather than promising corner rounding
+  in general — `flatten` is what cuts a block back. The threshold was left where
+  it is deliberately; raising it to three would take the top row off every thin
+  wall.
+- **A fill takes the colour around it, not the palette selection.** A sculpt
+  repairs a surface that is already there, so `fill_color` uses the commonest
+  colour among the cell's solid face neighbours and falls back to the tool's
+  own. Filling a notch in a red panel with whatever the brush happened to be set
+  to is not what "close this up" means.
+- **Mirroring reflects the frame with the cells.** `write_cells` reflected the
+  cells and left the reference alone, so every reflected cell was judged against
+  the *original* plane, came out in front of it, and was carved away — a
+  mirrored flatten of one wall took 52 cells instead of 2 and ate half the wall
+  opposite. The stroke now walks one group per mirror combination, each carrying
+  its own reflected plane. A position reflects as `size - 1 - p` and a normal by
+  negating that component; they are not the same operation, which is what made
+  the bug easy to write.
 - **A sculpt tool takes the brush ball whatever the span row says.** It has to
   see the material behind a cell as well as the air in front, which a surface
   flood does not give it. No span is lit while one is running: a highlighted

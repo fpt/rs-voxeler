@@ -556,21 +556,26 @@ pub fn list() -> Vec<ToolInfo> {
             description:
                 "Work a surface the way a hand would, instead of naming cells. `flatten` levels \
                  everything within the radius to the plane through `at` facing `normal` — \
-                 material in front of it goes, air behind it fills. `smooth` rounds by majority \
-                 vote of each cell's six face neighbours: a solid cell with two or fewer solid \
-                 neighbours is a spur and goes, an air cell with four or more is a notch and \
-                 fills, so it rounds corners and closes pits. `raise` and `lower` add or remove \
-                 the whole ball. Every decision is read before any is applied, so one call is \
-                 one pass and never cascades into itself; call it again to go further. `at` \
-                 must be inside the scene; `normal` defaults to the first exposed face at `at`, \
-                 and only `flatten` uses it. Writes to the active layer unless `layer` says \
-                 otherwise. One undo step.",
+                 material in front of it goes, and air behind it fills ONLY where the column \
+                 behind it holds material — so a dent fills to the plane and the space under a \
+                 table stays empty. `smooth` votes on each cell's six face neighbours: a solid \
+                 cell with two or fewer solid neighbours is a spur and goes, an air cell with \
+                 four or more is a notch and fills. That takes off spurs, closes pits, and \
+                 rounds the corners of a ONE-CELL-THICK sheet; it does NOT round the corner of \
+                 a solid block, where the corner cell still has three solid neighbours. Use \
+                 `flatten` to cut a block back. `raise` and `lower` add or remove the whole \
+                 ball. Every decision is read before any is applied, so one call is one pass \
+                 and never cascades; call it again to go further. Fills take the commonest \
+                 colour among the cell's solid neighbours, falling back to `color`. `at` must \
+                 be inside the scene; `normal` defaults to the first face of `at` with air \
+                 against it on the layer being written, and only `flatten` uses it. Writes to \
+                 the active layer unless `layer` says otherwise. One undo step.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "at": coord("A cell on the surface to work"),
                     "mode": {"type": "string", "enum": ["flatten", "smooth", "raise", "lower"]},
-                    "radius": {"type": "integer", "minimum": 0, "maximum": 16, "default": 3},
+                    "radius": {"type": "integer", "minimum": 0, "maximum": 8, "default": 3},
                     "normal": {"type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z"]},
                     "color": color,
                     "layer": layer,
@@ -1206,10 +1211,17 @@ fn dispatch(
             };
             let radius = match args.get("radius") {
                 None | Some(Value::Null) => 3,
+                // The same ceiling the brush has at the window: one operation
+                // should not reach further because it was asked for over a
+                // wire.
                 Some(v) => v
                     .as_u64()
-                    .filter(|r| *r <= 16)
-                    .ok_or("`radius` must be 0..=16")? as u8,
+                    .filter(|r| *r <= voxel_core::region::MAX_BRUSH as u64)
+                    .ok_or("`radius` must be 0..=8")? as u8,
+            };
+            let layer = match args.get("layer") {
+                None | Some(Value::Null) => editor.active_layer(),
+                _ => writable_layer_arg(editor, args)?,
             };
             let normal = match args.get("normal").and_then(Value::as_str) {
                 Some(name) => named_normal(name)?,
@@ -1217,12 +1229,8 @@ fn dispatch(
                 // direction and an agent has no cursor to have hit one with, so
                 // the model is asked instead — and told, in the report, which
                 // one it got, because a guess it cannot see is worse than none.
-                None => exposed_normal(editor.model(), at)
+                None => exposed_normal(editor.model(), at, layer)
                     .ok_or("nothing at `at` shows an open face; give `normal` explicitly")?,
-            };
-            let layer = match args.get("layer") {
-                None | Some(Value::Null) => editor.active_layer(),
-                _ => writable_layer_arg(editor, args)?,
             };
             let color = color_arg(editor, args)?;
             let r = editor.sculpt_at(tool, at, radius, normal, color, layer)?;
@@ -2105,7 +2113,7 @@ fn named_normal(name: &str) -> Result<[i32; 3], String> {
 /// +Y first because up is the face a sculpt is usually aimed at, and a rule
 /// that picks the same face every time beats one that depends on iteration
 /// order nobody can see.
-fn exposed_normal(model: &VoxelModel, at: [i32; 3]) -> Option<[i32; 3]> {
+fn exposed_normal(model: &VoxelModel, at: [i32; 3], layer: usize) -> Option<[i32; 3]> {
     let faces = [
         [0, 1, 0],
         [0, -1, 0],
@@ -2114,9 +2122,12 @@ fn exposed_normal(model: &VoxelModel, at: [i32; 3]) -> Option<[i32; 3]> {
         [0, 0, 1],
         [0, 0, -1],
     ];
+    // The layer being written, not the composite: `sculpt_value` decides on
+    // that grid, so a face another layer happens to cover is not a face this
+    // edit can see.
     faces
         .into_iter()
-        .find(|n| model.get(at[0] + n[0], at[1] + n[1], at[2] + n[2]) == 0)
+        .find(|n| model.get_in(layer, at[0] + n[0], at[1] + n[1], at[2] + n[2]) == 0)
 }
 
 /// An axis named the way an agent would say it.
@@ -2616,7 +2627,11 @@ mod tests {
         assert_eq!(r.is_error, None, "{}", text_of(&r));
         let j = json_of(&r);
         assert_eq!(e.model().get(2, 1, 2), 0, "the spur went");
-        assert_eq!(e.model().get(5, 0, 5), 9, "the notch filled");
+        assert_eq!(
+            e.model().get(5, 0, 5),
+            4,
+            "the notch filled, in the slab's colour"
+        );
         // The outcomes are exclusive and sum to what was targeted.
         let sum = j["added"].as_u64().unwrap()
             + j["removed"].as_u64().unwrap()
