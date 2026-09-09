@@ -1658,7 +1658,22 @@ impl Editor {
     }
 
     /// Move the active layer up or down the stack, changing what covers what.
+    /// Move the active layer up or down the stack.
+    ///
+    /// The stack is compositing order — who covers whom — and it is *not* what
+    /// the panel's tree shows, which groups by object. So the report names the
+    /// layer this one just passed: a position on its own says little when two
+    /// rows have not moved, and "now over BODY" is the thing that was actually
+    /// asked for.
     pub fn move_layer(&mut self, up: bool) {
+        let was = self.model.active_layer();
+        let passed = if up {
+            self.model.layers().get(was + 1).map(|l| l.name.clone())
+        } else {
+            was.checked_sub(1)
+                .and_then(|i| self.model.layers().get(i))
+                .map(|l| l.name.clone())
+        };
         let changed = self
             .history
             .restructure(&mut self.model, "move layer", |model| {
@@ -1666,7 +1681,16 @@ impl Editor {
             });
         if changed {
             self.after_structural();
-            self.report_layer();
+            let n = self.model.active_layer() + 1;
+            let total = self.model.layer_count();
+            let name = self.model.layers()[self.model.active_layer()].name.clone();
+            self.status = match passed {
+                Some(other) => format!(
+                    "{name} is {} {other} — layer {n}/{total}",
+                    if up { "over" } else { "under" }
+                ),
+                None => format!("{name} — layer {n}/{total}"),
+            };
         } else {
             self.status = if up {
                 "already on top"
@@ -4687,6 +4711,42 @@ mod tests {
             before - 1 + 1 - 4,
             "exactly the cells the rule names"
         );
+    }
+
+    /// Reordering the stack changes what covers what, and after the panel
+    /// became a tree it could do that while both rows stayed exactly where they
+    /// were — two layers in different objects appear in tree order, not stack
+    /// order. So the report has to name what was passed. Reported from use.
+    #[test]
+    fn moving_a_layer_says_what_it_passed_even_when_no_row_moves() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        let armour = m.add_object(0, "ARMOUR").unwrap();
+        let body = m.add_object(0, "BODY").unwrap();
+        let plate = m.add_layer(0, "PLATE").unwrap();
+        m.set_layer_object(plate, armour);
+        let torso = m.add_layer(plate, "TORSO").unwrap();
+        m.set_layer_object(torso, body);
+        m.set_in(plate, 4, 4, 4, 1);
+        m.set_in(torso, 4, 4, 4, 2);
+        let mut e = Editor::new(m, PathBuf::from("t.vxm"));
+        e.select_layer(plate);
+        assert_eq!(e.model().get(4, 4, 4), 2, "TORSO is on top to begin with");
+
+        e.move_layer(true);
+        assert_eq!(e.model().get(4, 4, 4), 1, "PLATE covers it now");
+        let said = e.status().to_string();
+        assert!(said.contains("PLATE") && said.contains("TORSO"), "{said}");
+        assert!(said.contains("over"), "{said}");
+
+        e.move_layer(false);
+        assert_eq!(e.model().get(4, 4, 4), 2, "and back");
+        assert!(e.status().contains("under"), "{}", e.status());
+
+        // At the end of the stack there is nothing to pass, and it says so
+        // rather than reporting a move that did not happen.
+        e.select_layer(0);
+        e.move_layer(false);
+        assert!(e.status().contains("bottom"), "{}", e.status());
     }
 
     /// A sculpt tool reaches by brush, and a brush of radius 0 is one cell —

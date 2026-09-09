@@ -369,12 +369,25 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
                     }
                 }
 
+                // Where the layer sits in the stack, counting up from the
+                // bottom — the number `K` and `J` move.
+                //
+                // The panel groups by object, so two layers in different parts
+                // appear in tree order and the stack order between them is not
+                // readable from their positions. That was the trade made when
+                // the tree landed, and this is what pays it back: reordering
+                // used to change the picture and nothing on the panel at all.
+                // Reported from use.
+                let place = format!("{}", index + 1);
+                let place_w = text_width(&place, TEXT_SCALE);
+                overlay::text(fb, bx + EYE as i32 + 5, y + 3, &place, DIM, TEXT_SCALE);
+
                 // The count is right-aligned, so the name gets whatever is
                 // left over rather than being cut to a fixed column that is
                 // wrong at both ends.
                 let count = layer.filled_count().to_string();
                 let count_w = text_width(&count, TEXT_SCALE);
-                let name_x = bx + EYE as i32 + 5;
+                let name_x = bx + EYE as i32 + 5 + place_w as i32 + 8;
                 let room =
                     fit_chars((ox + inner as i32 - count_w as i32 - 6 - name_x).max(0) as u32);
                 overlay::text(
@@ -670,7 +683,9 @@ const HELP: &[&str] = &[
     "L SHIFT+L    NEXT / PREVIOUS LAYER",
     "A D          ADD / DELETE LAYER",
     "V N          SHOW-HIDE / RENAME LAYER",
-    "K J          MOVE LAYER UP / DOWN",
+    "K J          MOVE LAYER UP / DOWN THE STACK",
+    "             (THE NUMBER ON THE ROW; TREE ORDER",
+    "              IS NOT STACK ORDER)",
     "U T          MERGE DOWN / TRIM TO FIT",
     "",
     "H            CLOSE THIS",

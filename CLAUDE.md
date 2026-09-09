@@ -172,6 +172,13 @@ Three rules:
   That is the trade for showing the tree at all, and it is the right way round —
   the tree is what the file, the MCP surface and every "make the left arm
   longer" is expressed in.
+- **Each layer row carries its stack position, and that is what pays the trade
+  back.** Without it `K` and `J` could change which layer covers which — the
+  picture visibly changing — while both rows stayed exactly where they were,
+  because they sit under different objects. Reported from use, and the number is
+  the only thing on the panel that moves. `move_layer` also names the layer it
+  passed, because "layer 3 of 3" says little when nothing appears to have
+  happened and "PLATE is over TORSO" is the thing that was asked for.
 - **The switch and the fold are separate targets.** On an object row the switch
   hides the part and anywhere else folds it. "Stop showing the arm" and "stop
   listing the arm's layers" are different intentions, and a panel that guessed
