@@ -716,17 +716,37 @@ impl VoxelModel {
             y as usize / CHUNK as usize,
             z as usize / CHUNK as usize,
         ];
-        self.mark_chunk(c, dims);
         let local = [x as u16 % CHUNK, y as u16 % CHUNK, z as u16 % CHUNK];
+        // Which chunk indices this cell can affect on each axis: its own, and
+        // the one it backs onto when it sits against a wall of the chunk.
+        //
+        // The *product* of those, not one neighbour per axis. A face belongs to
+        // the cell that emits it, so a face neighbour was enough while a quad
+        // was one flat colour — but a corner's shade reads the cell diagonally
+        // across from it, and a cell on a chunk's corner has three chunks
+        // diagonal to it that a per-axis walk never names. Miss them and the
+        // shading along a chunk seam stays as it was before the edit, which is
+        // invisible until somebody draws exactly on a boundary.
+        //
+        // An interior cell — fourteen of every sixteen along an axis — still
+        // marks exactly one chunk, because each axis contributes one index.
+        let mut spans = [[0usize; 2]; 3];
+        let mut counts = [1usize; 3];
         for a in 0..3 {
+            spans[a][0] = c[a];
             if local[a] == 0 && c[a] > 0 {
-                let mut n = c;
-                n[a] -= 1;
-                self.mark_chunk(n, dims);
+                spans[a][1] = c[a] - 1;
+                counts[a] = 2;
             } else if local[a] == CHUNK - 1 && c[a] + 1 < dims[a] {
-                let mut n = c;
-                n[a] += 1;
-                self.mark_chunk(n, dims);
+                spans[a][1] = c[a] + 1;
+                counts[a] = 2;
+            }
+        }
+        for i in 0..counts[0] {
+            for j in 0..counts[1] {
+                for k in 0..counts[2] {
+                    self.mark_chunk([spans[0][i], spans[1][j], spans[2][k]], dims);
+                }
             }
         }
     }
@@ -2189,6 +2209,46 @@ mod tests {
                 [i32::from(b[0]) - i32::from(a[0]), b[1] as i32 - a[1] as i32],
                 [8, 0]
             );
+        }
+    }
+
+    /// A corner's shade reads the cell diagonally across from it, so an edit on
+    /// a chunk's corner has to dirty the chunks diagonal to it — not just the
+    /// three sharing a face. Missing them leaves stale shading along a seam,
+    /// which nothing shows until somebody draws exactly on a boundary.
+    #[test]
+    fn an_edit_on_a_chunk_corner_dirties_the_diagonal_chunks() {
+        let mut m = VoxelModel::new(64, 64, 64);
+        m.clear_dirty();
+        assert_eq!(m.dirty_chunk_count(), 0);
+
+        // The first cell of chunk (1,1,1): every one of the eight chunks
+        // meeting at that corner can see it.
+        m.set(CHUNK as i32, CHUNK as i32, CHUNK as i32, 5);
+        assert_eq!(
+            m.dirty_chunk_count(),
+            8,
+            "the whole corner, diagonals and all"
+        );
+
+        // An edge cell reaches four, a face cell two, and an interior cell one
+        // — which is what keeps a bulk fill cheap.
+        for (cell, want, what) in [
+            ([CHUNK as i32, CHUNK as i32, CHUNK as i32 + 4], 4, "an edge"),
+            (
+                [CHUNK as i32, CHUNK as i32 + 4, CHUNK as i32 + 4],
+                2,
+                "a face",
+            ),
+            (
+                [CHUNK as i32 + 4, CHUNK as i32 + 4, CHUNK as i32 + 4],
+                1,
+                "the interior",
+            ),
+        ] {
+            m.clear_dirty();
+            m.set(cell[0], cell[1], cell[2], 6);
+            assert_eq!(m.dirty_chunk_count(), want, "{what}");
         }
     }
 

@@ -23,6 +23,13 @@ pub struct FaceQuad {
     pub voxel: [u16; 3],
     pub face: Face,
     pub index: u8,
+    /// How enclosed each corner is: four levels, two bits each, in the order
+    /// [`FaceQuad::corners`] returns.
+    ///
+    /// Packed into one byte rather than kept as `[u8; 4]`, because a 64³ shell
+    /// is 24 576 of these and they are rebuilt whenever the model changes —
+    /// the same reasoning that keeps the corners derived instead of stored.
+    pub ao: u8,
 }
 
 impl FaceQuad {
@@ -42,6 +49,12 @@ impl FaceQuad {
             ],
             self.face,
         )
+    }
+
+    /// How lit each corner is, 0 (most enclosed) to 3 (open), matching the
+    /// order of [`corners`](Self::corners).
+    pub fn ao_levels(&self) -> [u8; 4] {
+        std::array::from_fn(|i| (self.ao >> (i * 2)) & 3)
     }
 
     /// The outward unit normal.
@@ -243,6 +256,7 @@ fn fill_chunk(model: &VoxelModel, cut: i32, origin: [i32; 3], chunk: i32, out: &
                             voxel: [x as u16, y as u16, z as u16],
                             face,
                             index,
+                            ao: corner_shade(model, cut, [x, y, z], face),
                         });
                     }
                 }
@@ -251,9 +265,163 @@ fn fill_chunk(model: &VoxelModel, cut: i32, origin: [i32; 3], chunk: i32, out: &
     }
 }
 
+/// Whether a cell counts as material for shading: solid, and below the cut.
+///
+/// The slice reads as air here for the same reason it does to the extractor —
+/// a cross-section's top is a surface, and its corners should be lit like one
+/// rather than shaded by the material the cut took away.
+fn shades(model: &VoxelModel, cut: i32, p: [i32; 3]) -> bool {
+    p[1] < cut && model.is_solid(p[0], p[1], p[2])
+}
+
+/// How enclosed each corner of a face is, packed two bits per corner.
+///
+/// The standard voxel rule. For each corner, look at the three cells that meet
+/// it *in the air in front of the face* — the two along the face's own axes and
+/// the one diagonally between them — and count them. Three neighbours give four
+/// levels, which is why two bits is the natural size.
+///
+/// The one special case is worth stating: when both edge neighbours are solid
+/// the corner is in a crease and is fully dark whatever the diagonal does,
+/// because the diagonal is not reachable from outside anyway. Without it a
+/// corner tucked into an inside edge reads lighter than the flat wall beside
+/// it, which is backwards.
+fn corner_shade(model: &VoxelModel, cut: i32, voxel: [i32; 3], face: Face) -> u8 {
+    let a = face.axis();
+    // The same cyclic pair, in the same order, that `face_corners` walks — so
+    // corner `i` here is corner `i` there. Deriving it the same way rather than
+    // tabulating it is what keeps the two from drifting apart.
+    let (b, c) = if face.is_positive() {
+        ((a + 1) % 3, (a + 2) % 3)
+    } else {
+        ((a + 2) % 3, (a + 1) % 3)
+    };
+    let n = face.normal();
+    // One step off the face, into the air the corner is open to.
+    let front = [voxel[0] + n[0], voxel[1] + n[1], voxel[2] + n[2]];
+    let step = |p: [i32; 3], axis: usize, d: i32| {
+        let mut q = p;
+        q[axis] += d;
+        q
+    };
+
+    let mut packed = 0u8;
+    for (i, (sb, sc)) in [(0, 0), (1, 0), (1, 1), (0, 1)].into_iter().enumerate() {
+        let (db, dc) = (if sb == 1 { 1 } else { -1 }, if sc == 1 { 1 } else { -1 });
+        let side_b = shades(model, cut, step(front, b, db));
+        let side_c = shades(model, cut, step(front, c, dc));
+        let diagonal = shades(model, cut, step(step(front, b, db), c, dc));
+        let level = if side_b && side_c {
+            0
+        } else {
+            3 - (u8::from(side_b) + u8::from(side_c) + u8::from(diagonal))
+        };
+        packed |= level << (i * 2);
+    }
+    packed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lone cube is open on every side, so every corner of every face is at
+    /// the lightest level. Anything else means the sampling is reaching into
+    /// the cell itself or the wrong side of the face.
+    #[test]
+    fn a_lone_voxel_has_no_occlusion_anywhere() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(4, 4, 4, 1);
+        let mesh = extract(&m, ExtractOptions::default());
+        assert_eq!(mesh.len(), 6);
+        for q in mesh.quads() {
+            assert_eq!(q.ao_levels(), [3, 3, 3, 3], "{:?}", q.face);
+        }
+    }
+
+    /// The case AO exists for: a neighbour beside a face darkens the two
+    /// corners on its side and leaves the other two alone.
+    #[test]
+    fn a_neighbour_darkens_the_corners_on_its_own_side() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(4, 4, 4, 1);
+        // A wall standing on the +x side, one step out from the top face.
+        m.set(5, 5, 4, 1);
+        let mesh = extract(&m, ExtractOptions::default());
+        let top = mesh
+            .quads()
+            .find(|q| q.voxel == [4, 4, 4] && q.face == Face::PosY)
+            .expect("the top face is still exposed");
+
+        let levels = top.ao_levels();
+        // Corners are [ (0,0), (1,0), (1,1), (0,1) ] over the face's own axes,
+        // and for +Y those are (b, c) = (z, x). So the +x side is corners 2
+        // and 3 — the ones with sc = 1.
+        assert_eq!(levels[1], 3, "the far side is untouched");
+        assert_eq!(levels[0], 3);
+        assert!(levels[2] < 3, "the near side is darker: {levels:?}");
+        assert!(levels[3] < 3, "{levels:?}");
+    }
+
+    /// Both edge neighbours solid is a crease, and a crease is fully dark
+    /// whatever the diagonal does — the diagonal is not reachable from outside
+    /// anyway. Without the special case an inside corner reads *lighter* than
+    /// the flat wall beside it.
+    #[test]
+    fn a_crease_is_fully_dark_and_beats_the_diagonal() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        m.set(4, 4, 4, 1);
+        m.set(5, 5, 4, 1);
+        m.set(4, 5, 5, 1);
+        let levels = |m: &VoxelModel| {
+            extract(m, ExtractOptions::default())
+                .quads()
+                .find(|q| q.voxel == [4, 4, 4] && q.face == Face::PosY)
+                .expect("top face")
+                .ao_levels()
+        };
+        // Corner 2 is (sb, sc) = (1, 1) — the +z, +x corner, with both of those
+        // neighbours solid.
+        assert_eq!(levels(&m)[2], 0, "a crease is as dark as it goes");
+
+        // Filling the diagonal between them changes nothing, which is the
+        // half of the rule a plain count would get wrong.
+        m.set(5, 5, 5, 1);
+        assert_eq!(levels(&m)[2], 0);
+    }
+
+    /// Shading has to be rebuilt wherever it can be *seen* to change, which is
+    /// what the diagonal-chunk dirty rule is for. This checks the whole thing
+    /// end to end: a cell written diagonally across a chunk boundary must leave
+    /// the incremental mesh agreeing with a full rebuild.
+    #[test]
+    fn shading_across_a_chunk_seam_survives_an_incremental_rebuild() {
+        let mut m = VoxelModel::new(48, 48, 48);
+        // A floor spanning the seam at 32, so there are faces to shade.
+        for x in 28..38 {
+            for z in 28..38 {
+                m.set(x, 31, z, 1);
+            }
+        }
+        let opts = ExtractOptions::default();
+        let mut incremental = extract(&m, opts);
+        m.clear_dirty();
+
+        // Diagonally across the corner where four chunks meet.
+        m.set(32, 32, 32, 1);
+        extract_dirty(&m, opts, &mut incremental);
+
+        let full = extract(&m, opts);
+        let key = |mesh: &FaceMesh| {
+            let mut v: Vec<_> = mesh
+                .quads()
+                .map(|q| (q.voxel, format!("{:?}", q.face), q.index, q.ao))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(key(&incremental), key(&full), "stale shading at the seam");
+    }
 
     /// The property the whole thing rests on: rebuilding only what changed has
     /// to give the same answer as rebuilding everything. A stale chunk is a
@@ -355,7 +523,7 @@ mod tests {
     /// One voxel dirties its own chunk, and a neighbour only when it sits
     /// against a shared face. That is the whole saving.
     #[test]
-    fn an_edit_dirties_its_chunk_and_only_a_touching_neighbour() {
+    fn an_edit_dirties_its_chunk_and_only_the_neighbours_that_can_see_it() {
         let mut m = VoxelModel::new(48, 48, 48);
         m.clear_dirty();
         m.set(20, 20, 20, 1);
@@ -365,12 +533,16 @@ mod tests {
         m.set(16, 20, 20, 1);
         assert_eq!(m.dirty_chunk_count(), 2, "against the low face on x");
 
+        // Corner shading reads the cell diagonally across, so a cell on an edge
+        // or a corner of its chunk is visible to more than the chunks sharing a
+        // face with it. An interior cell still costs exactly one mark.
+
         m.clear_dirty();
         m.set(31, 31, 31, 1);
         assert_eq!(
             m.dirty_chunk_count(),
-            4,
-            "a corner: itself and three across"
+            8,
+            "a corner: every chunk that meets it, diagonals included"
         );
 
         m.clear_dirty();

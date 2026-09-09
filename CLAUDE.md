@@ -821,7 +821,50 @@ emitted, so a solid 64³ block draws 24 576 quads rather than 1.5 million.
 
 Coplanar neighbours are **not** merged. Greedy meshing is the obvious next win,
 but it changes the quads' extents, so it has to be built on an extractor already
-known to be right.
+known to be right — and it now has a second constraint: **it may only merge
+quads whose four AO levels match.** Merging quads with different corner shading
+would average away the very thing the shading adds, so greedy has to compare the
+`ao` byte along with the palette index.
+
+### Shading reads the shape, not just the face
+
+Flat shading gives every face one colour, and a voxel model drawn that way reads
+as a set of tinted rectangles rather than a solid. Vertex ambient occlusion is
+the cheapest thing that fixes it: for each of a quad's four corners, look at the
+three cells meeting it *in the air in front of the face* — the two along the
+face's own axes and the one diagonally between — and count them. Three
+neighbours give four levels, which is why `FaceQuad::ao` is two bits per corner
+in one byte.
+
+Three things it turns on:
+
+- **The corner order is derived the same way twice.** `corner_shade` walks the
+  cyclic `(b, c)` pair exactly as `face_corners` does, so corner *i* means the
+  same corner in both. Tabulating it in one place and deriving it in the other
+  is how they would come apart.
+- **Both edge neighbours solid is fully dark, whatever the diagonal holds.** The
+  diagonal is not reachable from outside a crease anyway, and without the
+  special case an inside corner reads *lighter* than the flat wall beside it.
+- **The rasterizer interpolates it with the barycentrics it already has.**
+  `fill_triangle` was computing `w0*a.z + w1*b.z + w2*c.z` for depth; the shade
+  is the same three multiplies at the same site. The flat path is kept separate
+  and unchanged — the grid, the gizmos and the volume box are one colour by
+  nature, and making them pay a per-pixel multiply to say "times one" would be a
+  cost for nothing.
+
+`Light::occlusion` is the whole of the tuning, and 0 gives back exactly the
+picture this renderer drew before — which is what the test compares against,
+because "it looks nicer" is not an assertion.
+
+**It widened the dirty rule, and that is the part to be careful with.**
+`set_in` used to mark the chunk a cell fell in and the neighbour across a
+*shared face*. A corner's shade reads the cell diagonally across from it, so a
+cell on a chunk's corner is visible to all eight chunks meeting there, and a
+per-axis walk names only four of them. Miss the diagonals and the shading along
+a seam stays as it was before the edit — invisible until somebody draws exactly
+on a boundary. `mark` now takes the *product* of each axis' affected indices,
+which is still exactly one chunk for the fourteen interior cells in every
+sixteen.
 
 ### The rules the rasterizer depends on
 
