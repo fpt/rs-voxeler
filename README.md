@@ -262,6 +262,7 @@ whoever connects.
 | `list_objects`, `create_object`, `rename_object`, `delete_object` | the scene tree: what each part *is* |
 | `set_layer_object`, `reparent_object`, `set_object_visible` | put layers in parts, parts in parts, and hide either |
 | `move_object` | move a part and everything under it, one undo step |
+| `rotate_object` | turn a part and everything under it a quarter turn at a time |
 | `create_instance`, `place_instance`, `detach_instance` | repeat a part by reference; edit the source and every copy follows |
 | `screenshot` | clean PNG preview, camera presets, lighting, optional file output |
 | `undo`, `redo` | take back whole tool calls |
@@ -324,6 +325,23 @@ something above it is hidden.
 re-created — each layer's box slides — so moving a finished robot costs the same
 as moving an empty one. It is all or nothing: if any part of the subtree would
 leave the scene, nothing moves and the message says which layer and which axis.
+
+`rotate_object` turns one a quarter turn at a time. That one cannot be free —
+there is no stored transform, so the voxels are rewritten — but the rules are
+the ones the selection transforms already use: counter-clockwise about the
+positive axis by the right-hand rule, and pivoting about the low corner rather
+than the centre, so a turn and its inverse come back exactly. The whole subtree
+turns about **one** pivot, the low corner of everything it holds, so the parts
+keep their spacing:
+
+```
+BODY  4x16x3 at [10,10,10]        BODY  16x4x3 at [10,10,10]
+ARM   7x2x3  at [14,20,10]   ->   ARM   2x7x3  at [14,14,10]
+```
+
+A non-square footprint therefore lands somewhere new; follow with `move_object`
+if you wanted it in place. An instance cannot be turned — rotate its source, and
+every copy turns with it.
 
 The tree is saved in the file, so the next session still knows what the parts
 are. That is what makes an agent's edits semantic: "make the left arm longer" is

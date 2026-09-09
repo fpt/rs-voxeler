@@ -99,7 +99,8 @@ a paste you undid can be pasted again.
 
 ```
 list_objects / create_object / rename_object / delete_object
-set_layer_object / reparent_object / set_object_visible / move_object
+set_layer_object / reparent_object / set_object_visible
+move_object / rotate_object
 create_instance / place_instance / detach_instance
 select_layer / add_layer / set_layer_visible / trim_layer
 set_color / find_color / set_palette_color
@@ -129,6 +130,12 @@ next session.
 without re-creating a voxel — reach for it before erasing and redrawing a limb
 somewhere else. It is refused outright if any part of the subtree would leave
 the scene.
+
+`rotate_object` turns a part a quarter turn at a time. Unlike `move_object` it
+rewrites the voxels, and the whole subtree turns about one pivot so the parts
+keep their spacing. It pivots about the low corner, not the centre — a turn and
+its inverse are exact, but a non-square part lands somewhere new, so check
+`list_objects` and follow with `move_object` if it was meant to stay put.
 
 `create_instance` repeats a part by reference: editing the source changes every
 copy. Check `list_objects` for an `instance` field before editing anything — a

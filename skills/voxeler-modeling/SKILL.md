@@ -72,6 +72,12 @@ sticking out at its sides.
   undo step, without re-creating anything. Use it to reposition a finished limb
   rather than erasing and redrawing it. It is all or nothing: if any part would
   leave the scene the move is refused and names the layer and axis.
+- `rotate_object` turns a part and everything under it a quarter turn at a time,
+  in one undo step. It rewrites voxels where `move_object` slides boxes, and the
+  subtree turns about a single pivot at its low corner — so a non-square part
+  ends up somewhere new and may want a `move_object` after it. Turning something
+  to look at it and turning it back is exact. An instance cannot be turned;
+  rotate its source.
 - **Repeat a part with `create_instance`, do not redraw it.** Wheels, windows,
   teeth, towers and above all mirrored pairs are the bulk of a voxel model.
   `create_instance source="ARM L" name="ARM R" dx=14 mirror=["x"]` makes a

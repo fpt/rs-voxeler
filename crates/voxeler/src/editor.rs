@@ -1464,6 +1464,39 @@ impl Editor {
     }
 
     /// Move an object and everything under it. One undo step for the lot.
+    /// Turn an object and everything under it a quarter turn at a time.
+    ///
+    /// One undo step for the whole subtree, through the same snapshot path a
+    /// move takes: a rotation rewrites grids rather than sliding boxes, so
+    /// there is nothing cheaper to record than the stack either side of it.
+    pub fn rotate_object(
+        &mut self,
+        i: usize,
+        axis: usize,
+        quarter_turns: i32,
+    ) -> Result<usize, String> {
+        // Checked on a copy first, so a refusal does not spend an undo on a
+        // snapshot of a model that did not change.
+        self.model.clone().rotate_object(i, axis, quarter_turns)?;
+        let mut result = Err("nothing happened".to_string());
+        self.history
+            .restructure(&mut self.model, "rotate object", |model| {
+                result = model.rotate_object(i, axis, quarter_turns);
+            });
+        if let Ok(n) = &result {
+            self.after_structural();
+            self.status = format!(
+                "turned {} {} quarter turn{} about {} — {n} layer{}",
+                self.object_name(i),
+                quarter_turns,
+                if quarter_turns.abs() == 1 { "" } else { "s" },
+                ["x", "y", "z"][axis],
+                if *n == 1 { "" } else { "s" }
+            );
+        }
+        result
+    }
+
     pub fn move_object(&mut self, i: usize, delta: [i32; 3]) -> Result<usize, String> {
         let mut result = Err("nothing happened".to_string());
         self.history
