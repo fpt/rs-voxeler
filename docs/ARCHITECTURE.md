@@ -48,10 +48,13 @@ blitted framebuffer out — has almost none. The split is deliberate: the part
 worth testing is the part with rules in it, and the part with a window in it
 cannot be tested without one.
 
-This is the 3D successor to `rs-kessel` but **not** an extension of it. Kessel's
-VM is a deterministic integer machine; carrying that constraint into a
-projection matrix would buy nothing, so floats live freely here. When a Luax
-bridge eventually appears, the integer boundary sits at *that* edge.
+This is a tool for making models, not a game engine. Floats live freely here;
+there is no VM and no entity system, and the project's investment goes into the
+modelling surface instead — layers, objects, instances, selections, and an
+agent-facing API precise enough to name a part rather than a coordinate.
+
+A few notes below compare a decision with `rs-kessel`, which shares this
+project's MCP and `attach` patterns. Those compare *mechanism* only.
 
 ## The data model
 
@@ -207,6 +210,25 @@ every instance stale with nothing to press. `instance_clipped` reports it.
 A write to a copy is refused with the source's name rather than detaching into
 one silently, and `select_layer` is the single gate that enforces it: a derived
 layer never becomes active, so every active-layer tool is off it for free.
+
+### The panel is the tree, and the hit test is not an inverse
+
+The layer panel listed layers flat, so the object tree was invisible at the
+window. It now draws objects with their layers indented under them, with a
+visibility switch and a fold on each object row.
+
+The interesting part is `hud::panel_rows`. The flat panel's `layer_hit` was a
+hand-written inverse of the drawing code — tested row by row, and a standing
+invitation to drift. A tree makes that inverse harder: rows are no longer
+`layers - 1 - n`, and the switch moves with the indent. So there is no inverse
+any more. The row list is built once, and the drawing and the hit test both
+index into it; they cannot disagree about what row four is.
+
+`Editor::collapsed` is view state — not saved, not undoable, dropped with the
+selection and clipboard on document replacement. Held by object index, so
+removing an object can move a fold onto its neighbour. That is accepted: a fold
+is not data, one click fixes it, and the alternative is an identity on `Object`
+carried in the file format for the sake of a triangle in a panel.
 
 ### A layer is a grid of its own
 

@@ -246,6 +246,16 @@ pub struct Editor {
     pub show_help: bool,
     /// Voxels held for a transform, if any. Not part of the document: it is
     /// never saved, and it does not survive an undo — see [`Editor::undo`].
+    /// Objects whose rows are folded shut in the layer panel.
+    ///
+    /// A view state, not a document one: it is not saved, and it is dropped
+    /// when the document is replaced along with the selection and the
+    /// clipboard. Held by index, which is the one wart — removing an object
+    /// renumbers the ones above it, so a fold can end up on a neighbour. That
+    /// is a fold, not data: one click puts it right, and the alternative is an
+    /// identity on `Object` that the file format would have to carry for the
+    /// sake of a triangle in a panel.
+    collapsed: std::collections::HashSet<usize>,
     pub selection: Option<Selection>,
     /// Voxels lifted for a paste, if any. Also not part of the document, but
     /// unlike the selection it *does* survive undo — see [`Clipboard`].
@@ -274,6 +284,7 @@ impl Editor {
     pub fn new(model: VoxelModel, path: PathBuf) -> Self {
         let mut editor = Self {
             document_id: next_document_id(),
+            collapsed: Default::default(),
             camera: OrbitCamera::default(),
             tool: Tool::Build,
             span: Span::default(),
@@ -1520,6 +1531,28 @@ impl Editor {
         result
     }
 
+    /// Whether an object's row in the layer panel is folded shut.
+    pub fn is_collapsed(&self, object: usize) -> bool {
+        self.collapsed.contains(&object)
+    }
+
+    /// Fold an object's row open or shut. A view change: it does not dirty the
+    /// document, and there is nothing to undo.
+    pub fn toggle_collapsed(&mut self, object: usize) {
+        if !self.collapsed.remove(&object) {
+            self.collapsed.insert(object);
+        }
+    }
+
+    /// Flip an object's visibility, for the panel's click target.
+    pub fn toggle_object_visible(&mut self, object: usize) -> bool {
+        let Some(o) = self.model.objects().get(object) else {
+            return false;
+        };
+        let visible = !o.visible;
+        self.set_object_visible(object, visible)
+    }
+
     pub fn object_name(&self, i: usize) -> String {
         self.model
             .objects()
@@ -2168,6 +2201,7 @@ impl Editor {
         self.document_id = next_document_id();
         self.selection = None;
         self.clipboard = None;
+        self.collapsed.clear();
         self.model = model;
         self.path = path;
         self.history.reset();
@@ -2189,6 +2223,7 @@ impl Editor {
         self.document_id = next_document_id();
         self.selection = None;
         self.clipboard = None;
+        self.collapsed.clear();
         // A slice past the new model's height would hide all of it.
         let sy = model.size()[1];
         if self.slice.is_some_and(|s| s >= sy) {

@@ -2,16 +2,19 @@
 
 ## Overview
 
-A voxel model editor and the software renderer under it. This is the 3D
-successor to `rs-kessel`, but it is **not** an extension of it: Kessel's VM is a
-deterministic integer machine, and carrying that constraint into a projection
-matrix would buy nothing. Floats live freely in this workspace. When a Luax
-bridge eventually appears, the integer boundary sits at *that* edge — not
-inside the renderer.
+A voxel model editor and the software renderer under it. It is a tool for
+making models — by hand at the window, or by an agent over MCP — and the
+renderer exists to show you what you are making.
 
-The project order is asset → renderer → one game → only the API that game
-needed. Steps 1–3 exist; steps 4–7 (scene graph, Luax bridge, first game,
-then collision/chunks/animation) do not.
+It is **not** a game engine, and is not on its way to becoming one. Floats live
+freely here; there is no VM, no entity system and no plan for one. What the
+project invests in instead is the modelling surface: layers, objects,
+instances, selections, and an agent-facing API precise enough that "make the
+left arm longer" is an operation rather than a coordinate hunt.
+
+Some design notes below compare a decision with `rs-kessel`, which shares this
+project's MCP and `attach` patterns. Those are comparisons of *mechanism*, and
+nothing more should be read into them.
 
 ## Architecture
 
@@ -145,6 +148,40 @@ The layer panel draws four states for that reason — filled for on screen,
 filled with a notch for an instance's copy, hollow with a pip for "switched on,
 hidden by an object", hollow for switched off here. Filled would be a lie about
 the screen; plain hollow would make `V` look broken.
+
+### The panel is the tree, and the hit test is not an inverse
+
+The panel used to list layers flat, so the object tree existed in the file and
+over MCP and was invisible at the window — the pip was the only hint that
+objects were a thing at all. It now draws objects with their layers under them,
+indented, with a switch and a fold on each object row.
+
+`hud::panel_rows` is what makes that safe. The flat panel's `layer_hit` was a
+hand-written *inverse* of the drawing code: correct, tested row by row, and a
+standing invitation to drift. A tree makes that inverse harder — rows are no
+longer "layer count minus one minus n", and the switch moves with the indent —
+so there is no longer an inverse. The row list is built once and **both** the
+drawing and the hit test index into it. They cannot disagree about what row
+four is, because there is one answer to that question.
+
+Three rules:
+
+- **Objects in arena order; layers within an object still top of the stack
+  first.** What this gives up is reading the *whole* stack's order off the
+  panel: two layers in different objects appear in tree order, not stack order.
+  That is the trade for showing the tree at all, and it is the right way round —
+  the tree is what the file, the MCP surface and every "make the left arm
+  longer" is expressed in.
+- **The switch and the fold are separate targets.** On an object row the switch
+  hides the part and anywhere else folds it. "Stop showing the arm" and "stop
+  listing the arm's layers" are different intentions, and a panel that guessed
+  between them would be wrong half the time.
+- **A fold is not data.** `Editor::collapsed` is view state: not saved, not
+  undoable, dropped with the selection and the clipboard when the document is
+  replaced. It is held by object index, which is the one wart — removing an
+  object renumbers the ones above it, so a fold can end up on a neighbour. One
+  click puts it right, and the alternative is an identity on `Object` that the
+  file format would have to carry for the sake of a triangle in a panel.
 
 ### An instance is a reference, and it is baked
 

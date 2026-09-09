@@ -1,12 +1,11 @@
 # rs-voxeler
 
-A voxel model editor and software renderer in Rust — the 3D successor to
-[`rs-kessel`](../rs-kessel), and a Rust rewrite of the ideas in the Python
-`voxeler`.
+A voxel model editor and software renderer in Rust, a rewrite of the ideas in
+the Python `voxeler`.
 
-The first milestone is deliberately small: **build a model in your own editor,
-save it, load it back, and see it rendered.** No VM, no scene graph, no game
-yet — those come after the asset pipeline is real.
+It is a tool for **making models** — by hand at the window, or by an agent over
+MCP — and the renderer under it exists to show you what you are making. It is
+not a game engine and is not becoming one.
 
 ```bash
 cd crates && cargo build --release
@@ -317,9 +316,24 @@ SCENE
 ```
 
 Hiding an object hides every layer inside it without touching their own
-switches, so showing it again restores exactly what was shown before. The layer
-panel draws that third state as a hollow box with a dot in it: switched on, but
-something above it is hidden.
+switches, so showing it again restores exactly what was shown before.
+
+The panel on the right draws the tree, so the parts are visible at the window
+and not only in the file:
+
+```
+  SCENE
+    LAYER 1                0
+  - ROBOT
+      BODY              1512
+    - ARM L                     <- hollow switch: this part is hidden
+        UPPER            216    <- hollow with a pip: switched on, hidden by ARM L
+    - ARM R
+        MIRRORED         216    <- filled with a notch: an instance's copy
+```
+
+On an object row the switch hides that part and anywhere else folds it shut.
+On a layer row the switch toggles the layer and anywhere else selects it.
 
 `move_object` moves a part and everything under it by whole voxels. Nothing is
 re-created — each layer's box slides — so moving a finished robot costs the same
@@ -618,19 +632,20 @@ The existing batch candidate budget and all-or-nothing, one-undo semantics apply
 
 ## Roadmap
 
-The order is asset → renderer → one game → only the API that game needed:
+The three crates are in place — `voxel-core` (model, palette, `.vox` interop),
+`voxel-render` (visible faces, camera, z-buffer, flat light) and `voxeler` (the
+editor and its agent surface). What comes next is judged by whether it makes
+*modelling* better:
 
-1. ~~`voxel-core` — model, palette, `.vox` interop~~
-2. ~~`voxeler` — the model editor~~
-3. ~~`voxel-render` — visible faces, camera, z-buffer, flat light~~
-4. `voxel-scene` — entities, transforms, parent-child
-5. a Luax bridge — spawn, transform, camera, render
-6. one fixed-camera action game
-7. and only then: collision, world chunks, animation, particles
+- **Getting models out.** `.vox` caps at 256³ and cannot express the layer
+  stack. Interchange for printing and for other tools is [#36](https://github.com/fpt/rs-voxeler/issues/36).
+- **Greedy meshing**, which is the lever on rendering cost at large scenes.
+- **Cheaper undo for bulk edits** — [#40](https://github.com/fpt/rs-voxeler/issues/40).
+- **Sparse storage**, if an unbounded canvas is ever wanted — [#18](https://github.com/fpt/rs-voxeler/issues/18),
+  where it is measured and deliberately gated.
 
-Deliberately *not* on that list yet: greedy meshing, a world editor, chunked
-terrain, bone skinning, frame animation. Each is a real thing to want and each
-would be built on the wrong foundation today.
+Deliberately *not* on that list: an entity system, a scripting bridge, physics,
+a game. Those were once the plan and are not any more.
 
 ## Licence
 
