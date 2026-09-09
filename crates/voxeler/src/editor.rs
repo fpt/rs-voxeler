@@ -2576,13 +2576,41 @@ impl Editor {
     /// `.vox` has nowhere to put a layer stack, so an export writes what is on
     /// screen as one model. Saying so is the point: losing layers quietly is
     /// how someone ends up treating the export as their save.
-    pub fn export_vox(&mut self) {
-        let path = self.path.with_extension("vox");
+    /// Write the model out beside the working file, in a format something else
+    /// reads.
+    ///
+    /// An export is not a save: the document stays dirty, because it is. And
+    /// the status says what each format gave up — `.vox` flattens the stack and
+    /// stops at 256 a side, where `.3mf` and `.obj` keep the parts.
+    pub fn export_as(&mut self, extension: &str) {
+        let path = self.path.with_extension(extension);
+        let dirty = self.dirty;
         self.save_as(&path);
-        let layers = self.model.layer_count();
-        if layers > 1 && self.status.starts_with("saved") {
-            self.status = format!("{} — {layers} layers flattened into one", self.status);
+        // `save_as` is the document's own save and clears the flag. An export
+        // has not written the document, so it goes back.
+        self.dirty = dirty;
+        if !self.status.starts_with("saved") {
+            return;
         }
+        let layers = self.model.layer_count();
+        self.status = match extension {
+            "vox" if layers > 1 => {
+                format!("{} — {layers} layers flattened into one", self.status)
+            }
+            "vox" => self.status.clone(),
+            _ => {
+                let parts = voxel_core::format::surface::parts(
+                    &self.model,
+                    voxel_core::format::surface::Grouping::Objects,
+                )
+                .len();
+                format!("{} — {parts} parts, 1 voxel = 1 mm", self.status)
+            }
+        };
+    }
+
+    pub fn export_vox(&mut self) {
+        self.export_as("vox");
     }
 
     /// Replace the document wholesale: a different model, under a different

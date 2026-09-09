@@ -13,7 +13,11 @@
 //! control.
 
 pub mod native;
+pub mod obj;
+pub mod surface;
+pub mod threemf;
 pub mod vox;
+pub(crate) mod zip;
 
 use std::path::Path;
 
@@ -29,18 +33,53 @@ pub fn load(path: &Path) -> Result<VoxelModel> {
     }
 }
 
-/// Save by extension, matching [`load`].
+/// One voxel is one millimetre, which is what an export that names a unit
+/// assumes unless told otherwise.
+///
+/// A 32³ character is then 32 mm — about right for a desk print, and easy
+/// arithmetic to scale from.
+pub const MM_PER_VOXEL: f32 = 1.0;
+
+/// Whether a path names a format that can only be *written*.
+///
+/// The interchange formats are one-way on purpose. Reading OBJ or 3MF back
+/// would mean voxelising an arbitrary mesh, which is a different program: the
+/// document format is `.vxm`, and these are what a finished model leaves in.
+pub fn is_export_only(path: &Path) -> bool {
+    ["obj", "3mf", "stl"].iter().any(|e| has_extension(path, e))
+}
+
+/// Save by extension, matching [`load`] where the format can be read back.
+///
+/// `.obj` writes a `.mtl` beside itself, because OBJ has no colour of its own
+/// and a model exported without one arrives grey.
 pub fn save(path: &Path, model: &VoxelModel) -> Result<()> {
-    let bytes = if has_extension(path, "vox") {
+    if has_extension(path, "obj") {
+        let mtl_path = path.with_extension("mtl");
+        let mtl_name = mtl_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model.mtl".into());
+        let out = obj::export(model, &mtl_name, MM_PER_VOXEL);
+        write_atomically(&mtl_path, out.mtl.as_bytes())?;
+        return write_atomically(path, out.obj.as_bytes());
+    }
+    let bytes = if has_extension(path, "3mf") {
+        threemf::export(model, MM_PER_VOXEL)
+    } else if has_extension(path, "vox") {
         vox::export(model)?
     } else {
         native::encode(model)
     };
-    // Write through a sibling temp file and rename, so a crash or a full disk
-    // midway through leaves the previous save intact rather than a truncated
-    // file where the user's model used to be.
+    write_atomically(path, &bytes)
+}
+
+/// Write through a sibling temp file and rename, so a crash or a full disk
+/// midway through leaves the previous file intact rather than a truncated one
+/// where the user's model used to be.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp-save");
-    std::fs::write(&tmp, &bytes)?;
+    std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

@@ -1199,6 +1199,37 @@ from the one that was asked for.
   oldest are additionally **trimmed** on the way in, so they gain the smaller
   shape by being opened. A file already on disk is not free to rewrite itself.
   That rule has now held five times.
+- **An export names its unit, so a voxel has to become a length.** One voxel is
+  one millimetre (`format::MM_PER_VOXEL`), which makes a 32³ character 32 mm —
+  about right for a desk print and easy arithmetic to scale from. `.vxm` and
+  `.vox` are unitless and unaffected.
+- **The exporters share one surface extractor, and it is not the renderer's.**
+  `format::surface` welds corners — a cube is eight vertices, not twenty-four —
+  because that is what makes a mesh *manifold*, which is the thing a slicer
+  needs and the thing an unwelded soup renders identically without. It cannot be
+  `voxel-render::mesh`: that culls back faces, keeps quads per chunk for
+  incremental rebuilds, and knows nothing about which part a cell belongs to —
+  and `voxel-core` cannot depend on `voxel-render` anyway, which is what keeps
+  the arrow pointing one way.
+- **A part is closed on its own.** Under `Grouping::Objects` a face is emitted
+  wherever the neighbour is not in the *same* part, so two parts that touch each
+  get their own wall. Sharing it would leave both open. Checked by a property
+  rather than a count: a closed genus-0 surface satisfies `V - E + F = 2`, which
+  a mesh with a hole or a duplicated vertex fails and a face count does not.
+- **A file is the model, not the view.** Hidden layers are exported, the rule
+  `format::native` already follows — hiding a layer to work on what is under it
+  must not quietly drop it from a file.
+- **`.obj` is for editing, `.3mf` is for printing, and the difference is quads.**
+  OBJ keeps them, which is what a voxel surface is made of; a modeller handed
+  triangles has twice the faces and a diagonal through each. 3MF has no quads,
+  so each becomes two triangles sharing its diagonal — but it carries units,
+  several named objects and colour, which is what a slicer wants and what `.vox`
+  and STL cannot say. The ZIP writer is hand-rolled and stored-only, for the
+  reason the PNG writer is: the alternative reads six compression methods for a
+  format we only write.
+- **The interchange formats are write-only.** Reading OBJ or 3MF back means
+  voxelising an arbitrary mesh, which is a different program. `.vxm` is the
+  document; these are what a finished model leaves in.
 - **An export is a flatten.** `.vox` has nowhere to put a stack, so `ctrl+E`
   writes the composite as one model and the status line says how many layers
   went into it. Doing otherwise means the nTRN/nGRP/nSHP scene graph a

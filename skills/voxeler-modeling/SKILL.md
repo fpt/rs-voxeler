@@ -184,6 +184,11 @@ reconnect or unexpected result, describe again before writing. If identity has
 changed unexpectedly, stop the edit sequence and establish the working document;
 do not blindly replay edits or replace unsaved work. Stop batches on tool errors.
 
+`export_model` writes the model somewhere else: `.3mf` for printing (millimetres,
+one object per part of the tree, each watertight), `.obj` for editing elsewhere
+(quads, with a `.mtl` beside it), `.vox` for MagicaVoxel (flattened, 256 max).
+An export is not a save — the document stays unsaved, and the report says so.
+
 After saving, confirm size, layers and save state. Prefer `compare_saved_model`
 for native document equality without discarding undo history. Deliver the model link
 and an actual voxeler-rendered preview, noting any material differences from
