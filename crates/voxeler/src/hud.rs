@@ -73,11 +73,83 @@ const ROW: u32 = text_height(TEXT_SCALE) + 6;
 /// The visibility box at the head of each row.
 const EYE: u32 = 9;
 
+/// How far one level of the tree steps in.
+const INDENT: u32 = 9;
+/// The fold triangle at the head of an object row.
+const TWISTY: u32 = 7;
+
+/// One line of the layer panel: an object, or a layer inside one.
+///
+/// The panel used to be a flat list, and `layer_hit` was a hand-written inverse
+/// of the drawing code — correct, tested row by row, and a standing invitation
+/// to drift. A tree makes that inverse harder, so there is no longer an inverse:
+/// [`panel_rows`] is built once and *both* the drawing and the hit test index
+/// into it. They cannot disagree about where row four is, because there is one
+/// answer to that question.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelRow {
+    Object {
+        index: usize,
+        depth: u32,
+        /// Whether it has anything to fold — layers or child objects.
+        holds: bool,
+    },
+    Layer {
+        index: usize,
+        depth: u32,
+    },
+}
+
+/// The panel's rows, top to bottom.
+///
+/// Objects in arena order — parents before children, which the arena already
+/// guarantees — with each object's own layers under it. Within an object the
+/// layers are still drawn **top of the stack first**, the rule the flat list
+/// followed, because a layer that covers another is above it on screen.
+///
+/// What this gives up is reading the *whole* stack's order off the panel: two
+/// layers in different objects are drawn in tree order rather than stack order.
+/// That is the trade for showing the tree at all, and it is the right way round
+/// — the tree is what the file, the MCP surface and every "make the left arm
+/// longer" is expressed in, and it was previously invisible at the window.
+pub fn panel_rows(editor: &Editor) -> Vec<PanelRow> {
+    let model = editor.model();
+    let mut rows = Vec::new();
+    fn walk(editor: &Editor, object: usize, depth: u32, rows: &mut Vec<PanelRow>) {
+        let model = editor.model();
+        let layers: Vec<usize> = model.object_layers(object);
+        let children: Vec<usize> = (0..model.object_count())
+            .filter(|i| model.objects()[*i].parent == Some(object))
+            .collect();
+        rows.push(PanelRow::Object {
+            index: object,
+            depth,
+            holds: !layers.is_empty() || !children.is_empty(),
+        });
+        if editor.is_collapsed(object) {
+            return;
+        }
+        for &n in layers.iter().rev() {
+            rows.push(PanelRow::Layer {
+                index: n,
+                depth: depth + 1,
+            });
+        }
+        for child in children {
+            walk(editor, child, depth + 1, rows);
+        }
+    }
+    if model.object_count() > 0 {
+        walk(editor, 0, 0, &mut rows);
+    }
+    rows
+}
+
 /// The layer panel sits directly under the palette, same width, so the right
 /// hand side is one column of controls rather than two things at different
 /// margins.
-fn layers_panel_height(layers: usize) -> u32 {
-    text_height(TEXT_SCALE) + PAD + layers as u32 * ROW + PAD * 2
+fn layers_panel_height(rows: usize) -> u32 {
+    text_height(TEXT_SCALE) + PAD + rows as u32 * ROW + PAD * 2
 }
 
 /// Top-left of the first *row*, past the panel's own heading.
@@ -91,33 +163,37 @@ fn layers_origin(fb_width: u32) -> (i32, i32) {
 /// What a click on the layer panel means.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LayerHit {
-    /// The layer's index in the model, counting from the bottom of the stack.
-    pub index: usize,
+    /// The row that was hit, exactly as it was drawn.
+    pub row: PanelRow,
     /// Whether the visibility box was hit rather than the row's name.
     pub on_eye: bool,
 }
 
-/// The layer under a framebuffer pixel, or `None` off the list.
+/// Where a row's visibility box starts, given its depth.
+fn eye_x(ox: i32, depth: u32) -> i32 {
+    ox + (depth * INDENT) as i32
+}
+
+/// The row under a framebuffer pixel, or `None` off the list.
 ///
-/// The exact inverse of [`draw_layers`], and next to it for the same reason
-/// [`palette_hit`] is next to the swatch layout: rows are twenty pixels apart
-/// and a hit test one row out silently edits the wrong layer.
-pub fn layer_hit(fb_width: u32, layers: usize, x: f32, y: f32) -> Option<LayerHit> {
+/// Indexes the same [`panel_rows`] the drawing walks, so this is a lookup
+/// rather than an inverse. Only the *horizontal* split is worked out here, and
+/// it is measured from the row's own indent — the eye of a nested row is not
+/// where the eye of a top-level row is.
+pub fn layer_hit(fb_width: u32, rows: &[PanelRow], x: f32, y: f32) -> Option<LayerHit> {
     let (ox, oy) = layers_origin(fb_width);
     let (dx, dy) = (x - ox as f32, y - oy as f32);
     if dx < 0.0 || dy < 0.0 || dx >= (panel_width() - PAD * 2) as f32 {
         return None;
     }
-    let row = (dy as u32) / ROW;
-    if row as usize >= layers {
-        return None;
-    }
-    // The list is drawn top of the stack first, which is the opposite of the
-    // model's own order: a layer that covers another is *above* it, on screen
-    // and in the array both, and only one of those counts downwards.
+    let row = *rows.get((dy as u32 / ROW) as usize)?;
+    let depth = match row {
+        PanelRow::Object { depth, .. } | PanelRow::Layer { depth, .. } => depth,
+    };
+    let eye = eye_x(ox, depth) - ox;
     Some(LayerHit {
-        index: layers - 1 - row as usize,
-        on_eye: dx < EYE as f32,
+        row,
+        on_eye: (eye as f32..(eye + EYE as i32) as f32).contains(&dx),
     })
 }
 
@@ -127,8 +203,8 @@ pub fn layer_hit(fb_width: u32, layers: usize, x: f32, y: f32) -> Option<LayerHi
 /// the whole right-hand strip of the window swallow clicks — the panels only
 /// cover their top few hundred rows, and below that the viewport reaches the
 /// window edge like anywhere else.
-pub fn over_panel(fb_width: u32, layers: usize, x: f32, y: f32) -> bool {
-    let bottom = palette_height() + layers_panel_height(layers);
+pub fn over_panel(fb_width: u32, rows: usize, x: f32, y: f32) -> bool {
+    let bottom = palette_height() + layers_panel_height(rows);
     x >= panel_x(fb_width) as f32 && (0.0..bottom as f32).contains(&y)
 }
 
@@ -189,7 +265,8 @@ pub fn draw(fb: &mut Framebuffer, editor: &Editor) {
 /// the count being the one number that says whether a layer you cannot see is
 /// empty or merely hidden.
 fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
-    let layers = editor.model().layers();
+    let rows = panel_rows(editor);
+    let model = editor.model();
     let x0 = panel_x(fb.width());
     let width = panel_width();
     let top = palette_height() as i32;
@@ -198,7 +275,7 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
         x0,
         top,
         width,
-        layers_panel_height(layers.len()),
+        layers_panel_height(rows.len()),
         PANEL_BG,
         220,
     );
@@ -206,72 +283,118 @@ fn draw_layers(fb: &mut Framebuffer, editor: &Editor) {
         fb,
         x0 + PAD as i32,
         top + PAD as i32,
-        "LAYERS",
+        "OBJECTS",
         DIM,
         TEXT_SCALE,
     );
 
     let (ox, oy) = layers_origin(fb.width());
     let inner = panel_width() - PAD * 2;
-    for (row, n) in (0..layers.len()).rev().enumerate() {
-        let layer = &layers[n];
-        let y = oy + (row as u32 * ROW) as i32;
-        let active = n == editor.active_layer();
-        if active {
-            overlay::blend_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT, 40);
-            overlay::stroke_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT);
-        }
+    for (n, row) in rows.iter().enumerate() {
+        let y = oy + (n as u32 * ROW) as i32;
+        match *row {
+            PanelRow::Object {
+                index,
+                depth,
+                holds,
+            } => {
+                let object = &model.objects()[index];
+                let bx = eye_x(ox, depth);
+                let box_y = y + (ROW as i32 - EYE as i32) / 2;
+                // An object's switch is drawn hollow-or-filled and nothing
+                // else: an object has no "hidden by something above it" state
+                // of its own to show, because that *is* what it does to the
+                // things under it.
+                if object.visible {
+                    overlay::fill_rect(fb, bx, box_y, EYE, EYE, DIM);
+                } else {
+                    overlay::stroke_rect(fb, bx, box_y, EYE, EYE, DIM);
+                }
+                // The fold marker, after the switch: a bar when open, a bar
+                // and a stem when shut, so "there is more here" reads without
+                // colour and without a glyph the 5x7 font does not have.
+                let tx = bx + EYE as i32 + 4;
+                if holds {
+                    let ty = y + ROW as i32 / 2 - 1;
+                    overlay::fill_rect(fb, tx, ty, TWISTY, 2, DIM);
+                    if editor.is_collapsed(index) {
+                        overlay::fill_rect(fb, tx + TWISTY as i32 / 2 - 1, ty - 3, 2, TWISTY, DIM);
+                    }
+                }
+                let name_x = tx + TWISTY as i32 + 4;
+                let room = fit_chars((ox + inner as i32 - name_x).max(0) as u32);
+                overlay::text(
+                    fb,
+                    name_x,
+                    y + 3,
+                    &fit_head(&object.name, room),
+                    if object.visible { TEXT } else { DIM },
+                    TEXT_SCALE,
+                );
+            }
+            PanelRow::Layer { index, depth } => {
+                let layer = &model.layers()[index];
+                let active = index == editor.active_layer();
+                let bx = eye_x(ox, depth);
+                if active {
+                    overlay::blend_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT, 40);
+                    overlay::stroke_rect(fb, ox - 2, y - 1, inner + 4, ROW, ACCENT);
+                }
 
-        // Four states, because a layer can be off for two different reasons and
-        // only one of them is undone by pressing V on it — and because one kind
-        // of layer is on screen and still not somewhere you can draw:
-        //
-        //   filled          on screen
-        //   filled + notch  on screen, an instance's copy, refuses writes
-        //   hollow + pip    switched on, but an object above it is hidden
-        //   hollow          switched off here
-        //
-        // Drawing the third case as filled would be a straight lie about what
-        // is on screen; drawing it as plain hollow would make V look broken.
-        // Drawing the second as an ordinary layer would make a click on it look
-        // like a broken editor rather than a rule.
-        let box_y = y + (ROW as i32 - EYE as i32) / 2;
-        if layer.is_generated() {
-            overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { DIM });
-            // A bite out of the corner: the same square, minus a piece, for a
-            // layer that is the same picture minus the ability to change it.
-            overlay::fill_rect(fb, ox + EYE as i32 - 3, box_y, 3, 3, PANEL_BG);
-        } else if layer.shown() {
-            overlay::fill_rect(fb, ox, box_y, EYE, EYE, if active { ACCENT } else { TEXT });
-        } else {
-            overlay::stroke_rect(fb, ox, box_y, EYE, EYE, DIM);
-            if layer.visible {
-                overlay::fill_rect(fb, ox + 2, box_y + 2, EYE - 4, EYE - 4, DIM);
+                // Four states, because a layer can be off for two different
+                // reasons and only one of them is undone by pressing V on it —
+                // and because one kind of layer is on screen and still not
+                // somewhere you can draw:
+                //
+                //   filled          on screen
+                //   filled + notch  on screen, an instance's copy, refuses writes
+                //   hollow + pip    switched on, but an object above it is hidden
+                //   hollow          switched off here
+                //
+                // Drawing the third case as filled would be a straight lie
+                // about what is on screen; drawing it as plain hollow would
+                // make V look broken. Drawing the second as an ordinary layer
+                // would make a click on it look like a broken editor rather
+                // than a rule.
+                let box_y = y + (ROW as i32 - EYE as i32) / 2;
+                if layer.is_generated() {
+                    overlay::fill_rect(fb, bx, box_y, EYE, EYE, if active { ACCENT } else { DIM });
+                    overlay::fill_rect(fb, bx + EYE as i32 - 3, box_y, 3, 3, PANEL_BG);
+                } else if layer.shown() {
+                    overlay::fill_rect(fb, bx, box_y, EYE, EYE, if active { ACCENT } else { TEXT });
+                } else {
+                    overlay::stroke_rect(fb, bx, box_y, EYE, EYE, DIM);
+                    if layer.visible {
+                        overlay::fill_rect(fb, bx + 2, box_y + 2, EYE - 4, EYE - 4, DIM);
+                    }
+                }
+
+                // The count is right-aligned, so the name gets whatever is
+                // left over rather than being cut to a fixed column that is
+                // wrong at both ends.
+                let count = layer.filled_count().to_string();
+                let count_w = text_width(&count, TEXT_SCALE);
+                let name_x = bx + EYE as i32 + 5;
+                let room =
+                    fit_chars((ox + inner as i32 - count_w as i32 - 6 - name_x).max(0) as u32);
+                overlay::text(
+                    fb,
+                    name_x,
+                    y + 3,
+                    &fit_head(&layer.name, room),
+                    if active { ACCENT } else { TEXT },
+                    TEXT_SCALE,
+                );
+                overlay::text(
+                    fb,
+                    ox + inner as i32 - count_w as i32,
+                    y + 3,
+                    &count,
+                    DIM,
+                    TEXT_SCALE,
+                );
             }
         }
-
-        // The count is right-aligned, so the name gets whatever is left over
-        // rather than being cut to a fixed column that is wrong at both ends.
-        let count = layer.filled_count().to_string();
-        let count_w = text_width(&count, TEXT_SCALE);
-        let name_x = ox + EYE as i32 + 5;
-        let room = fit_chars((ox + inner as i32 - count_w as i32 - 6 - name_x).max(0) as u32);
-        overlay::text(
-            fb,
-            name_x,
-            y + 3,
-            &fit_head(&layer.name, room),
-            if active { ACCENT } else { TEXT },
-            TEXT_SCALE,
-        );
-        overlay::text(
-            fb,
-            ox + inner as i32 - count_w as i32,
-            y + 3,
-            &count,
-            DIM,
-            TEXT_SCALE,
-        );
     }
 }
 
@@ -571,6 +694,21 @@ mod tests {
         );
     }
 
+    /// A scene with a nested part, two layers in it and one at the root —
+    /// enough shape that a tree and a flat list disagree about every row.
+    fn tree_editor() -> Editor {
+        use std::path::PathBuf;
+        use voxel_core::VoxelModel;
+        let mut e = Editor::new(VoxelModel::new(8, 8, 8), PathBuf::from("t.vxm"));
+        e.add_object(0, "ROBOT");
+        e.add_object(1, "ARM");
+        e.add_named_layer("BODY", Default::default());
+        e.add_named_layer("HAND", Default::default());
+        e.set_layer_object(1, 1);
+        e.set_layer_object(2, 2);
+        e
+    }
+
     /// The panel is a box, not a column. Claiming the whole right-hand strip
     /// left a tall dead zone where clicks in the viewport did nothing.
     #[test]
@@ -592,54 +730,146 @@ mod tests {
             !over_panel(fb_w, 1, 799.0, bottom + 1.0),
             "below it is viewport"
         );
-        // And it grows with the stack, or the lower rows swallow no clicks and
+        // And it grows with the rows, or the lower ones swallow no clicks and
         // pass them to the model behind.
         assert!(over_panel(fb_w, 8, 799.0, bottom + 1.0));
     }
 
-    /// The inverse has to be exact here too: rows are twenty pixels apart, and
-    /// a hit test one row out edits a layer the user was not pointing at.
+    /// The tree the panel draws: objects in arena order, each one's layers
+    /// under it, and within an object still top of the stack first.
     #[test]
-    fn a_click_selects_the_layer_row_drawn_under_it() {
+    fn the_panel_lists_objects_with_their_layers_under_them() {
+        let e = tree_editor();
+        assert_eq!(
+            panel_rows(&e),
+            vec![
+                PanelRow::Object {
+                    index: 0,
+                    depth: 0,
+                    holds: true
+                },
+                PanelRow::Layer { index: 0, depth: 1 },
+                PanelRow::Object {
+                    index: 1,
+                    depth: 1,
+                    holds: true
+                },
+                PanelRow::Layer { index: 1, depth: 2 },
+                PanelRow::Object {
+                    index: 2,
+                    depth: 2,
+                    holds: true
+                },
+                PanelRow::Layer { index: 2, depth: 3 },
+            ],
+        );
+    }
+
+    /// Folding removes rows from the panel and from the hit test at once,
+    /// because they are the same list.
+    #[test]
+    fn folding_an_object_hides_everything_under_it() {
+        let mut e = tree_editor();
+        e.toggle_collapsed(1);
+        assert_eq!(
+            panel_rows(&e),
+            vec![
+                PanelRow::Object {
+                    index: 0,
+                    depth: 0,
+                    holds: true
+                },
+                PanelRow::Layer { index: 0, depth: 1 },
+                PanelRow::Object {
+                    index: 1,
+                    depth: 1,
+                    holds: true
+                },
+            ],
+            "ROBOT is shut, so its layer and the ARM under it are gone"
+        );
+        e.toggle_collapsed(1);
+        assert_eq!(panel_rows(&e).len(), 6, "and open again puts them back");
+    }
+
+    /// The inverse has to be exact here too: rows are twenty pixels apart, and
+    /// a hit test one row out edits something the user was not pointing at.
+    /// There is no inverse any more — this walks the rows the panel draws and
+    /// asks for the middle of each one back.
+    #[test]
+    fn a_click_lands_on_the_row_drawn_under_it() {
         let fb_w = 800;
-        let layers = 5;
+        let e = tree_editor();
+        let rows = panel_rows(&e);
         let (ox, oy) = layers_origin(fb_w);
-        for row in 0..layers {
-            let x = ox as f32 + EYE as f32 + 10.0;
-            let y = oy as f32 + (row as u32 * ROW) as f32 + ROW as f32 / 2.0;
-            let hit = layer_hit(fb_w, layers, x, y).expect("row {row}");
-            assert_eq!(
-                hit.index,
-                layers - 1 - row,
-                "the list is drawn top of the stack first"
+        for (n, want) in rows.iter().enumerate() {
+            let y = oy as f32 + (n as u32 * ROW) as f32 + ROW as f32 / 2.0;
+            // Well to the right of any indent, so this is a name hit whatever
+            // depth the row sits at.
+            let x = ox as f32 + (panel_width() - PAD * 2) as f32 - 2.0;
+            let hit = layer_hit(fb_w, &rows, x, y).unwrap_or_else(|| panic!("row {n}"));
+            assert_eq!(&hit.row, want, "row {n}");
+            assert!(!hit.on_eye, "row {n} is a name hit");
+        }
+    }
+
+    /// The switch is a target of its own, and it moves with the indent — the
+    /// eye of a nested row is not where a top-level row's eye is, and testing
+    /// only the first would have missed that.
+    #[test]
+    fn the_visibility_box_follows_the_indent() {
+        let fb_w = 800;
+        let e = tree_editor();
+        let rows = panel_rows(&e);
+        let (ox, oy) = layers_origin(fb_w);
+        for (n, row) in rows.iter().enumerate() {
+            let depth = match *row {
+                PanelRow::Object { depth, .. } | PanelRow::Layer { depth, .. } => depth,
+            };
+            let y = oy as f32 + (n as u32 * ROW) as f32 + ROW as f32 / 2.0;
+            let eye = eye_x(ox, depth) as f32;
+            assert!(
+                layer_hit(fb_w, &rows, eye + 1.0, y).unwrap().on_eye,
+                "row {n} at depth {depth}"
             );
-            assert!(!hit.on_eye);
+            // Just left of it is indent, not switch — which is what stops a
+            // click on a nested row's blank space toggling something. Only
+            // meaningful once there *is* an indent: at depth 0 the switch
+            // starts at the panel's edge and two pixels left of it is not the
+            // panel at all.
+            if depth > 0 {
+                assert!(
+                    !layer_hit(fb_w, &rows, eye - 2.0, y).unwrap().on_eye,
+                    "row {n}: the indent is not the switch"
+                );
+            }
+            assert!(
+                !layer_hit(fb_w, &rows, eye + EYE as f32 + 1.0, y)
+                    .unwrap()
+                    .on_eye,
+                "row {n}: past the switch is the name"
+            );
         }
     }
 
     #[test]
-    fn the_visibility_box_is_a_target_of_its_own() {
+    fn clicks_outside_the_panel_rows_select_nothing() {
         let fb_w = 800;
+        let e = tree_editor();
+        let rows = panel_rows(&e);
         let (ox, oy) = layers_origin(fb_w);
-        let y = oy as f32 + ROW as f32 / 2.0;
-        assert!(layer_hit(fb_w, 3, ox as f32 + 2.0, y).unwrap().on_eye);
-        assert!(
-            !layer_hit(fb_w, 3, ox as f32 + EYE as f32 + 1.0, y)
-                .unwrap()
-                .on_eye
+        assert_eq!(
+            layer_hit(fb_w, &rows, ox as f32 - 1.0, oy as f32 + 4.0),
+            None
         );
-    }
-
-    #[test]
-    fn clicks_outside_the_layer_list_select_nothing() {
-        let fb_w = 800;
-        let (ox, oy) = layers_origin(fb_w);
-        assert_eq!(layer_hit(fb_w, 3, ox as f32 - 1.0, oy as f32 + 4.0), None);
-        assert_eq!(layer_hit(fb_w, 3, ox as f32 + 4.0, oy as f32 - 1.0), None);
-        // Past the last row: the panel is taller than its rows when the stack
-        // is short, and the space below them is not layer 0.
-        let below = oy as f32 + (3 * ROW) as f32 + 1.0;
-        assert_eq!(layer_hit(fb_w, 3, ox as f32 + 4.0, below), None);
+        assert_eq!(
+            layer_hit(fb_w, &rows, ox as f32 + 4.0, oy as f32 - 1.0),
+            None
+        );
+        // Past the last row: the panel is taller than its rows when the tree is
+        // short, and the space below them is not the root object.
+        let below = oy as f32 + (rows.len() as u32 * ROW) as f32 + 1.0;
+        assert_eq!(layer_hit(fb_w, &rows, ox as f32 + 4.0, below), None);
     }
 
     /// A palette click and a layer click must not both fire: the two hit tests
@@ -650,8 +880,12 @@ mod tests {
         let (lx, ly) = layers_origin(fb_w);
         assert_eq!(palette_hit(fb_w, lx as f32 + 4.0, ly as f32 + 4.0), None);
 
+        let rows = panel_rows(&tree_editor());
         let (px, py) = grid_origin(fb_w);
-        assert_eq!(layer_hit(fb_w, 8, px as f32 + 4.0, py as f32 + 4.0), None);
+        assert_eq!(
+            layer_hit(fb_w, &rows, px as f32 + 4.0, py as f32 + 4.0),
+            None
+        );
     }
 
     #[test]

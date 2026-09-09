@@ -176,7 +176,7 @@ impl App {
         }
         self.hover = match self.cursor {
             Some((x, y))
-                if !hud::over_panel(self.fb.width(), self.editor.model().layer_count(), x, y) =>
+                if !hud::over_panel(self.fb.width(), hud::panel_rows(&self.editor).len(), x, y) =>
             {
                 self.editor
                     .target_at(x, y, self.fb.width(), self.fb.height())
@@ -215,15 +215,30 @@ impl App {
 
         // A click on a panel is a choice, never an edit — and never a camera
         // drag either, or picking a colour would spin the model.
-        let layers = self.editor.model().layer_count();
-        if button == MouseButton::Left && hud::over_panel(self.fb.width(), layers, x, y) {
+        let rows = hud::panel_rows(&self.editor);
+        if button == MouseButton::Left && hud::over_panel(self.fb.width(), rows.len(), x, y) {
             if let Some(index) = hud::palette_hit(self.fb.width(), x, y) {
                 self.editor.color = index;
                 self.editor.set_status(format!("colour {index}"));
-            } else if let Some(hit) = hud::layer_hit(self.fb.width(), layers, x, y) {
-                self.editor.select_layer(hit.index);
-                if hit.on_eye {
-                    self.editor.toggle_layer_visible();
+            } else if let Some(hit) = hud::layer_hit(self.fb.width(), &rows, x, y) {
+                match hit.row {
+                    // The switch hides the whole part; anywhere else on an
+                    // object's row folds it. Two targets rather than one,
+                    // because "stop showing the arm" and "stop listing the
+                    // arm's layers" are different intentions and a panel that
+                    // guessed between them would be wrong half the time.
+                    hud::PanelRow::Object { index, .. } if hit.on_eye => {
+                        self.editor.toggle_object_visible(index);
+                    }
+                    hud::PanelRow::Object { index, .. } => {
+                        self.editor.toggle_collapsed(index);
+                    }
+                    hud::PanelRow::Layer { index, .. } => {
+                        self.editor.select_layer(index);
+                        if hit.on_eye {
+                            self.editor.toggle_layer_visible();
+                        }
+                    }
                 }
                 self.update_hover();
             }
