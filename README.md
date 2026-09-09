@@ -182,8 +182,8 @@ defaults to the first open face at that cell.
 
 ## Editing a colour
 
-`ctrl+P` opens a picker on the colour you have selected: three sliders and a
-swatch. The model updates as you drag, because a picker you cannot see the
+**Double-click a swatch** to open a picker on it — or `ctrl+P` for the colour
+already selected. Three sliders and a swatch. The model updates as you drag, because a picker you cannot see the
 result of is a form; `enter` keeps it and `escape` puts back what it was.
 
 The dialog is drawn by `ui.rs`, a small immediate-mode layer written on top of

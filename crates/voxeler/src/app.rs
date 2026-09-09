@@ -8,6 +8,7 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use voxel_core::Span;
 use voxel_render::Framebuffer;
@@ -68,6 +69,9 @@ pub struct App {
     /// The widget a dialog is holding, carried between frames. The only piece
     /// of UI state that survives one.
     ui_held: u64,
+    /// The last swatch clicked and when, for the double-click that opens the
+    /// colour editor.
+    last_swatch: Option<(u8, Instant)>,
     shown_title: String,
     /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
     ///
@@ -127,6 +131,7 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         grabbed: None,
         ui_input: Input::default(),
         ui_held: 0,
+        last_swatch: None,
         shown_title: String::new(),
         bridge,
         viewer: None,
@@ -309,8 +314,22 @@ impl App {
         let rows = hud::panel_rows(&self.editor);
         if button == MouseButton::Left && hud::over_panel(self.fb.width(), rows.len(), x, y) {
             if let Some(index) = hud::palette_hit(self.fb.width(), x, y) {
+                // The first click picks the colour; the second opens it for
+                // editing. Picking first either way, so the double-click is an
+                // *addition* to what a click already did rather than a
+                // different meaning you have to aim for.
                 self.editor.color = index;
-                self.editor.set_status(format!("colour {index}"));
+                let now = Instant::now();
+                if is_double_click(self.last_swatch, index, now) {
+                    // Cleared, so a third click starts a new pair rather than
+                    // reopening the dialog that is already open.
+                    self.last_swatch = None;
+                    self.editor.open_color_dialog();
+                } else {
+                    self.last_swatch = Some((index, now));
+                    self.editor
+                        .set_status(format!("colour {index} — click again to edit it"));
+                }
             } else if let Some(hit) = hud::layer_hit(self.fb.width(), &rows, x, y) {
                 match hit.row {
                     // The switch hides the whole part; anywhere else on an
@@ -884,6 +903,23 @@ fn blit(dst: &mut [u32], dst_w: u32, dst_h: u32, src: &Framebuffer, scale: u32) 
     }
 }
 
+/// How long a second click on the same swatch still counts as a double.
+///
+/// Four hundred milliseconds, a little under the platform defaults, because the
+/// cost of the two readings is not symmetric: a double read as two singles
+/// leaves you looking at a dialog you did not open, where two singles read as a
+/// double just picks the colour twice.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Whether a click on `index` completes a double-click on the same swatch.
+///
+/// A function rather than a branch inside the event handler so it can be
+/// tested, the same reason `is_click`'s dead zone is one: the window cannot be
+/// driven from a test, and the part worth checking is the rule.
+fn is_double_click(previous: Option<(u8, Instant)>, index: u8, now: Instant) -> bool {
+    previous.is_some_and(|(before, at)| before == index && now.duration_since(at) < DOUBLE_CLICK)
+}
+
 /// How far the pointer may travel between press and release and still be a
 /// click. Framebuffer pixels, so it is the same physical distance whatever the
 /// display's density.
@@ -932,6 +968,7 @@ pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
         grabbed: None,
         ui_input: Input::default(),
         ui_held: 0,
+        last_swatch: None,
         shown_title: String::new(),
         bridge: None,
         viewer: Some(viewer),
@@ -953,6 +990,38 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// The rule behind opening a colour by double-clicking its swatch.
+    ///
+    /// The window cannot be driven from a test, so the decision is a function
+    /// and this is what checks it — the same shape `is_click`'s dead zone has.
+    #[test]
+    fn a_double_click_is_two_clicks_on_one_swatch_in_time() {
+        let t0 = Instant::now();
+        let soon = t0 + Duration::from_millis(150);
+        let late = t0 + DOUBLE_CLICK + Duration::from_millis(1);
+
+        assert!(
+            is_double_click(Some((4, t0)), 4, soon),
+            "same swatch, quickly"
+        );
+        assert!(
+            !is_double_click(Some((4, t0)), 5, soon),
+            "a different swatch is a new first click"
+        );
+        assert!(
+            !is_double_click(Some((4, t0)), 4, late),
+            "too slow is two separate clicks"
+        );
+        assert!(
+            !is_double_click(None, 4, soon),
+            "nothing to pair with is a first click"
+        );
+        // Exactly at the limit is not inside it, so the boundary has one
+        // answer rather than depending on the clock's resolution.
+        assert!(!is_double_click(Some((4, t0)), 4, t0 + DOUBLE_CLICK));
+    }
 
     /// A press emits a move or two of its own, and near the horizon one pixel
     /// of the work plane can be a whole cell away. Without a dead zone a click
