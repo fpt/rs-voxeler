@@ -685,6 +685,7 @@ const HELP: &[&str] = &[
     "L SHIFT+L    NEXT / PREVIOUS LAYER",
     "A D          ADD / DELETE LAYER",
     "V N          SHOW-HIDE / RENAME LAYER",
+    "             (OR DOUBLE-CLICK ITS NAME)",
     "K J          MOVE LAYER UP / DOWN THE STACK",
     "             (THE NUMBER ON THE ROW; TREE ORDER",
     "              IS NOT STACK ORDER)",

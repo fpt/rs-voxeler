@@ -515,6 +515,13 @@ it is, so the layout and the input have to happen in one pass — which is why
 would also place a voxel behind it, which is the failure `over_panel` exists to
 prevent one panel further out.
 
+**A double-click is the same thing twice**, and `Clicked` is what makes that
+checkable: one tracker across every panel rather than one per panel, so a
+swatch followed by a layer row is two first clicks rather than a pair that
+happens to share a number. The gestures that are their own answer — a
+visibility switch, a fold — clear it rather than half-starting a pair, because
+two toggles is not a gesture.
+
 **A swatch opens on the second click, and picks on the first either way.** The
 double-click is an *addition* to what a click already did rather than a
 different meaning you have to aim for, so a slow double still leaves you with
@@ -1317,6 +1324,9 @@ from the one that was asked for.
   hidden layer is a deletion in disguise.
 - **`ctrl+N` clears every layer.** Leaving the hidden ones full would make the
   next save carry work the user believes they threw away.
+- **A rename is reached by `N` or by double-clicking a layer's name.** Its
+  switch is excluded: double-clicking that is two visibility toggles and means
+  nothing else.
 - **A rename is modal.** While `Editor::rename` is `Some`, `app.rs` routes the
   whole keyboard into it — typing "BODY" would otherwise fire build, erase and
   pick on the way through. The characters come from `event.text`, not from key
