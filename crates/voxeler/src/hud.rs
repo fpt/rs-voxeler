@@ -647,6 +647,7 @@ const HELP: &[&str] = &[
     "",
     "CTRL+Z       UNDO      CTRL+Y  REDO",
     "CTRL+S       SAVE      CTRL+E  EXPORT VOX",
+    "CTRL+SHIFT+E 3MF (PRINT)  CTRL+ALT+E  OBJ",
     "CTRL+R       RELOAD    CTRL+N  CLEAR",
     "CTRL+D       SUBDIVIDE x2",
     "CTRL+Q       QUIT",

@@ -771,6 +771,33 @@ editor and its agent surface). What comes next is judged by whether it makes
 Deliberately *not* on that list: an entity system, a scripting bridge, physics,
 a game. Those were once the plan and are not any more.
 
+## Getting models out
+
+```
+CTRL+E          .vox    MagicaVoxel
+CTRL+SHIFT+E    .3mf    printing
+CTRL+ALT+E      .obj    editing elsewhere
+```
+
+and over MCP, `export_model {"path": "robot.3mf"}`.
+
+**`.3mf` for a printer.** Millimetres — one voxel is one — with one object per
+part of your scene tree and a build that places each, so a robot arrives as a
+body and two arms rather than one welded lump. That is what makes per-part
+colour, and an AMS, possible at the other end. Every part is closed on its own,
+because a slicer cannot fill an open mesh.
+
+**`.obj` for a modeller.** Quads, not triangles: a voxel surface *is* quads, and
+exporting through triangles hands you twice the faces with a diagonal through
+each and no way back. A `.mtl` is written beside it with one material per colour
+you actually used.
+
+**`.vox`** still works and still flattens the stack, and still stops at 256 on
+each axis.
+
+All three are write-only. `.vxm` is the document; reading a mesh back would mean
+voxelising it, which is a different program.
+
 ## Licence
 
 MIT OR Apache-2.0.

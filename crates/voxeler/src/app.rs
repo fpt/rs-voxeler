@@ -490,6 +490,12 @@ impl App {
                 KeyCode::KeyZ => self.editor.undo(),
                 KeyCode::KeyY => self.editor.redo(),
                 KeyCode::KeyS => self.editor.save(),
+                // Three formats on one key, because they are one intention.
+                // `.vox` keeps the binding it had; the two that keep the parts
+                // are a shift and an alt away rather than on letters the
+                // alphabet no longer has.
+                KeyCode::KeyE if self.modifiers.shift_key() => self.editor.export_as("3mf"),
+                KeyCode::KeyE if self.modifiers.alt_key() => self.editor.export_as("obj"),
                 KeyCode::KeyE => self.editor.export_vox(),
                 KeyCode::KeyR => self.editor.reload(),
                 KeyCode::KeyN => self.editor.clear(),

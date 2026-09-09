@@ -479,6 +479,24 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "export_model",
+            description: "Write the model out in a format another tool reads, chosen by the file \
+                 extension. `.3mf` for printing — millimetres, one object per part of the \
+                 scene tree, each closed on its own so a slicer can fill it, with colours as \
+                 materials. `.obj` for editing elsewhere — QUADS rather than triangles, which \
+                 is what a modeller wants from a voxel surface, plus a `.mtl` written beside \
+                 it for the colours. `.vox` for MagicaVoxel, which flattens the layer stack \
+                 and caps at 256 on each axis. One voxel is one millimetre. Hidden layers are \
+                 included: a file is the model, not the view. These are write-only — the \
+                 document format is `.vxm`, and reading a mesh back would mean voxelising it. \
+                 Does not change the document or its unsaved state.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            }),
+        },
+        ToolInfo {
             name: "save_model",
             description:
                 "Write the model to the root directory. Omit the path to write back to where it \
@@ -1781,6 +1799,47 @@ fn dispatch(
             Ok(CallResult::text(format!(
                 "started {given}, {size}x{size}x{size} — not written until save_model\n{}",
                 describe(editor)
+            )))
+        }
+        "export_model" => {
+            let given = path_arg(args)?;
+            let path = root.resolve(&given)?;
+            let known = ["3mf", "obj", "vox"];
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if !known.contains(&ext.as_str()) {
+                return Err(format!(
+                    "export needs one of {known:?}; {given:?} names {ext:?}. Use save_model for \
+                     the document's own .vxm"
+                ));
+            }
+            voxel_core::format::save(&path, editor.model())
+                .map_err(|e| format!("{}: {e}", root.relative(&path)))?;
+            let parts = voxel_core::format::surface::parts(
+                editor.model(),
+                voxel_core::format::surface::Grouping::Objects,
+            );
+            Ok(CallResult::text(format!(
+                "exported {}\n{}",
+                root.relative(&path),
+                json!({
+                    "path": root.relative(&path),
+                    "format": ext,
+                    "parts": parts.len(),
+                    "quads": parts.iter().map(|p| p.quads.len()).sum::<usize>(),
+                    "voxels": editor.model().filled_count(),
+                    "mm_per_voxel": voxel_core::format::MM_PER_VOXEL,
+                    // Saying so rather than leaving it to be discovered: an
+                    // export is not a save, and the document is still dirty.
+                    "unsaved": editor.is_dirty(),
+                    "note": if ext == "vox" {
+                        "vox flattens the layer stack and caps at 256 per axis"
+                    } else {
+                        "one object per part of the scene tree, each closed on its own"
+                    },
+                })
             )))
         }
         "save_model" => {
