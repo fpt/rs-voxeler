@@ -515,6 +515,17 @@ it is, so the layout and the input have to happen in one pass — which is why
 would also place a voxel behind it, which is the failure `over_panel` exists to
 prevent one panel further out.
 
+**A swatch opens on the second click, and picks on the first either way.** The
+double-click is an *addition* to what a click already did rather than a
+different meaning you have to aim for, so a slow double still leaves you with
+the colour selected. `is_double_click` is a function rather than a branch inside
+the event handler for the reason `app::is_click`'s dead zone is one: the window
+cannot be driven from a test, and the rule is the part worth checking. The
+window is four hundred milliseconds, a little under the platform defaults,
+because the two misreadings do not cost the same — a double read as two singles
+leaves you looking at a dialog you did not open, where two singles read as a
+double just picks the colour twice.
+
 The colour picker is the first one because it is the smallest thing worth
 having: three sliders, a swatch, and `set_palette_color` already undoable
 underneath. It applies as the sliders move — a picker you cannot see the result

@@ -658,6 +658,7 @@ const HELP: &[&str] = &[
     "C            BRUSH CUBE / BALL",
     "",
     "CTRL+P       EDIT THIS COLOUR",
+    "             (OR DOUBLE-CLICK ITS SWATCH)",
     "[ ]          COLOUR -1 / +1",
     "- =          COLOUR -16 / +16",
     "X Y Z        MIRROR THE EDIT (M = X)",
