@@ -413,6 +413,12 @@ and not only in the file:
 On an object row the switch hides that part and anywhere else folds it shut.
 On a layer row the switch toggles the layer and anywhere else selects it.
 
+The number on a layer row is its place in the **stack** — who covers whom — and
+it is what `K` and `J` move. That is deliberately not the same as its place in
+the tree: two layers under different objects are listed in tree order, so
+reordering them changes the picture without moving either row, and the number is
+what shows it. The status line names the layer you just passed.
+
 `move_object` moves a part and everything under it by whole voxels. Nothing is
 re-created — each layer's box slides — so moving a finished robot costs the same
 as moving an empty one. It is all or nothing: if any part of the subtree would
