@@ -659,17 +659,32 @@ impl Editor {
         self.continue_stroke(target);
     }
 
+    /// Whether the current span reaches only so far from where it is aimed.
+    ///
+    /// A voxel span is the brush and is bounded by construction. Any other span
+    /// grows, and is bounded only when the brush gives it a radius. This is the
+    /// seam between a click and a stroke — see `continue_stroke`.
+    pub fn region_is_bounded(&self) -> bool {
+        self.span == Span::Voxel || self.brush.radius > 0
+    }
+
     /// Apply the tool again, part-way through a drag.
     pub fn continue_stroke(&mut self, target: Target) {
         let Some(drag) = &self.drag else { return };
         if drag.last_cell == Some(target.cell) {
             return;
         }
-        // A region span is a click, not a stroke. It already reached everything
-        // connected to the cell it was aimed at, so re-running it as the pointer
-        // moves would re-flood from a new seed several times a frame and turn
-        // one intended fill into a wandering pile of them.
-        if self.span != Span::Voxel && drag.last_cell.is_some() {
+        // An *unbounded* region is a click, not a stroke. It already reached
+        // everything connected to the cell it was aimed at, so re-running it as
+        // the pointer moves would re-flood from a new seed several times a
+        // frame and turn one intended fill into a wandering pile of them.
+        //
+        // The rule used to be "any span but Voxel", which named the wrong
+        // thing. What makes a fill unstrokeable is that it has no limit, not
+        // that it is a flood: a flood with a radius covers a patch the size you
+        // chose, and dragging one is exactly how a surface gets worked. So the
+        // test is boundedness, and the brush radius is what supplies it.
+        if !self.region_is_bounded() && drag.last_cell.is_some() {
             return;
         }
         if let Some((axis, coord)) = drag.plane {
@@ -2307,14 +2322,30 @@ impl Editor {
     /// Resizing also selects [`Span::Voxel`]: the brush is that span's shape and
     /// has no meaning under the others, so a size key that left a plane fill
     /// selected would appear to do nothing at all.
+    /// Resize the brush.
+    ///
+    /// It used to snap the span back to `Voxel`, because the brush was a shape
+    /// only a voxel span had a use for. It is a *reach* now — the radius bounds
+    /// whatever span is running — so changing it while a plane span is selected
+    /// is a deliberate thing to do rather than a mistake to correct.
     pub fn nudge_brush(&mut self, delta: i32) {
         self.brush.radius = (self.brush.radius as i32 + delta).clamp(0, MAX_BRUSH as i32) as u8;
-        self.span = Span::Voxel;
         let e = self.brush.edge();
-        self.status = format!(
-            "{} brush {e}x{e}x{e}",
-            self.brush.shape.name().to_lowercase()
-        );
+        self.status = match (self.span, self.brush.radius) {
+            (Span::Voxel, _) => format!(
+                "{} brush {e}x{e}x{e}",
+                self.brush.shape.name().to_lowercase()
+            ),
+            (span, 0) => format!(
+                "{} reaches as far as it connects",
+                span.name().to_lowercase()
+            ),
+            (span, _) => format!(
+                "{} within {} of where you click — drag to work it",
+                span.name().to_lowercase(),
+                self.brush.radius
+            ),
+        };
     }
 
     pub fn toggle_brush_shape(&mut self) {
@@ -3042,6 +3073,58 @@ mod tests {
             "climbed off the plane: {placed:?}"
         );
         assert_eq!(e.undo_depth(), 1, "a drag is one undo step");
+    }
+
+    /// `a_build_drag_stays_on_the_plane_it_started_on` passes with `Drag::plane`
+    /// removed entirely — its floor is bare, and the mask alone already stops a
+    /// stroke re-targeting onto its own work. So it does not test the pin.
+    ///
+    /// This does. The step is there **before** the stroke starts, so the mask
+    /// cannot hide it: without the pin the drag walks off the step onto the
+    /// floor and builds on both, which is the "climbing its own work" failure
+    /// wearing different clothes. Measured, with the pin taken out:
+    ///
+    /// ```text
+    /// pin present   levels placed on = {3}
+    /// pin removed   levels placed on = {1, 3}
+    /// ```
+    ///
+    /// at every camera pitch tried, so it is not an artefact of one angle.
+    #[test]
+    fn a_build_drag_stays_on_its_plane_over_geometry_that_was_already_there() {
+        for pitch in [0.15f32, 0.3, 0.5, 0.8] {
+            let mut e = editor_with_floor();
+            for x in 4..8 {
+                for z in 0..8 {
+                    e.model.set(x, 1, z, 6);
+                    e.model.set(x, 2, z, 6);
+                }
+            }
+            e.camera.pitch = pitch;
+            e.color = 9;
+            let start = e
+                .target_at(160.0, 150.0, 320, 240)
+                .expect("a hit to start from");
+            e.begin_stroke(start);
+            for px in (40..280).step_by(3) {
+                if let Some(t) = e.target_at(px as f32, 150.0, 320, 240) {
+                    e.continue_stroke(t);
+                }
+            }
+            e.end_stroke();
+
+            let levels: std::collections::BTreeSet<u16> = e
+                .model()
+                .iter_filled()
+                .filter(|(_, v)| *v == 9)
+                .map(|(p, _)| p[1])
+                .collect();
+            assert_eq!(
+                levels.len(),
+                1,
+                "pitch {pitch}: the drag left its plane and built on {levels:?}"
+            );
+        }
     }
 
     #[test]
@@ -3977,13 +4060,16 @@ mod tests {
     }
 
     #[test]
-    fn resizing_the_brush_clamps_and_selects_the_span_it_belongs_to() {
+    fn resizing_the_brush_clamps_and_leaves_the_span_alone() {
         let mut e = editor_with_floor();
         e.span = Span::Volume;
         e.nudge_brush(1);
         assert_eq!(e.brush.radius, 1);
         assert_eq!(e.brush.edge(), 3);
-        assert_eq!(e.span, Span::Voxel, "the brush is the voxel span's shape");
+        // It used to snap back to Voxel, because the brush was that span's
+        // shape. It is a reach now, so resizing it under a flood is a
+        // deliberate thing to do rather than a mistake to correct.
+        assert_eq!(e.span, Span::Volume, "the span is left where it was");
 
         e.nudge_brush(-5);
         assert_eq!(e.brush.radius, 0, "a brush never shrinks past one cell");
@@ -3991,6 +4077,67 @@ mod tests {
             e.nudge_brush(1);
         }
         assert_eq!(e.brush.radius, MAX_BRUSH);
+    }
+
+    /// A bounded plane span is meant to be *worked* — dragged across a surface
+    /// laying down a patch at a time. This drives the same sequence `app.rs`
+    /// does: begin, then a target per pointer position, resolved through the
+    /// same `target_at` the window uses.
+    #[test]
+    fn a_bounded_plane_span_strokes_without_climbing_its_own_work() {
+        let mut e = editor_with_floor();
+        e.tool = Tool::Build;
+        e.span = Span::Plane;
+        e.brush.radius = 1;
+        e.color = 5;
+        let (w, h) = (320, 240);
+
+        let start = e.target_at(150.0, 120.0, w, h).expect("a floor hit");
+        e.begin_stroke(start);
+        for i in 1..10 {
+            if let Some(t) = e.target_at(150.0 + i as f32 * 3.0, 120.0, w, h) {
+                e.continue_stroke(t);
+            }
+        }
+        e.end_stroke();
+
+        let laid: Vec<[u16; 3]> = e
+            .model()
+            .iter_filled()
+            .filter(|(_, v)| *v == 5)
+            .map(|(p, _)| p)
+            .collect();
+        assert!(!laid.is_empty(), "the stroke laid something down");
+        // It kept going rather than stopping after the first application —
+        // which is the whole point of moving the seam to boundedness.
+        assert!(laid.len() > 1, "a bounded region strokes: {laid:?}");
+        // And every cell of it is one layer above the floor. A stroke that
+        // re-targeted onto its own work would climb towards the camera.
+        assert!(
+            laid.iter().all(|p| p[1] == 1),
+            "no staircase, all at y = 1: {laid:?}"
+        );
+    }
+
+    /// The seam this refactor moved. What makes a fill unstrokeable is that it
+    /// has no limit, not that it is a flood.
+    #[test]
+    fn a_region_is_a_stroke_exactly_when_it_is_bounded() {
+        let mut e = editor_with_floor();
+        for span in [Span::Axis, Span::Plane, Span::Volume] {
+            e.span = span;
+            e.brush.radius = 0;
+            assert!(!e.region_is_bounded(), "{span:?} with no radius is a click");
+            e.brush.radius = 2;
+            assert!(e.region_is_bounded(), "{span:?} with a radius is a stroke");
+        }
+        // A voxel span is the brush, so it is bounded at any radius including
+        // none — which is why dragging has always worked for it.
+        e.span = Span::Voxel;
+        for r in [0, 1, 4] {
+            e.brush.radius = r;
+            assert!(e.region_is_bounded());
+        }
     }
 
     #[test]

@@ -299,6 +299,55 @@ on each axis — and a tight box is the guarantee this design exists to make. Th
 
 ## The edit model
 
+### A region's *limit* is what decides click or stroke
+
+`Span` says how far one edit reaches; `Tool` says what it does. A third thing
+was hiding inside `Span` and pretending to be part of it: whether the edit is
+applied once, on a click, or repeatedly as the pointer moves.
+
+The rule read "any span but `Voxel` applies once". That names the wrong
+property. What makes a fill unstrokeable is that it is *unbounded* — re-seeding
+an unlimited flood several times a frame turns one intended fill into a
+wandering pile of them. A flood with a radius has no such problem: it covers a
+patch the size you asked for, and dragging one is how a surface gets worked.
+
+So the seam is boundedness, and the brush supplies it. `Reach::brush` used to be
+consulted only by `Span::Voxel`; it now bounds every span that grows, checked
+during the flood beside `Reach::within` rather than filtered off the result — a
+region trimmed at the end would spread round a corner and come back, which is
+not what a disc on a surface means.
+
+Radius 0 means two different things, and they never collide: to `Span::Voxel`,
+which does not grow, it is the seed cell alone; to a flood it is "no bound".
+
+This is also the groundwork a surface brush needs. "Raise a patch of surface by
+one" is `Span::Plane` + `Build` with a radius — the existing planar flood,
+limited — rather than a second surface walk written beside the first.
+
+### `Drag::plane` is load-bearing, and its old test did not show it
+
+`a_build_drag_stays_on_the_plane_it_started_on` passes with the pin **removed**.
+Its fixture is a bare floor, where `Drag::before`'s mask already stops a stroke
+re-targeting onto its own work, so the test never exercised the pin.
+
+Measured on a floor with a step that was there *before* the stroke — geometry
+the mask cannot hide, because it is not the stroke's work:
+
+```text
+pin present   levels the drag built on = {3}
+pin removed   levels the drag built on = {1, 3}
+```
+
+at every camera pitch tried. So the pin does something the mask cannot: it keeps
+a build drag on the plane it began on when other geometry passes under the
+pointer. It stays, and
+`a_build_drag_stays_on_its_plane_over_geometry_that_was_already_there` fails
+without it.
+
+The consequence for a surface brush is that the pin cannot simply be dropped to
+let a patch follow curvature — it will need replacing with something
+surface-aware, not deleting.
+
 ### What a tool does and how far it reaches are separate
 
 `Tool` says add, remove or recolour; `Span` says one cell, a run, a face, or a
