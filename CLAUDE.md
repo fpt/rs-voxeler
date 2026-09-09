@@ -894,35 +894,7 @@ Three things it turns on:
   nature, and making them pay a per-pixel multiply to say "times one" would be a
   cost for nothing.
 
-### An outline is a post-process, and costs the screen not the model
-
-`draw_outline` reads two buffers the renderer already fills — the depth, and a
-one-byte `surface` id the *mesh alone* writes — and tints the pixels where they
-change. No geometry, no second pass over the model, and a cost proportional to
-the window rather than to what is in it. That is the opposite of everything else
-here and it is fine: one walk over at most 1.4 M pixels.
-
-Two tests make an edge, and both are needed:
-
-- **The face changes.** A crease between two planes, and the silhouette against
-  the backdrop, whatever the colours are. This is the case a depth test alone
-  misses where two faces meet at a shallow angle.
-- **The depth jumps.** Two pixels on faces pointing the *same* way at different
-  distances — one step in front of another — where the ids match and only the
-  distance says they are apart. The threshold is relative to the pixel's own
-  depth, because ndc z is not linear in distance: a fixed epsilon that reads a
-  near step correctly draws an outline round every faint far slope.
-
-`Framebuffer::set_surface` is separate from `test_and_set` on purpose. The grid,
-the gizmos and the volume box go through the same depth test and are not
-surfaces an outline should trace, so only the mesh names itself — and the pass
-runs immediately after the mesh, before any of them is drawn.
-
-The id is the **face**, not the voxel. Outlining every voxel boundary draws a
-grid over every flat wall, which is a different look and a separate decision.
-
-`RenderOptions::outline` is the strength, and 0 gives back the picture without
-it. `Light::occlusion` is the whole of the AO tuning, and 0 gives back exactly the
+`Light::occlusion` is the whole of the tuning, and 0 gives back exactly the
 picture this renderer drew before — which is what the test compares against,
 because "it looks nicer" is not an assertion.
 

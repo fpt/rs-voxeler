@@ -18,11 +18,6 @@ const LAYER_BOX: u32 = 0x3E6B7A;
 /// colour, because both can be set at once and they mean different things.
 const OBJECT_BOX: u32 = 0x4FD6FF;
 
-/// What an edge between two surfaces is tinted towards. Not black: a hard black
-/// line reads as ink drawn over the model, where a dark blue sits in the same
-/// world as the shading and the backdrop.
-const OUTLINE: u32 = 0x14161C;
-
 /// One colour per axis, the convention every 3D tool uses.
 const HANDLE: [u32; 3] = [0xFF5A5A, 0x6BE06B, 0x5A8CFF];
 /// The one being dragged, so the frame you are in is legible.
@@ -52,7 +47,6 @@ pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) 
         RenderOptions {
             show_bounds: true,
             light: Light::default(),
-            ..RenderOptions::default()
         },
     );
 }
@@ -62,19 +56,12 @@ pub fn render(fb: &mut Framebuffer, editor: &mut Editor, hover: Option<Target>) 
 pub struct RenderOptions {
     pub show_bounds: bool,
     pub light: Light,
-    /// How strongly to trace an outline where the surface changes, 0..=1.
-    ///
-    /// A toggle rather than always on, because it is a *look* rather than a
-    /// correction: 0 gives the picture the renderer drew before, and a caller
-    /// that wants the model rather than a drawing of it can ask for that.
-    pub outline: f32,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             show_bounds: false,
-            outline: 0.5,
             light: Light {
                 ambient: 0.7,
                 diffuse: 0.3,
@@ -107,12 +94,6 @@ pub fn render_with_options(
     let palette = editor.model().palette().clone();
     let mesh = editor.mesh().clone();
     raster::draw_mesh(fb, &scene, &mesh, &palette, offset);
-
-    // Straight after the mesh and before anything else. The pass reads the
-    // surface ids the mesh wrote, and the grid, the boxes and the gizmos are
-    // not surfaces an outline should trace — drawing them first would have it
-    // trace their silhouettes too.
-    raster::draw_outline(fb, OUTLINE, options.outline);
 
     if options.show_bounds {
         draw_volume_box(fb, &scene, editor, size, offset);
