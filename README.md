@@ -128,7 +128,14 @@ solid object and one that reads as a pile of tinted rectangles: creases darken,
 stair-stepped curves gain depth, and where two shapes meet you can see that they
 meet.
 
-`Light::occlusion` tunes it, and 0 turns it off.
+On top of that, an outline pass traces the edges — where two faces meet at an
+angle, and where the model meets the background. It reads the depth buffer and a
+one-byte face id the mesh writes, so it costs the size of the window rather than
+the size of the model, and it is what makes a voxel model read as drawn rather
+than as lit.
+
+`Light::occlusion` tunes the shading and `RenderOptions::outline` the edges;
+either at 0 turns that half off.
 
 ## Sculpting
 
