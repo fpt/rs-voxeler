@@ -475,6 +475,53 @@ quarter turns — pivoting about the low corner is what makes a turn and its
 inverse exact — so a continuous ring would promise something the model cannot
 do.
 
+### An immediate-mode UI, in the shape microui settled on
+
+`ui.rs` is not a toolkit and is not on its way to being one. The window layer is
+one blocking event loop and the drawing is a CPU framebuffer, which rules out
+everything GPU-first; the one CPU toolkit that fits wants to own the window and
+the event loop. That is the same trade the PNG writer, the HTTP and the 5×7 font
+already made — a second runtime inside one blocking loop costs more than the
+thing it saves.
+
+Three ideas are borrowed, and they are the whole design:
+
+- **A command list.** A widget never touches the framebuffer; it pushes
+  `Command`s and `ui::flush` draws them at the end of the frame. So a dialog
+  lands over the viewport and the HUD without either knowing it exists, and the
+  order on screen is the order they were declared in — which is also why the
+  dimming sheet is pushed first and there is a test that says so.
+- **Ids come from the call site.** A slider you are dragging has to stay the one
+  you grabbed while the pointer wanders off it, and immediate mode has no widget
+  to hang that on. The id is the label hashed and mixed with the enclosing
+  scope's, so two dialogs may each have an "R" slider without becoming the same
+  widget.
+- **Layout is one stack.** Rows in a column, pushed and popped. A flexbox would
+  be a second system to reason about for no dialog anybody has asked for.
+
+`hot` and `active` are the pair that make dragging work: `active` outlives
+`hot`, so a slider keeps the drag however far the pointer strays until the
+button comes up. Losing it at the edge of the track is what makes a slider feel
+broken, and it is the thing the tests spend most of their words on.
+
+**The frame runs inside the redraw**, not in the event handlers. An
+immediate-mode widget decides whether it was clicked *while* it works out where
+it is, so the layout and the input have to happen in one pass — which is why
+`App` gathers `ui_input` as events arrive rather than dispatching them, and why
+`redraw` draws everything into the framebuffer before it touches the surface.
+
+**A dialog is modal to the mouse as well as the keyboard**, the rule
+`Editor::rename` already set. Without the mouse half a click meant for a slider
+would also place a voxel behind it, which is the failure `over_panel` exists to
+prevent one panel further out.
+
+The colour picker is the first one because it is the smallest thing worth
+having: three sliders, a swatch, and `set_palette_color` already undoable
+underneath. It applies as the sliders move — a picker you cannot see the result
+of is a form — and cancel puts back what it started with. `set_palette_color`
+already drops a no-op, so holding a slider costs one undo step rather than one
+per pixel of travel.
+
 ### A selection is cells, on one layer, and not part of the document
 
 `Editor::selection` is what makes an existing shape something you can pick up
@@ -1317,6 +1364,7 @@ rs-voxeler/
 │   ├── mcp/               MCP: dispatch, wire, http+sse, stdio, tools, session
 │   ├── attach/            `voxeler attach`: protocol, listener, viewer
 │   ├── view.rs            one frame: backdrop, grid, model, gizmos
+│   ├── ui.rs              immediate-mode widgets: a command list and a stack
 │   ├── hud.rs             palette strip, status line, help card
 │   └── app.rs             winit events in, a blitted framebuffer out
 ├── models/                sample models

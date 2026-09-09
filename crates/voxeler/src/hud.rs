@@ -657,6 +657,7 @@ const HELP: &[&str] = &[
     "             (A RADIUS MAKES A FILL DRAGGABLE)",
     "C            BRUSH CUBE / BALL",
     "",
+    "CTRL+P       EDIT THIS COLOUR",
     "[ ]          COLOUR -1 / +1",
     "- =          COLOUR -16 / +16",
     "X Y Z        MIRROR THE EDIT (M = X)",
