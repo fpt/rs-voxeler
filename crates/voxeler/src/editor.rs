@@ -782,6 +782,9 @@ impl Editor {
         // along a surface: it has to see the material behind a cell as well as
         // the air in front. So it takes the brush ball whatever the span row
         // says, and the chip says as much.
+        // A voxel span is a shape and ignores `matches`, so the colour rule
+        // below is inert for these two — which is what lets them reach the air
+        // they have to fill.
         let span = match self.tool {
             Tool::Flatten | Tool::Smooth => Span::Voxel,
             _ => self.span,
@@ -1909,7 +1912,12 @@ impl Editor {
             Span::Voxel,
             region::Reach {
                 seed: at,
-                // A voxel span never consults the face.
+                // A voxel span consults neither of these: it is a shape, and
+                // hands back every cell under the brush whatever it holds.
+                // That matters here rather than being a detail — a candidate
+                // set filtered to material would put air out of reach, and a
+                // smooth could never fill a notch. Pinned by
+                // `a_voxel_span_is_a_shape_and_ignores_the_match_rule`.
                 face: Face::PosY,
                 matches: region::Match::Solid,
                 brush,
