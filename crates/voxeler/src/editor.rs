@@ -752,10 +752,18 @@ impl Editor {
         // `Smooth`, whose answer at a cell depends on its neighbours: written
         // as it goes, one pass would cascade into itself and eat a surface in a
         // single application. The same rule `transform_selection` follows.
-        let writes: Vec<([i32; 3], u8)> = cells
+        // One group per mirror combination, each carrying its *own* frame. The
+        // cells were always reflected; the reference was not, so every
+        // reflected cell was judged against the original plane and a mirrored
+        // flatten ate the far wall. Mirroring reflects the edit — and a
+        // flatten's plane is part of the edit.
+        let writes: Vec<([i32; 3], u8)> = self
+            .mirror_maps()
             .into_iter()
-            .filter_map(|c| {
-                sculpt_value(&self.model, tool, color, c, layer, reference).map(|v| (c, v))
+            .flat_map(|map| {
+                let cells: Vec<[i32; 3]> = cells.iter().map(|c| self.reflect(*c, map)).collect();
+                let frame = reference.map(|(o, n)| (self.reflect(o, map), reflect_normal(n, map)));
+                sculpt_writes(&self.model, tool, color, &cells, layer, frame)
             })
             .collect();
 
@@ -827,41 +835,39 @@ impl Editor {
         // see, so that is what a fill selects. What it writes is then narrowed
         // to the active layer by the rule above. With one layer, or while
         // working on the layer you are looking at, the two are the same set.
-        let cells = region::cells(&self.model, span, reach);
-        if self.mirror == [false; 3] {
-            return cells;
-        }
-        let mut out = Vec::with_capacity(cells.len() * self.mirror_count());
-        for cell in cells {
-            self.reflect_into(cell, &mut out);
-        }
-        out
+        region::cells(&self.model, span, reach)
     }
 
-    fn mirror_count(&self) -> usize {
-        1 << self.mirror.iter().filter(|m| **m).count()
-    }
-
-    /// A cell and every reflection of it across the active mirror planes.
+    /// Every combination of the active mirror planes, the identity first.
     ///
-    /// Two axes give four cells and three give eight. A cell lying *on* a mirror
-    /// plane is its own reflection, and the duplicate is left in: `Stroke::set`
-    /// drops a write that changes nothing, so the second one costs an iteration
-    /// rather than an extra entry in the undo step.
-    fn reflect_into(&self, cell: [i32; 3], out: &mut Vec<[i32; 3]>) {
-        let size = self.model.size();
-        let start = out.len();
-        out.push(cell);
+    /// Reflecting a *combination* rather than a cell at a time is what lets the
+    /// frame come with it: a flatten's plane has to be reflected the same way
+    /// its cells are, and a flat list of cells has forgotten which reflection
+    /// produced each one.
+    fn mirror_maps(&self) -> Vec<[bool; 3]> {
+        let mut maps = vec![[false; 3]];
         for axis in 0..3 {
             if !self.mirror[axis] {
                 continue;
             }
-            for i in start..out.len() {
-                let mut p = out[i];
-                p[axis] = size[axis] as i32 - 1 - p[axis];
-                out.push(p);
+            for i in 0..maps.len() {
+                let mut m = maps[i];
+                m[axis] = true;
+                maps.push(m);
             }
         }
+        maps
+    }
+
+    fn reflect(&self, cell: [i32; 3], map: [bool; 3]) -> [i32; 3] {
+        let size = self.model.size();
+        std::array::from_fn(|a| {
+            if map[a] {
+                size[a] as i32 - 1 - cell[a]
+            } else {
+                cell[a]
+            }
+        })
     }
 
     /// Finish the drag, committing it as one undo step.
@@ -1929,13 +1935,11 @@ impl Editor {
         );
         // Every decision read before any is applied, the same rule the stroke
         // follows — a smooth written as it goes cascades into itself.
-        let writes: Vec<CellWrite> = cells
-            .into_iter()
-            .filter_map(|pos| {
-                sculpt_value(&self.model, tool, color, pos, layer, reference)
-                    .map(|color| CellWrite { layer, pos, color })
-            })
-            .collect();
+        let writes: Vec<CellWrite> =
+            sculpt_writes(&self.model, tool, color, &cells, layer, reference)
+                .into_iter()
+                .map(|(pos, color)| CellWrite { layer, pos, color })
+                .collect();
         let mut report = SculptReport::default();
         self.apply_writes(tool.name(), writes, |before, after| {
             report.targeted += 1;
@@ -2730,6 +2734,97 @@ pub fn face_corners(voxel: [i32; 3], face: Face, offset: Vec3) -> [Vec3; 4] {
 /// Asked of the *active layer*, not of what is on screen: that is the grid
 /// being written, and testing the composite would refuse to build under a voxel
 /// a higher layer is showing — which is exactly the thing a lower layer is for.
+/// Reflect a direction about the mirrored axes.
+///
+/// A normal is a direction, so a reflection negates the component along the
+/// axis it mirrors — where a *position* is `size - 1 - p`. Getting this wrong
+/// is what made a mirrored flatten judge every reflected cell to be in front of
+/// the plane and carve the far wall away.
+fn reflect_normal(n: [i32; 3], map: [bool; 3]) -> [i32; 3] {
+    std::array::from_fn(|a| if map[a] { -n[a] } else { n[a] })
+}
+
+/// The colour a fill should take at a cell.
+///
+/// The commonest colour among its solid face neighbours, falling back to the
+/// tool's own. A sculpt is repairing a surface that is already there, so
+/// matching what surrounds the hole is what "fill this in" means; taking the
+/// palette selection would put a stripe of the current colour through a notch
+/// in a multi-coloured model.
+fn fill_color(model: &VoxelModel, layer: usize, cell: [i32; 3], fallback: u8) -> u8 {
+    let mut tally = [0u16; 256];
+    for a in 0..3 {
+        for d in [-1, 1] {
+            let mut q = cell;
+            q[a] += d;
+            let v = model.get_in(layer, q[0], q[1], q[2]);
+            if v != 0 {
+                tally[v as usize] += 1;
+            }
+        }
+    }
+    tally
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, n)| **n)
+        .filter(|(_, n)| **n > 0)
+        .map_or(fallback, |(i, _)| i as u8)
+}
+
+/// Every write one application of a tool makes over a set of candidate cells.
+///
+/// Per cell for every tool but one. `Flatten` needs the set: an air cell fills
+/// only when the column behind it holds material, and a dent two deep fills
+/// from its floor upward — so the cells are walked in order of depth and each
+/// one may rest on the one this same pass just filled.
+fn sculpt_writes(
+    model: &VoxelModel,
+    tool: Tool,
+    color: u8,
+    cells: &[[i32; 3]],
+    layer: usize,
+    reference: Option<([i32; 3], [i32; 3])>,
+) -> Vec<([i32; 3], u8)> {
+    let Some((origin, normal)) = reference.filter(|_| tool == Tool::Flatten) else {
+        return cells
+            .iter()
+            .filter_map(|c| sculpt_value(model, tool, color, *c, layer, reference).map(|v| (*c, v)))
+            .collect();
+    };
+    let depth = |p: [i32; 3]| -> i32 { (0..3).map(|a| (p[a] - origin[a]) * normal[a]).sum() };
+    let mut ordered: Vec<[i32; 3]> = cells.to_vec();
+    // Deepest first, so a column fills from whatever is holding it up.
+    ordered.sort_by_key(|p| depth(*p));
+
+    let mut out = Vec::new();
+    let mut filled: std::collections::HashSet<[i32; 3]> = Default::default();
+    for p in ordered {
+        let solid = model.get_in(layer, p[0], p[1], p[2]) != 0;
+        if depth(p) > 0 {
+            // In front of the plane: material there is what a flatten takes off.
+            if solid {
+                out.push((p, 0));
+            }
+            continue;
+        }
+        if solid {
+            continue;
+        }
+        // Behind the plane, and air. It fills only if the cell one step further
+        // from the plane is material — already, or because this pass filled it.
+        // Without that rule a flatten of a table top packs the space under the
+        // table solid, because every cell of it is "behind the plane".
+        let under: [i32; 3] = std::array::from_fn(|a| p[a] - normal[a]);
+        let supported =
+            model.get_in(layer, under[0], under[1], under[2]) != 0 || filled.contains(&under);
+        if supported {
+            filled.insert(p);
+            out.push((p, fill_color(model, layer, p, color)));
+        }
+    }
+    out
+}
+
 fn sculpt_value(
     model: &VoxelModel,
     tool: Tool,
@@ -2748,6 +2843,8 @@ fn sculpt_value(
         Tool::Build => (here == 0).then_some(color),
         Tool::Erase => (here != 0).then_some(0),
         Tool::Paint => (here != 0).then_some(color),
+        // Reached only when a flatten has no frame — which cannot happen
+        // through `sculpt_writes`, the one path that runs it.
         Tool::Flatten => {
             let (origin, normal) = reference?;
             // Signed distance along the locked normal. Positive is in front of
@@ -2776,8 +2873,10 @@ fn sculpt_value(
             match here != 0 {
                 // A spur: solid, and hanging off almost nothing.
                 true if solid <= 2 => Some(0),
-                // A notch: air, and all but walled in.
-                false if solid >= 4 => Some(color),
+                // A notch: air, and all but walled in. Filled with what
+                // surrounds it rather than the palette selection — a sculpt
+                // repairs a surface that is already there.
+                false if solid >= 4 => Some(fill_color(model, layer, cell, color)),
                 _ => None,
             }
         }
@@ -4325,31 +4424,123 @@ mod tests {
         );
     }
 
-    /// A bump standing proud of a floor, and the flatten that takes it off
-    /// without digging a hole where it stood.
+    /// A flatten levels *to* a plane: it takes off what stands proud, and it
+    /// fills a dent up to it — but only where something is holding the fill up.
     #[test]
     fn flatten_levels_to_the_plane_the_stroke_started_on() {
         let mut e = editor_with_floor();
-        e.model.set(3, 1, 3, 7);
+        // A second course, so the surface is at y = 1 with material beneath it
+        // and a dent has a floor to rest on.
+        for x in 0..8 {
+            for z in 0..8 {
+                e.model.set(x, 1, z, 4);
+            }
+        }
         e.model.set(3, 2, 3, 7);
-        e.model.set(5, 0, 5, 0);
+        e.model.set(3, 3, 3, 7);
+        e.model.set(5, 1, 5, 0);
         e.tool = Tool::Flatten;
         e.brush.radius = 4;
-        // Not the floor's own colour, so a fill is visible as a fill.
         e.color = 9;
 
         let start = e
             .target_at(160.0, 120.0, 320, 240)
             .expect("the floor is under the cursor");
         assert_eq!(start.face, Face::PosY);
-        assert_eq!(start.voxel[1], 0, "the hit is the floor cell itself");
+        assert_eq!(start.voxel[1], 1, "the hit is the top course");
         e.begin_stroke(start);
         e.end_stroke();
 
-        assert_eq!(e.model().get(3, 1, 3), 0, "the tower above the plane went");
-        assert_eq!(e.model().get(3, 2, 3), 0);
-        assert_eq!(e.model().get(5, 0, 5), 9, "the pit at the plane filled");
-        assert_eq!(e.model().get(3, 0, 3), 4, "the floor itself is untouched");
+        assert_eq!(e.model().get(3, 2, 3), 0, "the tower above the plane went");
+        assert_eq!(e.model().get(3, 3, 3), 0);
+        // The dent fills, and takes the colour of what surrounds it rather than
+        // the palette selection.
+        assert_eq!(e.model().get(5, 1, 5), 4, "the dent at the plane filled");
+        assert_eq!(e.model().get(3, 1, 3), 4, "the surface itself is untouched");
+    }
+
+    /// The rule that keeps a flatten from packing the space under a table.
+    ///
+    /// Every cell below a slab is "behind the plane", so filling all of it was
+    /// the obvious reading and the wrong one: flattening a table top filled the
+    /// room under the table. Found by review, driving a slab standing off the
+    /// ground — 147 cells appeared beneath it.
+    #[test]
+    fn flatten_does_not_fill_the_space_under_an_overhang() {
+        let mut m = VoxelModel::new(16, 16, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                m.set(x, 3, z, 4);
+            }
+        }
+        m.set(8, 4, 8, 7);
+        let mut e = Editor::new(m, PathBuf::from("t.vxm"));
+        let under = |e: &Editor| {
+            (0..3)
+                .flat_map(|y| (0..16).flat_map(move |x| (0..16).map(move |z| [x, y, z])))
+                .filter(|p| e.model().get(p[0], p[1], p[2]) != 0)
+                .count()
+        };
+        assert_eq!(under(&e), 0);
+
+        let r = e
+            .sculpt_at(Tool::Flatten, [8, 3, 8], 3, [0, 1, 0], 9, 0)
+            .unwrap();
+        assert_eq!(under(&e), 0, "nothing appeared under the slab");
+        assert_eq!(e.model().get(8, 4, 8), 0, "and the bump on top still went");
+        assert_eq!(r.removed, 1);
+        assert_eq!(r.added, 0);
+    }
+
+    /// Mirroring reflects the edit — and a flatten's plane is part of the edit.
+    ///
+    /// The cells were reflected and the frame was not, so every reflected cell
+    /// was judged against the *original* plane, came out in front of it, and
+    /// was carved away. Found by review: a mirrored flatten of one wall's inner
+    /// face took 52 cells instead of 2 and ate 25 cells of the far wall.
+    #[test]
+    fn a_mirrored_flatten_reflects_its_plane_with_its_cells() {
+        let mut m = VoxelModel::new(8, 8, 8);
+        for x in [0, 1, 6, 7] {
+            for y in 0..8 {
+                for z in 0..8 {
+                    m.set(x, y, z, 4);
+                }
+            }
+        }
+        // A bump on each wall's inner face, mirrored about the middle.
+        m.set(5, 4, 4, 7);
+        m.set(2, 4, 4, 7);
+        let mut e = Editor::new(m, PathBuf::from("t.vxm"));
+        let before = e.model().filled_count();
+        let far_wall = |e: &Editor| {
+            (0..8)
+                .flat_map(|y| (0..8).map(move |z| [1, y, z]))
+                .filter(|p| e.model().get(p[0], p[1], p[2]) != 0)
+                .count()
+        };
+        assert_eq!(far_wall(&e), 64);
+
+        e.tool = Tool::Flatten;
+        e.brush.radius = 2;
+        e.color = 9;
+        e.mirror[0] = true;
+        e.begin_stroke(Target {
+            voxel: [6, 4, 4],
+            face: Face::NegX,
+            index: 4,
+            cell: [6, 4, 4],
+        });
+        e.end_stroke();
+
+        assert_eq!(far_wall(&e), 64, "the far wall is untouched");
+        assert_eq!(
+            e.model().filled_count(),
+            before - 2,
+            "both bumps went, and nothing else"
+        );
+        assert_eq!(e.model().get(5, 4, 4), 0);
+        assert_eq!(e.model().get(2, 4, 4), 0, "the reflected bump too");
     }
 
     /// Every decision read before any is applied. Written as it goes, one pass
@@ -4369,7 +4560,11 @@ mod tests {
         e.end_stroke();
 
         assert_eq!(e.model().get(2, 1, 2), 0, "the spur went");
-        assert_eq!(e.model().get(5, 0, 5), 9, "the notch filled");
+        assert_eq!(
+            e.model().get(5, 0, 5),
+            4,
+            "the notch filled, in the floor's colour"
+        );
         // A corner of the slab has exactly two solid face neighbours, so a
         // smooth rounds it off. That is what a smooth is *for*, and worth
         // pinning: it is also why the radius matters, since a smaller brush

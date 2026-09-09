@@ -550,8 +550,8 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         (Tool::Paint, "P PAINT"),
         (Tool::Pick, "I PICK"),
         (Tool::Select, "S SELECT"),
-        (Tool::Flatten, "^F FLATTEN"),
-        (Tool::Smooth, "^S SMOOTH"),
+        (Tool::Flatten, "SH+F FLATTEN"),
+        (Tool::Smooth, "SH+S SMOOTH"),
     ];
     let h = text_height(TEXT_SCALE) + 8;
     let mut x = PAD as i32;

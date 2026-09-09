@@ -129,15 +129,25 @@ SHIFT+S      SMOOTH    round corners off, close notches
 ```
 
 `FLATTEN` locks a plane at mouse-down from the cell and face you hit, and never
-re-estimates it: material in front of that plane goes, air behind it fills. The
-lock is the point — re-deriving the direction every frame makes the brush flap
-as it crosses a corner and the stroke fights your hand.
+re-estimates it: material in front of that plane goes, and air behind it fills
+**only where something is holding it up**. A dent fills to the plane; the space
+under a table stays empty. The lock is the point — re-deriving the direction
+every frame makes the brush flap as it crosses a corner and the stroke fights
+your hand.
 
-`SMOOTH` is a majority vote over each cell's six face neighbours. A solid cell
-with two or fewer solid neighbours is a spur and goes; an air cell with four or
-more is a notch and fills. **One press is one pass** — every decision is read
-before any is applied, so a smooth cannot cascade into itself and eat the
-surface; press again to go further.
+`SMOOTH` is a vote over each cell's six face neighbours. A solid cell with two
+or fewer solid neighbours is a spur and goes; an air cell with four or more is a
+notch and fills. **One press is one pass** — every decision is read before any
+is applied, so a smooth cannot cascade into itself and eat the surface; press
+again to go further.
+
+Two-or-fewer is a rule about *thin* material: it takes off spurs, closes pits
+and rounds the corners of a one-cell sheet, but leaves the corner of a solid
+block alone — that corner still has three solid neighbours. Reach for `FLATTEN`
+to cut a block back.
+
+Fills take the commonest colour of the cell's solid neighbours, so closing a
+notch in a red panel gives you red rather than whatever the brush was set to.
 
 Both take the brush ball rather than the span, because they need to see the
 material behind a cell as well as the air in front. `9` and `0` size it.
