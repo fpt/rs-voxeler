@@ -385,6 +385,25 @@ symmetrise what is already there, and a deliberately lopsided model stays
 lopsided while you work on it symmetrically — which is the whole point, and the
 reason this is not a "symmetrise" command over the grid.
 
+### Selecting by hand: a fifth tool, and two grains
+
+`Tool::Select` is a tool rather than a modifier because a drag already means
+"apply the current tool", and span and brush then compose with it as they do
+with the other four. It never writes, so `app.rs` handles its click directly
+rather than through a stroke — a choice, costing no undo — and `begin_stroke`
+returns early on it as a floor under that.
+
+`O` switches grain. Cells go through the same `region` walk the drawing tools
+use. Objects set `Editor::selected_object`, an object index and deliberately not
+a `Selection`: a selection is cells on one layer, an object spans several, and
+gathering a part into one would take only the active layer's share and tear it
+in half on the first move. The transforms it feeds are `move_object` and
+`rotate_object`, which carry a subtree all-or-nothing.
+
+The arrows move whatever is *selected* rather than whatever the mode says, and
+flip is cells only — an object has no stored transform to hold a reflection, and
+`create_instance`'s `mirror` is where that lives.
+
 ### A selection is cells, on one layer, and not part of the document
 
 Four decisions, each with a failure mode on the other side: **cells, not a box**

@@ -245,6 +245,27 @@ impl App {
             return;
         }
 
+        // The select tool never writes, so it is handled here rather than
+        // through a stroke — a click, like a click on a panel, that picks
+        // something out and costs no undo.
+        if button == MouseButton::Left && !self.editor.viewing && self.editor.tool == Tool::Select {
+            if let Some(target) = self
+                .editor
+                .target_at(x, y, self.fb.width(), self.fb.height())
+            {
+                if self.editor.select_objects {
+                    self.editor.select_object_at(target.voxel);
+                } else {
+                    self.editor.select_with_span(target.voxel, target.face);
+                }
+            } else if self.editor.select_objects {
+                self.editor.select_object(None);
+            } else {
+                self.editor.clear_selection();
+            }
+            return;
+        }
+
         self.last_drag = (x, y);
         self.press_at = (x, y);
         self.dragging = false;
@@ -359,6 +380,54 @@ impl App {
         self.update_hover();
     }
 
+    /// Move whatever is selected: the part in object mode, the cells otherwise.
+    ///
+    /// One key, two meanings, decided by what is actually selected rather than
+    /// by which mode is showing — pressing an arrow with a part outlined and
+    /// having it move some cells instead would be the surprising answer.
+    fn nudge(&mut self, delta: [i32; 3]) {
+        match self.editor.selected_object {
+            Some(object) => {
+                let _ = self.editor.move_object(object, delta);
+            }
+            None => self.editor.report(|e| {
+                e.move_selection(delta)
+                    .map(|r| format!("moved {}", r.moved))
+            }),
+        }
+        self.update_hover();
+    }
+
+    fn turn(&mut self, axis: usize) {
+        match self.editor.selected_object {
+            Some(object) => {
+                let _ = self.editor.rotate_object(object, axis, 1);
+            }
+            None => self.editor.report(|e| {
+                e.rotate_selection(axis, 1)
+                    .map(|r| format!("turned {}", r.moved))
+            }),
+        }
+        self.update_hover();
+    }
+
+    /// Only cells flip. An object has no stored transform to hold a reflection,
+    /// and baking one would mirror the part without saying so anywhere the file
+    /// could record it — `create_instance`'s `mirror` is where that lives.
+    fn flip(&mut self, axis: usize) {
+        if self.editor.selected_object.is_some() {
+            self.editor.set_status(
+                "flip works on a cell selection; an instance is how a part is mirrored",
+            );
+            return;
+        }
+        self.editor.report(|e| {
+            e.flip_selection(axis)
+                .map(|r| format!("flipped {}", r.moved))
+        });
+        self.update_hover();
+    }
+
     fn on_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
         if self.editor.viewing {
             return self.on_viewer_key(code, event_loop);
@@ -378,6 +447,17 @@ impl App {
                     let _ = self.editor.subdivide(2);
                 }
                 KeyCode::KeyQ => event_loop.exit(),
+                KeyCode::KeyC => self
+                    .editor
+                    .report(|e| e.copy_selection().map(|n| n.to_string())),
+                KeyCode::KeyX => self
+                    .editor
+                    .report(|e| e.cut_selection().map(|n| n.to_string())),
+                // Paste puts the clipboard back at the corner it was copied
+                // from, so copy-then-paste is in place and the arrows are how
+                // you move it — which is `duplicate_selection`'s offset, chosen
+                // by eye instead of by argument.
+                KeyCode::KeyV => self.editor.paste_in_place(),
                 _ => return,
             }
             self.update_hover();
@@ -389,6 +469,34 @@ impl App {
             KeyCode::KeyE => self.editor.tool = Tool::Erase,
             KeyCode::KeyP => self.editor.tool = Tool::Paint,
             KeyCode::KeyI => self.editor.tool = Tool::Pick,
+            KeyCode::KeyS => self.editor.tool = Tool::Select,
+            KeyCode::KeyO => self.editor.toggle_select_mode(),
+            KeyCode::KeyW => {
+                let layer = self.editor.active_layer();
+                self.editor.select_all_in_layer(layer);
+            }
+            // Guarded, or this shadows the arm below that closes the help
+            // card — escape means "get me out of the thing that is open", and
+            // the card is more open than a selection is.
+            KeyCode::Escape if !self.editor.show_help => self.editor.clear_all_selection(),
+            // Arrows nudge whatever is selected. Up and down are up and down on
+            // screen as well as in the model, which is the one mapping nobody
+            // has to learn; shift takes the remaining axis.
+            KeyCode::ArrowLeft => self.nudge([-1, 0, 0]),
+            KeyCode::ArrowRight => self.nudge([1, 0, 0]),
+            KeyCode::ArrowUp if self.modifiers.shift_key() => self.nudge([0, 0, -1]),
+            KeyCode::ArrowDown if self.modifiers.shift_key() => self.nudge([0, 0, 1]),
+            KeyCode::ArrowUp => self.nudge([0, 1, 0]),
+            KeyCode::ArrowDown => self.nudge([0, -1, 0]),
+            // Shift turns, alt flips, about the axis the key names — next to
+            // the bare X Y Z that set the mirror, which is the same three
+            // letters meaning the same three axes.
+            KeyCode::KeyX if self.modifiers.shift_key() => self.turn(0),
+            KeyCode::KeyY if self.modifiers.shift_key() => self.turn(1),
+            KeyCode::KeyZ if self.modifiers.shift_key() => self.turn(2),
+            KeyCode::KeyX if self.modifiers.alt_key() => self.flip(0),
+            KeyCode::KeyY if self.modifiers.alt_key() => self.flip(1),
+            KeyCode::KeyZ if self.modifiers.alt_key() => self.flip(2),
             KeyCode::BracketLeft => self.editor.nudge_color(-1),
             KeyCode::BracketRight => self.editor.nudge_color(1),
             KeyCode::Minus => self.editor.nudge_color(-16),

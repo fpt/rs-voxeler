@@ -131,6 +131,9 @@ without re-creating a voxel — reach for it before erasing and redrawing a limb
 somewhere else. It is refused outright if any part of the subtree would leave
 the scene.
 
+`select_layer_all` selects the whole of a layer — the commonest selection there
+is, and the one `select_connected` needs a seed to reach.
+
 `rotate_object` turns a part a quarter turn at a time. Unlike `move_object` it
 rewrites the voxels, and the whole subtree turns about one pivot so the parts
 keep their spacing. It pivots about the low corner, not the centre — a turn and
