@@ -405,6 +405,17 @@ one name.
   its own reflected plane. A position reflects as `size - 1 - p` and a normal by
   negating that component; they are not the same operation, which is what made
   the bug easy to write.
+- **Selecting a sculpt tool opens the brush.** A brush of radius 0 is one cell,
+  which for flatten or smooth is an operation with no visible effect — so
+  `set_tool` raises it to `SCULPT_MIN_RADIUS` when it is closed, and says so in
+  the status. Announced rather than silent, and only ever upward, so a size you
+  chose is left alone. Reported from use: pressing the key gave a tool that
+  appeared to do nothing, with nothing on screen to say why.
+- **The brush chip shows while a sculpt tool runs, at any radius**, and carries
+  its keys. No span is lit for a sculpt tool, so without it the whole row was
+  blank — which reads as a tool with no settings rather than as a tool whose
+  setting is the brush. A setting with no chip is a setting nobody finds, and
+  this was the second time that rule earned its place.
 - **A sculpt tool takes the brush ball whatever the span row says.** It has to
   see the material behind a cell as well as the air in front, which a surface
   flood does not give it. No span is lit while one is running: a highlighted
