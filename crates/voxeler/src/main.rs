@@ -27,6 +27,7 @@ mod editor;
 mod gizmo;
 mod hud;
 mod mcp;
+mod ui;
 mod view;
 
 use std::path::PathBuf;

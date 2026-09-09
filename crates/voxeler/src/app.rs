@@ -19,6 +19,7 @@ use winit::window::{Window, WindowId};
 
 use crate::editor::{Editor, Target, Tool};
 use crate::gizmo;
+use crate::ui::{self, Dialog, Input, Outcome, Rect, Ui};
 use crate::{hud, mcp, view};
 
 /// The rendered image is capped at this many pixels and upscaled to fill the
@@ -58,6 +59,15 @@ pub struct App {
     dragging: bool,
     /// Which handle is held, and where the pointer was when it was grabbed.
     grabbed: Option<(usize, (f32, f32))>,
+    /// What the pointer and keyboard did since the last frame, for the dialog.
+    ///
+    /// Gathered rather than dispatched: an immediate-mode frame asks "was the
+    /// button pressed" while it lays itself out, so the answer has to have been
+    /// recorded before the frame starts.
+    ui_input: Input,
+    /// The widget a dialog is holding, carried between frames. The only piece
+    /// of UI state that survives one.
+    ui_held: u64,
     shown_title: String,
     /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
     ///
@@ -115,6 +125,8 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         press_at: (0.0, 0.0),
         dragging: false,
         grabbed: None,
+        ui_input: Input::default(),
+        ui_held: 0,
         shown_title: String::new(),
         bridge,
         viewer: None,
@@ -190,12 +202,28 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(surface)) = (self.window.as_ref(), self.surface.as_mut()) else {
+        let Some(window) = self.window.as_ref() else {
             return;
         };
         let size = window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return; // minimised
+        };
+
+        // Everything is drawn into the framebuffer before the surface is
+        // touched. `run_dialog` needs the whole editor — it lays out and reads
+        // input in one pass, which is what immediate mode is — and it cannot
+        // have that while a borrow of `surface` is open.
+        view::render(&mut self.fb, &mut self.editor, self.hover);
+        if !self.editor.viewing {
+            hud::draw_tools(&mut self.fb, &self.editor);
+        }
+        hud::draw(&mut self.fb, &self.editor);
+        // Last, so a dialog is over the viewport and the HUD both.
+        self.run_dialog();
+
+        let Some(surface) = self.surface.as_mut() else {
+            return;
         };
         if surface.resize(w, h).is_err() {
             return;
@@ -203,19 +231,78 @@ impl App {
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-
-        view::render(&mut self.fb, &mut self.editor, self.hover);
-        if !self.editor.viewing {
-            hud::draw_tools(&mut self.fb, &self.editor);
-        }
-        hud::draw(&mut self.fb, &self.editor);
-
         blit(&mut buffer, size.width, size.height, &self.fb, self.scale);
         let _ = buffer.present();
     }
 
+    /// Lay out and draw the open dialog, if there is one.
+    ///
+    /// Run inside the redraw rather than in the event handlers, because an
+    /// immediate-mode widget decides whether it was clicked *while* it works
+    /// out where it is — so the layout and the input have to happen in the same
+    /// pass. The commands go on top of the viewport and the HUD by being
+    /// flushed last.
+    fn run_dialog(&mut self) {
+        let Some(mut dialog) = self.editor.dialog.take() else {
+            self.ui_input = Input {
+                mouse: self.ui_input.mouse,
+                ..Default::default()
+            };
+            return;
+        };
+        let screen = Rect {
+            x: 0,
+            y: 0,
+            w: self.fb.width(),
+            h: self.fb.height(),
+        };
+        let mut ui = Ui::new(self.ui_input.clone(), self.ui_held);
+        let outcome = dialog.run(&mut ui, screen);
+        self.ui_held = if self.ui_input.down { ui.held() } else { 0 };
+        ui::flush(&mut self.fb, ui.commands());
+
+        // Applied every frame the dialog is open, so the model shows the
+        // colour while it is being chosen. `set_palette_color` drops a no-op,
+        // so holding a slider still costs one undo step rather than one per
+        // pixel of travel.
+        // A match rather than `if let`: `Dialog` has one variant today, which
+        // makes an `if let` on it irrefutable and a lint error — and the match
+        // is what the next dialog needs anyway.
+        match &dialog {
+            Dialog::Color { index, rgb } => {
+                self.editor
+                    .set_palette_color(*index, voxel_core::Rgb8::new(rgb[0], rgb[1], rgb[2]));
+            }
+        }
+        match outcome {
+            Outcome::Open => self.editor.dialog = Some(dialog),
+            Outcome::Done => {
+                self.editor.dialog = Some(dialog);
+                self.editor.close_dialog(true);
+            }
+            Outcome::Cancelled => {
+                self.editor.dialog = Some(dialog);
+                self.editor.close_dialog(false);
+            }
+        }
+        // Edges are consumed by the frame that saw them.
+        self.ui_input.pressed = false;
+        self.ui_input.released = false;
+    }
+
     fn on_mouse_down(&mut self, button: MouseButton) {
         let Some((x, y)) = self.cursor else { return };
+
+        // A dialog is modal to the mouse as well as to the keyboard. Without
+        // this a click meant for a slider would also place a voxel behind it,
+        // which is the same failure `over_panel` exists to prevent.
+        if self.editor.dialog.is_some() {
+            if button == MouseButton::Left {
+                self.ui_input.pressed = true;
+                self.ui_input.down = true;
+            }
+            return;
+        }
 
         // A click on a panel is a choice, never an edit — and never a camera
         // drag either, or picking a colour would spin the model.
@@ -312,6 +399,11 @@ impl App {
         let (dx, dy) = (x - self.last_drag.0, y - self.last_drag.1);
         self.last_drag = (x, y);
         self.cursor = Some((x, y));
+        self.ui_input.mouse = (x, y);
+        if self.editor.dialog.is_some() {
+            // No orbit, no stroke, no hover: the model is behind a sheet.
+            return;
+        }
 
         // A gizmo drag writes nothing. It moves an outline, and mouse-up does
         // the move — once, for one undo step.
@@ -484,6 +576,17 @@ impl App {
         if self.editor.viewing {
             return self.on_viewer_key(code, event_loop);
         }
+        // Modal, the way a rename is: while a dialog is open the whole
+        // keyboard belongs to it, or typing at it would fire build, erase and
+        // pick on the way through.
+        if self.editor.dialog.is_some() {
+            match code {
+                KeyCode::Escape => self.editor.close_dialog(false),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.editor.close_dialog(true),
+                _ => {}
+            }
+            return;
+        }
         if self.ctrl() {
             match code {
                 KeyCode::KeyZ if self.modifiers.shift_key() => self.editor.redo(),
@@ -505,6 +608,9 @@ impl App {
                     let _ = self.editor.subdivide(2);
                 }
                 KeyCode::KeyQ => event_loop.exit(),
+                // `P` for palette. The swatch strip picks *which* colour;
+                // this is where a colour is made.
+                KeyCode::KeyP => self.editor.open_color_dialog(),
                 KeyCode::KeyC => self
                     .editor
                     .report(|e| e.copy_selection().map(|n| n.to_string())),
@@ -719,6 +825,11 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed {
                     self.on_mouse_down(button);
+                } else if self.editor.dialog.is_some() {
+                    if button == MouseButton::Left {
+                        self.ui_input.released = true;
+                        self.ui_input.down = false;
+                    }
                 } else {
                     if self.grabbed.take().is_some() {
                         // One move, one undo step, through the same
@@ -819,6 +930,8 @@ pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
         press_at: (0.0, 0.0),
         dragging: false,
         grabbed: None,
+        ui_input: Input::default(),
+        ui_held: 0,
         shown_title: String::new(),
         bridge: None,
         viewer: Some(viewer),

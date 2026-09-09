@@ -343,6 +343,20 @@ pub struct Editor {
     /// an outline and nothing else, and `mouse-up` performs the move once. It
     /// is the same rule that has a brush previewed and a region not — what is
     /// cheap to show is shown, and what is expensive is done once you ask.
+    /// The dialog that is open, if any.
+    ///
+    /// A mode the editor is in, the same way `rename` is — the window layer
+    /// routes input into it and draws what comes back, and knows nothing about
+    /// what the dialog does.
+    pub dialog: Option<crate::ui::Dialog>,
+    /// What the palette held before a colour dialog started changing it, so
+    /// cancel has something to put back.
+    ///
+    /// The edit is applied live rather than on OK, because a picker you cannot
+    /// see the result of is a form. `set_palette_color` is already undoable and
+    /// already drops a no-op, so the cost of that is one undo step per dialog
+    /// rather than one per slider pixel.
+    pub dialog_undo: Option<(u8, voxel_core::Rgb8)>,
     pub preview_offset: Option<[i32; 3]>,
     /// Which axis handle is being held, so the one you have hold of is drawn
     /// differently. A gizmo whose frame you cannot see is one you have to
@@ -379,6 +393,8 @@ impl Editor {
             collapsed: Default::default(),
             select_objects: false,
             selected_object: None,
+            dialog: None,
+            dialog_undo: None,
             preview_offset: None,
             dragging_axis: None,
             camera: OrbitCamera::default(),
@@ -2270,6 +2286,40 @@ impl Editor {
         changed
     }
 
+    /// Open the colour editor on the currently selected slot.
+    pub fn open_color_dialog(&mut self) {
+        if self.color == 0 {
+            // Index 0 is air, not a colour. Editing it would mean choosing what
+            // "nothing" looks like, and every tool that erases with 0 would be
+            // painting with it.
+            self.status = "index 0 is air; pick a colour first".into();
+            return;
+        }
+        let c = self.model.palette().get(self.color);
+        self.dialog_undo = Some((self.color, c));
+        self.dialog = Some(crate::ui::Dialog::Color {
+            index: self.color,
+            rgb: [c.r, c.g, c.b],
+        });
+        self.status = format!("editing colour {}", self.color);
+    }
+
+    /// Put back what a cancelled dialog changed, and close it.
+    pub fn close_dialog(&mut self, keep: bool) {
+        if !keep {
+            if let Some((index, was)) = self.dialog_undo {
+                self.set_palette_color(index, was);
+            }
+        }
+        self.status = match (&self.dialog, keep) {
+            (Some(_), true) => "colour set".into(),
+            (Some(_), false) => "unchanged".into(),
+            _ => std::mem::take(&mut self.status),
+        };
+        self.dialog = None;
+        self.dialog_undo = None;
+    }
+
     /// Show or hide the active layer.
     ///
     /// Not an undo step, though it does dirty the document: visibility is a
@@ -2687,6 +2737,8 @@ impl Editor {
         self.selected_object = None;
         self.preview_offset = None;
         self.dragging_axis = None;
+        self.dialog = None;
+        self.dialog_undo = None;
         self.clipboard = None;
         self.collapsed.clear();
         self.model = model;
@@ -2712,6 +2764,8 @@ impl Editor {
         self.selected_object = None;
         self.preview_offset = None;
         self.dragging_axis = None;
+        self.dialog = None;
+        self.dialog_undo = None;
         self.clipboard = None;
         self.collapsed.clear();
         // A slice past the new model's height would hide all of it.
@@ -4711,6 +4765,41 @@ mod tests {
             before - 1 + 1 - 4,
             "exactly the cells the rule names"
         );
+    }
+
+    /// Cancel has to put the palette back, because the edit is applied live —
+    /// a picker you cannot see the result of is a form.
+    #[test]
+    fn cancelling_the_colour_dialog_restores_what_it_changed() {
+        let mut e = editor_with_floor();
+        e.color = 4;
+        let before = e.model().palette().get(4);
+        e.open_color_dialog();
+        assert!(e.dialog.is_some());
+
+        e.set_palette_color(4, voxel_core::Rgb8::new(1, 2, 3));
+        assert_eq!(e.model().palette().get(4), voxel_core::Rgb8::new(1, 2, 3));
+
+        e.close_dialog(false);
+        assert!(e.dialog.is_none());
+        assert_eq!(e.model().palette().get(4), before, "cancel put it back");
+
+        // Keeping leaves the edit alone.
+        e.open_color_dialog();
+        e.set_palette_color(4, voxel_core::Rgb8::new(9, 9, 9));
+        e.close_dialog(true);
+        assert_eq!(e.model().palette().get(4), voxel_core::Rgb8::new(9, 9, 9));
+    }
+
+    /// Index 0 is air, not a colour. Editing it would mean choosing what
+    /// "nothing" looks like, and every tool that erases with 0 would paint.
+    #[test]
+    fn the_colour_dialog_refuses_air() {
+        let mut e = editor_with_floor();
+        e.color = 0;
+        e.open_color_dialog();
+        assert!(e.dialog.is_none());
+        assert!(e.status().contains("air"), "{}", e.status());
     }
 
     /// Reordering the stack changes what covers what, and after the panel
