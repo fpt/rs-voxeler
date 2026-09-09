@@ -381,6 +381,58 @@ fn flood(model: &VoxelModel, reach: Reach, planar: bool) -> Vec<[i32; 3]> {
 mod tests {
     use super::*;
 
+    /// A voxel span is a *shape*, and never consults `Match`.
+    ///
+    /// The sculpt tools lean on this: they pass a brush and decide per cell
+    /// what to write, so a candidate set filtered to material would put air
+    /// out of reach and a smooth could never fill a notch. That is an
+    /// invariant of `brush` rather than something the callers can see, so it
+    /// is pinned here — raised in review of #45, where it was read as a bug
+    /// in the callers.
+    #[test]
+    fn a_voxel_span_is_a_shape_and_ignores_the_match_rule() {
+        let m = floor();
+        // Centred on the floor, so the ball spans material below and air above.
+        let ball = cells(
+            &m,
+            Span::Voxel,
+            Reach {
+                brush: Brush {
+                    radius: 1,
+                    shape: BrushShape::Cube,
+                },
+                // Deliberately the strictest rule there is. A voxel span must
+                // hand back the air anyway.
+                ..reach_for([2, 0, 2], Face::PosY, Match::Solid)
+            },
+        );
+        assert_eq!(ball.len(), 3 * 2 * 3, "the whole ball, clipped at y = 0");
+        assert!(
+            ball.iter().any(|p| m.get(p[0], p[1], p[2]) == 0),
+            "including cells holding air"
+        );
+        assert!(
+            ball.iter().any(|p| m.get(p[0], p[1], p[2]) != 0),
+            "and cells holding material"
+        );
+
+        // The spans that *grow* do consult it, which is the difference. Seeded
+        // on the floor a volume flood finds the floor; seeded one cell up it
+        // finds the air, and the two answers are nothing alike.
+        let material = cells(
+            &m,
+            Span::Volume,
+            reach_for([2, 0, 2], Face::PosY, Match::Solid),
+        );
+        let air = cells(
+            &m,
+            Span::Volume,
+            reach_for([2, 1, 2], Face::PosY, Match::Index(0)),
+        );
+        assert_eq!(material.len(), 64, "the whole floor");
+        assert_eq!(air.len(), 8 * 7 * 8, "everything above it");
+    }
+
     /// An 8³ volume with a solid floor at y = 0, half of it recoloured.
     fn floor() -> VoxelModel {
         let mut m = VoxelModel::new(8, 8, 8);

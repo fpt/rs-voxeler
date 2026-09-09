@@ -345,6 +345,48 @@ The select mode gets a chip, and only while the tool is running: "cells" and
 "objects" look identical until you press an arrow, and by then the wrong thing
 has moved. A setting with no chip is a setting nobody finds.
 
+### Sculpting is two tools and one locked frame
+
+Most of what #29 asked for arrived with bounded regions: a disc on the surface
+is `Span::Plane` with a radius, and raising or lowering one is `Build` or
+`Erase` over it. What was left is the pair of operations that cannot be
+expressed as "a colour applied to a reach", because they decide **per cell**
+what to write.
+
+`sculpt_value` is where that decision lives, and it is a free function rather
+than a method for one reason: the hand and the agent both reach it. A smooth
+that rounded a corner at the window and not over MCP would be two tools wearing
+one name.
+
+- **`Flatten` needs a frame, not a reach.** `Drag::reference` locks a plane at
+  mouse-down — the cell that was hit, and the normal of the face that was hit —
+  and never re-estimates it. Re-deriving it per frame would make the direction
+  flap as the brush crossed a corner, `+X → +Y → +X`, and the stroke would fight
+  the hand. It is the same rule `Drag::plane` and `Drag::before` follow: a
+  stroke commits to what it started on. The brush centre rides that plane rather
+  than the ray, or a flatten would sink as it carved — each pass exposing a
+  deeper cell for the next to centre on.
+- **`Smooth` is a majority vote over the six face neighbours.** A solid cell
+  with two or fewer solid neighbours is a spur and goes; an air cell with four
+  or more is a notch and fills. Face neighbours only: counting the twenty-six
+  would let a diagonal contact hold a spur on, which is the thing a smooth is
+  being asked to remove. Rounding a corner is not a bug — a slab's corner has
+  exactly two solid neighbours, and taking it off is what a smooth is *for*.
+- **Every decision is read before any is applied.** Written as it goes, one
+  smoothing pass cascades into itself and eats a surface in a single
+  application: the cell behind each rounded corner becomes a corner. So one call
+  is one pass, and going further means calling again. The same rule
+  `transform_selection` follows, for the same reason.
+- **A sculpt tool takes the brush ball whatever the span row says.** It has to
+  see the material behind a cell as well as the air in front, which a surface
+  flood does not give it. No span is lit while one is running: a highlighted
+  span that is not being consulted is worse than none.
+
+`sculpt_surface` is the agent's door onto the same rule — `flatten`, `smooth`,
+`raise`, `lower` at a point with a radius. `normal` matters only to flatten, and
+defaults to the first face of the cell with air against it, +Y first; a buried
+cell has none to offer and the refusal says so rather than guessing.
+
 ### A selection is cells, on one layer, and not part of the document
 
 `Editor::selection` is what makes an existing shape something you can pick up

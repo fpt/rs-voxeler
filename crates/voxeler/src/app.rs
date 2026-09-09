@@ -482,6 +482,11 @@ impl App {
             KeyCode::KeyE => self.editor.tool = Tool::Erase,
             KeyCode::KeyP => self.editor.tool = Tool::Paint,
             KeyCode::KeyI => self.editor.tool = Tool::Pick,
+            // The alphabet is full, so the two sculpt tools take the shifted
+            // form of the letter that names them. Both are in the tool row and
+            // in the help card, because a tool nobody can find is not a tool.
+            KeyCode::KeyF if self.modifiers.shift_key() => self.editor.tool = Tool::Flatten,
+            KeyCode::KeyS if self.modifiers.shift_key() => self.editor.tool = Tool::Smooth,
             KeyCode::KeyS => self.editor.tool = Tool::Select,
             KeyCode::KeyO => self.editor.toggle_select_mode(),
             KeyCode::KeyW => {

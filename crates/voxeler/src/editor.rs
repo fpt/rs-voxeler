@@ -132,6 +132,20 @@ impl Clipboard {
     }
 }
 
+/// What one sculpt application did.
+///
+/// The four exclusive outcomes every MCP edit reports, summing to `targeted`:
+/// an agent cannot see the screen, so a tool that says "ok" has told it
+/// nothing, and one whose numbers do not add up has told it something false.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SculptReport {
+    pub targeted: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub repainted: usize,
+    pub unchanged: usize,
+}
+
 /// What moving a selection did.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct MoveReport {
@@ -162,6 +176,20 @@ pub enum Tool {
     Paint,
     /// Take the colour of the voxel you clicked, without changing anything.
     Pick,
+    /// Level the surface to the plane the stroke started on.
+    ///
+    /// The one sculpt operation that suits voxels best, and the only one that
+    /// needs a *frame* rather than a reach: a plane locked at mouse-down, from
+    /// the cell that was hit and the face that was hit. Material in front of it
+    /// goes, air behind it fills, and the surface under the brush ends flat.
+    Flatten,
+    /// Round the surface off by majority vote of each cell's neighbours.
+    ///
+    /// A solid cell with too few solid neighbours is a spur and goes; an air
+    /// cell with too many is a notch and fills. Every decision is read from the
+    /// model as it stood before the application, so one pass does not cascade
+    /// into itself.
+    Smooth,
     /// Pick out what is already there, rather than changing it.
     ///
     /// The one tool that never writes. It is a tool rather than a modifier
@@ -178,6 +206,8 @@ impl Tool {
             Tool::Erase => "ERASE",
             Tool::Paint => "PAINT",
             Tool::Pick => "PICK",
+            Tool::Flatten => "FLATTEN",
+            Tool::Smooth => "SMOOTH",
             Tool::Select => "SELECT",
         }
     }
@@ -219,6 +249,14 @@ impl Target {
 /// across the plane it started on, which is what the hand expects.
 struct Drag {
     stroke: Stroke,
+    /// The plane a sculpt stroke levels toward: a cell on it, and the outward
+    /// normal of the face that was hit.
+    ///
+    /// Locked at mouse-down and never re-estimated. Re-deriving it every frame
+    /// would make the brush direction flap — crossing a corner goes +X, +Y, +X
+    /// and the stroke fights the hand — which is the same reason `plane` and
+    /// `before` are decided once: a stroke commits to what it started on.
+    reference: Option<([i32; 3], [i32; 3])>,
     plane: Option<(usize, i32)>,
     last_cell: Option<[i32; 3]>,
     /// Which layer owned the voxel the stroke started on, if any. A tool writes
@@ -518,7 +556,10 @@ impl Editor {
             // Select acts on the voxel you pointed at, like erase and paint:
             // it picks out what is there rather than putting something beside
             // it, so there is no adjacent cell in the question.
+            // A sculpt tool works on the material it is aimed at and the air
+            // just off it, so the cell it centres on is the one that was hit.
             Tool::Erase | Tool::Paint | Tool::Pick | Tool::Select => hit.voxel,
+            Tool::Flatten | Tool::Smooth => hit.voxel,
         };
         Some(Target {
             voxel: hit.voxel,
@@ -634,6 +675,8 @@ impl Editor {
             Tool::Build => "build",
             Tool::Erase => "erase",
             Tool::Paint => "paint",
+            Tool::Flatten => "flatten",
+            Tool::Smooth => "smooth",
             Tool::Pick => {
                 if target.index != 0 {
                     self.color = target.index;
@@ -644,6 +687,7 @@ impl Editor {
         };
         self.drag = Some(Drag {
             stroke: Stroke::new(label),
+            reference: (self.tool == Tool::Flatten).then(|| (target.voxel, target.face.normal())),
             // Build is the only tool that grows the surface it is aimed at, so
             // it is the only one that needs pinning; erase and paint follow the
             // pointer over whatever it is actually over.
@@ -692,38 +736,36 @@ impl Editor {
                 return;
             }
         }
-        let value = match self.tool {
-            Tool::Build | Tool::Paint => self.color,
-            Tool::Erase => 0,
+        if matches!(self.tool, Tool::Pick | Tool::Select) {
             // Neither writes anything, so neither reaches a stroke.
-            Tool::Pick | Tool::Select => return,
-        };
+            return;
+        }
+        let reference = drag.reference;
 
         // Resolved before the stroke is borrowed: the span reads the model, and
         // writing through the stroke needs it mutably.
-        let cells = self.write_cells(target);
-        // Build fills air and never repaints; erase and paint act on material
-        // and never create it. With a single cell that rule is already true by
-        // construction, but a brush covers cells the ray never touched and a
-        // reflection lands wherever the model happens to be, so it has to be
-        // stated rather than assumed.
-        //
-        // Asked of the *active layer*, not of what is on screen: that is the
-        // grid being written, and testing the composite would refuse to build
-        // under a voxel a higher layer is showing — which is exactly the thing
-        // a lower layer is for.
-        let wants_solid = self.tool != Tool::Build;
+        let cells = self.write_cells(target, reference);
         let layer = self.model.active_layer();
+        let (tool, color) = (self.tool, self.color);
+
+        // Every decision read before any of them is applied. It matters for
+        // `Smooth`, whose answer at a cell depends on its neighbours: written
+        // as it goes, one pass would cascade into itself and eat a surface in a
+        // single application. The same rule `transform_selection` follows.
+        let writes: Vec<([i32; 3], u8)> = cells
+            .into_iter()
+            .filter_map(|c| {
+                sculpt_value(&self.model, tool, color, c, layer, reference).map(|v| (c, v))
+            })
+            .collect();
+
         let Some(drag) = &mut self.drag else { return };
         drag.last_cell = Some(target.cell);
-        for [x, y, z] in cells {
-            if (self.model.get_in(layer, x, y, z) != 0) != wants_solid {
-                continue;
-            }
+        for (cell @ [x, y, z], value) in writes {
             // The composite, not the layer: what the *ray* would have found
             // here before this stroke ran.
             let was = self.model.get(x, y, z);
-            drag.before.entry([x, y, z]).or_insert(was);
+            drag.before.entry(cell).or_insert(was);
             drag.stroke.set(&mut self.model, x, y, z, value);
         }
         self.invalidate_mesh();
@@ -731,9 +773,37 @@ impl Editor {
 
     /// Every cell this application of the tool may write to: the span around
     /// the target, and each of its reflections.
-    fn write_cells(&self, target: Target) -> Vec<[i32; 3]> {
+    fn write_cells(
+        &self,
+        target: Target,
+        reference: Option<([i32; 3], [i32; 3])>,
+    ) -> Vec<[i32; 3]> {
+        // A sculpt tool works over a neighbourhood in three dimensions, not
+        // along a surface: it has to see the material behind a cell as well as
+        // the air in front. So it takes the brush ball whatever the span row
+        // says, and the chip says as much.
+        // A voxel span is a shape and ignores `matches`, so the colour rule
+        // below is inert for these two — which is what lets them reach the air
+        // they have to fill.
+        let span = match self.tool {
+            Tool::Flatten | Tool::Smooth => Span::Voxel,
+            _ => self.span,
+        };
+        // Flatten's brush centre rides the locked plane rather than the ray.
+        // Left on the ray it would sink as it carved — each pass exposing a
+        // deeper cell for the next to centre on — and a stroke that walks
+        // itself into the model is not levelling anything.
+        let seed = match reference {
+            Some((origin, normal)) => {
+                let d: i32 = (0..3)
+                    .map(|a| (target.cell[a] - origin[a]) * normal[a])
+                    .sum();
+                std::array::from_fn(|a| target.cell[a] - normal[a] * d)
+            }
+            None => target.cell,
+        };
         let reach = region::Reach {
-            seed: target.cell,
+            seed,
             face: target.face,
             // Building grows over air; erasing and painting grow over the
             // colour under the cursor, so a region stops where the colour does.
@@ -757,7 +827,7 @@ impl Editor {
         // see, so that is what a fill selects. What it writes is then narrowed
         // to the active layer by the rule above. With one layer, or while
         // working on the layer you are looking at, the two are the same set.
-        let cells = region::cells(&self.model, self.span, reach);
+        let cells = region::cells(&self.model, span, reach);
         if self.mirror == [false; 3] {
             return cells;
         }
@@ -1808,6 +1878,77 @@ impl Editor {
         );
     }
 
+    /// Apply a sculpt tool at a point, as one undo step.
+    ///
+    /// The agent's door onto the rule the hand uses: the same brush ball, the
+    /// same `sculpt_value`, and `apply_writes` like every other edit that did
+    /// not come from a click. "Round this corner off" is a semantic edit; an
+    /// agent naming several thousand cells is not, and it cannot see the screen
+    /// to check what it got.
+    ///
+    /// The normal matters only to `Flatten`, which locks a plane through `at`.
+    pub fn sculpt_at(
+        &mut self,
+        tool: Tool,
+        at: [i32; 3],
+        radius: u8,
+        normal: [i32; 3],
+        color: u8,
+        layer: usize,
+    ) -> Result<SculptReport, String> {
+        if layer >= self.model.layer_count() {
+            return Err(format!("there is no layer {layer}"));
+        }
+        if !self.model.contains(at[0], at[1], at[2]) {
+            return Err(format!("{at:?} is outside the scene"));
+        }
+        let brush = region::Brush {
+            radius,
+            shape: self.brush.shape,
+        };
+        let reference = (tool == Tool::Flatten).then_some((at, normal));
+        let cells = region::cells(
+            &self.model,
+            Span::Voxel,
+            region::Reach {
+                seed: at,
+                // A voxel span consults neither of these: it is a shape, and
+                // hands back every cell under the brush whatever it holds.
+                // That matters here rather than being a detail — a candidate
+                // set filtered to material would put air out of reach, and a
+                // smooth could never fill a notch. Pinned by
+                // `a_voxel_span_is_a_shape_and_ignores_the_match_rule`.
+                face: Face::PosY,
+                matches: region::Match::Solid,
+                brush,
+                grounded: false,
+                y_limit: self.slice.unwrap_or(u16::MAX),
+                within: None,
+                layer: Some(layer),
+            },
+        );
+        // Every decision read before any is applied, the same rule the stroke
+        // follows — a smooth written as it goes cascades into itself.
+        let writes: Vec<CellWrite> = cells
+            .into_iter()
+            .filter_map(|pos| {
+                sculpt_value(&self.model, tool, color, pos, layer, reference)
+                    .map(|color| CellWrite { layer, pos, color })
+            })
+            .collect();
+        let mut report = SculptReport::default();
+        self.apply_writes(tool.name(), writes, |before, after| {
+            report.targeted += 1;
+            match (before, after) {
+                (0, 0) => report.unchanged += 1,
+                (0, _) => report.added += 1,
+                (_, 0) => report.removed += 1,
+                _ => report.repainted += 1,
+            }
+        });
+        Ok(report)
+    }
+
     /// Apply ordered writes as one undo step without changing the selection.
     pub fn apply_writes(
         &mut self,
@@ -2577,6 +2718,71 @@ pub fn new_model(size: u16) -> VoxelModel {
 pub fn face_corners(voxel: [i32; 3], face: Face, offset: Vec3) -> [Vec3; 4] {
     let c = voxel_render::face_corners(voxel, face);
     [c[0] + offset, c[1] + offset, c[2] + offset, c[3] + offset]
+}
+
+/// What a tool writes at one cell, or `None` to leave it alone.
+///
+/// A free function rather than a method, because the hand and the agent both
+/// reach it and neither should get its own copy of the rule: a smooth that
+/// rounded a corner at the window and not over MCP would be two tools wearing
+/// one name.
+///
+/// Asked of the *active layer*, not of what is on screen: that is the grid
+/// being written, and testing the composite would refuse to build under a voxel
+/// a higher layer is showing — which is exactly the thing a lower layer is for.
+fn sculpt_value(
+    model: &VoxelModel,
+    tool: Tool,
+    color: u8,
+    cell: [i32; 3],
+    layer: usize,
+    reference: Option<([i32; 3], [i32; 3])>,
+) -> Option<u8> {
+    let [x, y, z] = cell;
+    let here = model.get_in(layer, x, y, z);
+    match tool {
+        // Build fills air and never repaints; erase and paint act on material
+        // and never create it. With a single cell that holds by construction,
+        // but a brush covers cells the ray never touched and a reflection lands
+        // wherever the model happens to be, so it has to be stated.
+        Tool::Build => (here == 0).then_some(color),
+        Tool::Erase => (here != 0).then_some(0),
+        Tool::Paint => (here != 0).then_some(color),
+        Tool::Flatten => {
+            let (origin, normal) = reference?;
+            // Signed distance along the locked normal. Positive is in front of
+            // the plane — outside the surface — and that is what a flatten
+            // takes off; behind it is what it fills in.
+            let d: i32 = (0..3).map(|a| (cell[a] - origin[a]) * normal[a]).sum();
+            match (d > 0, here != 0) {
+                (true, true) => Some(0),
+                (false, false) => Some(color),
+                // Already on the right side of the plane.
+                _ => None,
+            }
+        }
+        Tool::Smooth => {
+            // Face neighbours only. Counting the twenty-six would let a
+            // diagonal contact hold a spur on, which is the thing a smooth is
+            // being asked to remove.
+            let solid = (0..3)
+                .flat_map(|a| [-1, 1].map(move |d| (a, d)))
+                .filter(|(a, d)| {
+                    let mut q = cell;
+                    q[*a] += d;
+                    model.get_in(layer, q[0], q[1], q[2]) != 0
+                })
+                .count();
+            match here != 0 {
+                // A spur: solid, and hanging off almost nothing.
+                true if solid <= 2 => Some(0),
+                // A notch: air, and all but walled in.
+                false if solid >= 4 => Some(color),
+                _ => None,
+            }
+        }
+        Tool::Pick | Tool::Select => None,
+    }
 }
 
 #[cfg(test)]
@@ -4117,6 +4323,89 @@ mod tests {
             laid.iter().all(|p| p[1] == 1),
             "no staircase, all at y = 1: {laid:?}"
         );
+    }
+
+    /// A bump standing proud of a floor, and the flatten that takes it off
+    /// without digging a hole where it stood.
+    #[test]
+    fn flatten_levels_to_the_plane_the_stroke_started_on() {
+        let mut e = editor_with_floor();
+        e.model.set(3, 1, 3, 7);
+        e.model.set(3, 2, 3, 7);
+        e.model.set(5, 0, 5, 0);
+        e.tool = Tool::Flatten;
+        e.brush.radius = 4;
+        // Not the floor's own colour, so a fill is visible as a fill.
+        e.color = 9;
+
+        let start = e
+            .target_at(160.0, 120.0, 320, 240)
+            .expect("the floor is under the cursor");
+        assert_eq!(start.face, Face::PosY);
+        assert_eq!(start.voxel[1], 0, "the hit is the floor cell itself");
+        e.begin_stroke(start);
+        e.end_stroke();
+
+        assert_eq!(e.model().get(3, 1, 3), 0, "the tower above the plane went");
+        assert_eq!(e.model().get(3, 2, 3), 0);
+        assert_eq!(e.model().get(5, 0, 5), 9, "the pit at the plane filled");
+        assert_eq!(e.model().get(3, 0, 3), 4, "the floor itself is untouched");
+    }
+
+    /// Every decision read before any is applied. Written as it goes, one pass
+    /// would cascade into itself and eat the surface in a single application.
+    #[test]
+    fn smooth_takes_a_spur_off_and_fills_a_notch_without_cascading() {
+        let mut e = editor_with_floor();
+        e.model.set(2, 1, 2, 7);
+        e.model.set(5, 0, 5, 0);
+        let before = e.model().filled_count();
+
+        e.tool = Tool::Smooth;
+        e.brush.radius = 6;
+        e.color = 9;
+        let start = e.target_at(160.0, 120.0, 320, 240).expect("a hit");
+        e.begin_stroke(start);
+        e.end_stroke();
+
+        assert_eq!(e.model().get(2, 1, 2), 0, "the spur went");
+        assert_eq!(e.model().get(5, 0, 5), 9, "the notch filled");
+        // A corner of the slab has exactly two solid face neighbours, so a
+        // smooth rounds it off. That is what a smooth is *for*, and worth
+        // pinning: it is also why the radius matters, since a smaller brush
+        // would never have reached the corners at all.
+        assert_eq!(e.model().get(0, 0, 0), 0, "the corner rounded");
+        assert!(e.model().get(1, 0, 0) != 0, "the edge beside it did not");
+        assert!(e.model().get(4, 0, 4) != 0, "and the middle is untouched");
+        // One spur out, one notch in, four corners rounded. A pass that
+        // cascaded would have kept eating: the cell behind each rounded corner
+        // becomes a corner itself, and a second application would take it.
+        let after = e.model().filled_count();
+        assert_eq!(
+            after,
+            before - 1 + 1 - 4,
+            "exactly the cells the rule names"
+        );
+    }
+
+    /// A sculpt tool needs to see material behind a cell as well as air in
+    /// front, so it takes the brush ball whatever the span row says.
+    #[test]
+    fn a_sculpt_tool_ignores_the_span_row() {
+        let mut e = editor_with_floor();
+        e.model.set(2, 1, 2, 7);
+        e.brush.radius = 3;
+        e.color = 9;
+        // Volume would flood the whole connected floor; the brush must not.
+        e.span = Span::Volume;
+        e.tool = Tool::Smooth;
+        let start = e.target_at(160.0, 120.0, 320, 240).expect("a hit");
+        e.begin_stroke(start);
+        e.end_stroke();
+        assert_eq!(e.model().get(2, 1, 2), 0, "the spur still went");
+        // Far corners, outside a radius of three from the middle: a volume
+        // flood would have reached them.
+        assert!(e.model().get(0, 0, 0) != 0 && e.model().get(7, 0, 7) != 0);
     }
 
     /// The seam this refactor moved. What makes a fill unstrokeable is that it
