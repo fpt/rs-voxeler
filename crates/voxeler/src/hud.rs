@@ -550,6 +550,8 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
         (Tool::Paint, "P PAINT"),
         (Tool::Pick, "I PICK"),
         (Tool::Select, "S SELECT"),
+        (Tool::Flatten, "^F FLATTEN"),
+        (Tool::Smooth, "^S SMOOTH"),
     ];
     let h = text_height(TEXT_SCALE) + 8;
     let mut x = PAD as i32;
@@ -559,9 +561,13 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
 
     let y = PAD as i32 + h as i32 + 6;
     let mut x = PAD as i32;
+    // A sculpt tool takes the brush ball whatever the span row says, so no span
+    // is lit while one is running — a highlighted span that is not being
+    // consulted is worse than none.
+    let span_applies = !matches!(editor.tool, Tool::Flatten | Tool::Smooth);
     for (i, span) in Span::ALL.iter().enumerate() {
         let label = format!("{} {}", i + 1, span.name());
-        x += chip(fb, x, y, &label, editor.span == *span) as i32 + 6;
+        x += chip(fb, x, y, &label, span_applies && editor.span == *span) as i32 + 6;
     }
     // The brush sits at the end of the span row because it is what bounds one:
     // the voxel span's shape, and every other span's reach. Shown only once it
@@ -572,7 +578,7 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
     // difference is invisible until you drag.
     if editor.brush.radius > 0 {
         let e = editor.brush.edge();
-        let label = if editor.span == Span::Voxel {
+        let label = if editor.span == Span::Voxel || !span_applies {
             format!("{} {e}x{e}x{e}", editor.brush.shape.name())
         } else {
             format!("{} R{}", editor.brush.shape.name(), editor.brush.radius)
@@ -624,6 +630,8 @@ const HELP: &[&str] = &[
     "ALT+LMB      ORBIT      WHEEL     ZOOM",
     "",
     "B E P I S    BUILD ERASE PAINT PICK SELECT",
+    "SHIFT+F S    FLATTEN / SMOOTH (SCULPT)",
+    "             (SCULPT USES THE BRUSH, NOT THE SPAN)",
     "1 2 3 4      VOXEL AXIS PLANE VOLUME",
     "9 0          BRUSH SMALLER / BIGGER",
     "             (A RADIUS MAKES A FILL DRAGGABLE)",

@@ -269,6 +269,11 @@ fn draw_target(fb: &mut Framebuffer, scene: &Scene, editor: &Editor, target: Tar
             (c.to_u32(), 0xFFFFFF)
         }
         Tool::Pick => (0x000000, 0xFFFFFF),
+        // A sculpt tool neither adds nor removes a known colour — it does both,
+        // where the surface needs it — so the marker shows the frame it will
+        // work in rather than a swatch that would be a guess.
+        Tool::Flatten => (0x000000, 0x7FD8A8),
+        Tool::Smooth => (0x000000, 0xC8A8F0),
         // The one tool that changes nothing, so the marker is an outline with
         // nothing filled in: it says "this is what you would pick out", not
         // "this is what would land here".

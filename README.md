@@ -65,6 +65,7 @@ nothing over empty space.
 | `B` `E` `P` `I` | build, erase, paint, pick colour |
 | `1` `2` `3` `4` | reach: voxel, axis, plane, volume |
 | `9` `0` `C` | brush smaller, bigger, cube/ball |
+| `shift+F` `shift+S` | flatten, smooth |
 | `[` `]` / `-` `=` | colour ∓1 / ∓16 |
 | `X` `Y` `Z` | mirror the edit across each axis (`M` = `X`) |
 | `L` `shift+L` | next / previous layer |
@@ -116,6 +117,40 @@ radius and it covers a patch the size you asked for, and you can drag it:
 
 So resizing the brush no longer snaps you back to the voxel span — under a
 flood, the radius is the thing that makes the flood workable by hand.
+
+## Sculpting
+
+Two of the tools do not paint a colour onto a reach — they decide, cell by cell,
+what the surface should be:
+
+```
+SHIFT+F      FLATTEN   level to the plane the stroke started on
+SHIFT+S      SMOOTH    round corners off, close notches
+```
+
+`FLATTEN` locks a plane at mouse-down from the cell and face you hit, and never
+re-estimates it: material in front of that plane goes, air behind it fills. The
+lock is the point — re-deriving the direction every frame makes the brush flap
+as it crosses a corner and the stroke fights your hand.
+
+`SMOOTH` is a majority vote over each cell's six face neighbours. A solid cell
+with two or fewer solid neighbours is a spur and goes; an air cell with four or
+more is a notch and fills. **One press is one pass** — every decision is read
+before any is applied, so a smooth cannot cascade into itself and eat the
+surface; press again to go further.
+
+Both take the brush ball rather than the span, because they need to see the
+material behind a cell as well as the air in front. `9` and `0` size it.
+
+An agent gets the same operations through one call:
+
+```json
+{"at": [16, 24, 16], "mode": "smooth", "radius": 5}
+{"at": [16, 9, 16], "mode": "flatten", "radius": 6, "normal": "-y"}
+```
+
+`raise` and `lower` are there too. `normal` matters only to `flatten` and
+defaults to the first open face at that cell.
 
 ## Layers
 
@@ -281,6 +316,7 @@ whoever connects.
 | `undo`, `redo` | take back whole tool calls |
 | `subdivide` | scale the scene up so every voxel becomes `factor`³ of them |
 | `select_box`, `select_connected`, `select_layer_all` | hold voxels for a transform |
+| `sculpt_surface` | flatten, smooth, raise or lower a surface at a point |
 | `describe_selection`, `clear_selection` | what is held, and let go |
 | `move_selection` | move the held voxels, one undo step |
 | `rotate_selection`, `flip_selection` | turn or mirror them about their own box |

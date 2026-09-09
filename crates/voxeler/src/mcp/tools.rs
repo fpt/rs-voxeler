@@ -552,6 +552,33 @@ pub fn list() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "sculpt_surface",
+            description:
+                "Work a surface the way a hand would, instead of naming cells. `flatten` levels \
+                 everything within the radius to the plane through `at` facing `normal` — \
+                 material in front of it goes, air behind it fills. `smooth` rounds by majority \
+                 vote of each cell's six face neighbours: a solid cell with two or fewer solid \
+                 neighbours is a spur and goes, an air cell with four or more is a notch and \
+                 fills, so it rounds corners and closes pits. `raise` and `lower` add or remove \
+                 the whole ball. Every decision is read before any is applied, so one call is \
+                 one pass and never cascades into itself; call it again to go further. `at` \
+                 must be inside the scene; `normal` defaults to the first exposed face at `at`, \
+                 and only `flatten` uses it. Writes to the active layer unless `layer` says \
+                 otherwise. One undo step.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "at": coord("A cell on the surface to work"),
+                    "mode": {"type": "string", "enum": ["flatten", "smooth", "raise", "lower"]},
+                    "radius": {"type": "integer", "minimum": 0, "maximum": 16, "default": 3},
+                    "normal": {"type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z"]},
+                    "color": color,
+                    "layer": layer,
+                },
+                "required": ["at", "mode"],
+            }),
+        },
+        ToolInfo {
             name: "select_layer_all",
             description: "Select every voxel of a layer — the whole of it, which is the commonest \
                  selection there is and the one a flood fill needs a seed to reach. Defaults to \
@@ -1167,6 +1194,59 @@ fn dispatch(
             let to = corner(args, "to")?;
             editor.select_box(from, to);
             Ok(CallResult::text(selection_text(editor)))
+        }
+        "sculpt_surface" => {
+            let at = corner(args, "at")?;
+            let tool = match args.get("mode").and_then(Value::as_str) {
+                Some("flatten") => crate::editor::Tool::Flatten,
+                Some("smooth") => crate::editor::Tool::Smooth,
+                Some("raise") => crate::editor::Tool::Build,
+                Some("lower") => crate::editor::Tool::Erase,
+                _ => return Err("`mode` must be flatten, smooth, raise or lower".into()),
+            };
+            let radius = match args.get("radius") {
+                None | Some(Value::Null) => 3,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|r| *r <= 16)
+                    .ok_or("`radius` must be 0..=16")? as u8,
+            };
+            let normal = match args.get("normal").and_then(Value::as_str) {
+                Some(name) => named_normal(name)?,
+                // The first face of `at` with air against it. A flatten needs a
+                // direction and an agent has no cursor to have hit one with, so
+                // the model is asked instead — and told, in the report, which
+                // one it got, because a guess it cannot see is worse than none.
+                None => exposed_normal(editor.model(), at)
+                    .ok_or("nothing at `at` shows an open face; give `normal` explicitly")?,
+            };
+            let layer = match args.get("layer") {
+                None | Some(Value::Null) => editor.active_layer(),
+                _ => writable_layer_arg(editor, args)?,
+            };
+            let color = color_arg(editor, args)?;
+            let r = editor.sculpt_at(tool, at, radius, normal, color, layer)?;
+            Ok(CallResult::text(format!(
+                "{} {} cells: {} added, {} removed, {} repainted, {} unchanged\n{}",
+                args["mode"].as_str().unwrap_or("sculpt"),
+                r.targeted,
+                r.added,
+                r.removed,
+                r.repainted,
+                r.unchanged,
+                json!({
+                    "targeted": r.targeted,
+                    "added": r.added,
+                    "removed": r.removed,
+                    "repainted": r.repainted,
+                    "unchanged": r.unchanged,
+                    "at": at,
+                    "radius": radius,
+                    "normal": normal,
+                    "layer": layer,
+                    "model_voxels": editor.model().filled_count(),
+                })
+            )))
         }
         "select_layer_all" => {
             let layer = match args.get("layer") {
@@ -2003,6 +2083,42 @@ fn mirror(args: &Value) -> Result<[bool; 3], String> {
     Ok(out)
 }
 
+/// A signed axis, spelled the way an agent would say it.
+fn named_normal(name: &str) -> Result<[i32; 3], String> {
+    let (sign, axis) = name.split_at(1);
+    let sign = match sign {
+        "+" => 1,
+        "-" => -1,
+        _ => return Err("`normal` looks like \"+y\" or \"-x\"".into()),
+    };
+    let axis = match axis {
+        "x" | "X" => 0,
+        "y" | "Y" => 1,
+        "z" | "Z" => 2,
+        _ => return Err("`normal` looks like \"+y\" or \"-x\"".into()),
+    };
+    Ok(std::array::from_fn(|a| if a == axis { sign } else { 0 }))
+}
+
+/// The first face of `at` with air against it, +Y first.
+///
+/// +Y first because up is the face a sculpt is usually aimed at, and a rule
+/// that picks the same face every time beats one that depends on iteration
+/// order nobody can see.
+fn exposed_normal(model: &VoxelModel, at: [i32; 3]) -> Option<[i32; 3]> {
+    let faces = [
+        [0, 1, 0],
+        [0, -1, 0],
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
+    faces
+        .into_iter()
+        .find(|n| model.get(at[0] + n[0], at[1] + n[1], at[2] + n[2]) == 0)
+}
+
 /// An axis named the way an agent would say it.
 fn axis_arg(args: &Value) -> Result<usize, String> {
     match args.get("axis").and_then(Value::as_str) {
@@ -2465,6 +2581,97 @@ mod tests {
 
     fn run(e: &mut Editor, name: &str, args: Value) -> CallResult {
         call(e, name, &args)
+    }
+
+    // -- sculpting ---------------------------------------------------------
+
+    /// The hand and the agent must get the same answer, or they are two tools
+    /// wearing one name. This is the agent's half of
+    /// `smooth_takes_a_spur_off_and_fills_a_notch_without_cascading`.
+    #[test]
+    fn sculpt_smooths_and_flattens_and_reports_what_it_did() {
+        let mut e = editor();
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [7,0,7], "color": 4}),
+        );
+        // A spur on the slab, and a notch through it.
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 2, "y": 1, "z": 2, "color": 4}),
+        );
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 5, "y": 0, "z": 5, "color": 0}),
+        );
+
+        let r = run(
+            &mut e,
+            "sculpt_surface",
+            json!({"at": [4,0,4], "mode": "smooth", "radius": 6, "color": 9}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        let j = json_of(&r);
+        assert_eq!(e.model().get(2, 1, 2), 0, "the spur went");
+        assert_eq!(e.model().get(5, 0, 5), 9, "the notch filled");
+        // The outcomes are exclusive and sum to what was targeted.
+        let sum = j["added"].as_u64().unwrap()
+            + j["removed"].as_u64().unwrap()
+            + j["repainted"].as_u64().unwrap()
+            + j["unchanged"].as_u64().unwrap();
+        assert_eq!(sum, j["targeted"].as_u64().unwrap());
+        assert_eq!(j["normal"], json!([0, 1, 0]), "the exposed face is up");
+        assert_eq!(e.undo_depth(), 4, "one call, one undo step");
+
+        // Flatten levels to the plane through `at`.
+        run(
+            &mut e,
+            "put_voxel",
+            json!({"x": 3, "y": 1, "z": 3, "color": 4}),
+        );
+        let r = run(
+            &mut e,
+            "sculpt_surface",
+            json!({"at": [3,0,3], "mode": "flatten", "radius": 3, "normal": "+y", "color": 9}),
+        );
+        assert_eq!(r.is_error, None, "{}", text_of(&r));
+        assert_eq!(e.model().get(3, 1, 3), 0, "above the plane went");
+        assert!(e.model().get(3, 0, 3) != 0, "the plane itself stayed");
+    }
+
+    #[test]
+    fn sculpt_refuses_what_it_cannot_mean() {
+        let mut e = editor();
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [7,0,7], "color": 4}),
+        );
+        for args in [
+            json!({"at": [4,0,4], "mode": "melt"}),
+            json!({"at": [99,0,0], "mode": "smooth"}),
+            json!({"at": [4,0,4], "mode": "smooth", "radius": 99}),
+            json!({"at": [4,0,4], "mode": "flatten", "normal": "up"}),
+        ] {
+            let r = call(&mut e, "sculpt_surface", &args);
+            assert_eq!(r.is_error, Some(true), "{args}: {}", text_of(&r));
+        }
+        // A cell with no open face has no default normal to offer.
+        run(
+            &mut e,
+            "put_rect",
+            json!({"from": [0,0,0], "to": [7,7,7], "color": 4}),
+        );
+        let r = call(
+            &mut e,
+            "sculpt_surface",
+            &json!({"at": [4,4,4], "mode": "flatten"}),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text_of(&r).contains("normal"), "{}", text_of(&r));
     }
 
     // -- rotating an object ------------------------------------------------
