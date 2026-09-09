@@ -161,8 +161,14 @@ to cut a block back.
 Fills take the commonest colour of the cell's solid neighbours, so closing a
 notch in a red panel gives you red rather than whatever the brush was set to.
 
-Both take the brush ball rather than the span, because they need to see the
-material behind a cell as well as the air in front. `9` and `0` size it.
+Both are **tools in their own right**, not modes of `BUILD` — `SHIFT+F` selects
+flatten the way `B` selects build, and the tool row shows which one is live.
+
+Both reach by the **brush** rather than the span, because they need to see the
+material behind a cell as well as the air in front. `9` and `0` size it, and the
+chip at the end of the span row shows the current size while a sculpt tool is
+running. Choosing one opens the brush to a usable size if it was set to a single
+voxel, because a one-cell flatten does nothing you could see.
 
 An agent gets the same operations through one call:
 

@@ -576,12 +576,19 @@ pub fn draw_tools(fb: &mut Framebuffer, editor: &Editor) {
     // "the voxel span is selected": a radius under a flood is what turns that
     // flood from a click into a stroke, and the chip has to say so or the
     // difference is invisible until you drag.
-    if editor.brush.radius > 0 {
+    // Always while a sculpt tool is running, even at radius 0. That row is the
+    // only place the brush is named, and with no span lit either the whole line
+    // was blank — which reads as a tool with no settings rather than as a tool
+    // whose setting is the brush. Reported from use.
+    let sculpt = matches!(editor.tool, Tool::Flatten | Tool::Smooth);
+    if editor.brush.radius > 0 || sculpt {
         let e = editor.brush.edge();
-        let label = if editor.span == Span::Voxel || !span_applies {
-            format!("{} {e}x{e}x{e}", editor.brush.shape.name())
+        // The keys are on the chip, not only in the help card, for the same
+        // reason the span chips carry theirs.
+        let label = if editor.span == Span::Voxel && span_applies {
+            format!("9 0 {} {e}x{e}x{e}", editor.brush.shape.name())
         } else {
-            format!("{} R{}", editor.brush.shape.name(), editor.brush.radius)
+            format!("9 0 {} R{}", editor.brush.shape.name(), editor.brush.radius)
         };
         chip(fb, x, y, &label, true);
     }
@@ -631,7 +638,7 @@ const HELP: &[&str] = &[
     "",
     "B E P I S    BUILD ERASE PAINT PICK SELECT",
     "SHIFT+F S    FLATTEN / SMOOTH (SCULPT)",
-    "             (SCULPT USES THE BRUSH, NOT THE SPAN)",
+    "             (SCULPT REACHES BY BRUSH: 9 0 SIZE IT)",
     "1 2 3 4      VOXEL AXIS PLANE VOLUME",
     "9 0          BRUSH SMALLER / BIGGER",
     "             (A RADIUS MAKES A FILL DRAGGABLE)",

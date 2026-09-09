@@ -279,6 +279,12 @@ struct Drag {
     before: std::collections::HashMap<[i32; 3], u8>,
 }
 
+/// What a sculpt tool opens the brush to when it is closed.
+///
+/// Two, not one: a radius of one is a plus of seven cells, which smooths and
+/// flattens almost nothing and reads as the tool being broken.
+pub const SCULPT_MIN_RADIUS: u8 = 2;
+
 pub struct Editor {
     document_id: u64,
     model: VoxelModel,
@@ -716,6 +722,37 @@ impl Editor {
             before: std::collections::HashMap::new(),
         });
         self.continue_stroke(target);
+    }
+
+    /// Choose a tool, and make sure it can do something.
+    ///
+    /// The sculpt tools reach by brush rather than by span, and at radius 0 a
+    /// brush is one cell — which for flatten or smooth is an operation with no
+    /// visible effect. Selecting one therefore opens the brush to a usable
+    /// size if it is closed, and says so: a tool whose first press appears to
+    /// do nothing is one nobody presses twice.
+    ///
+    /// The bump is announced rather than silent, and only ever upward, so a
+    /// brush you sized yourself is left alone.
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        let sculpt = matches!(tool, Tool::Flatten | Tool::Smooth);
+        if sculpt && self.brush.radius == 0 {
+            self.brush.radius = SCULPT_MIN_RADIUS;
+            self.status = format!(
+                "{} — brush opened to {}, 9 and 0 resize it",
+                tool.name().to_lowercase(),
+                self.brush.radius
+            );
+        } else if sculpt {
+            self.status = format!(
+                "{} — brush {}, 9 and 0 resize it",
+                tool.name().to_lowercase(),
+                self.brush.radius
+            );
+        } else {
+            self.status = tool.name().to_lowercase();
+        }
     }
 
     /// Whether the current span reaches only so far from where it is aimed.
@@ -4650,6 +4687,35 @@ mod tests {
             before - 1 + 1 - 4,
             "exactly the cells the rule names"
         );
+    }
+
+    /// A sculpt tool reaches by brush, and a brush of radius 0 is one cell —
+    /// which for flatten or smooth does nothing anyone can see. Selecting one
+    /// opens the brush rather than leaving a tool whose first press appears
+    /// broken. Reported from use: the row showed no brush chip at all, so
+    /// nothing on screen said the setting existed.
+    #[test]
+    fn choosing_a_sculpt_tool_opens_a_brush_that_can_do_something() {
+        let mut e = editor_with_floor();
+        assert_eq!(e.brush.radius, 0, "a fresh editor draws single voxels");
+
+        e.set_tool(Tool::Flatten);
+        assert_eq!(e.brush.radius, SCULPT_MIN_RADIUS);
+        assert!(
+            e.status().contains('9'),
+            "and says how to resize: {}",
+            e.status()
+        );
+
+        // Only ever upward: a brush you sized yourself is left alone.
+        e.brush.radius = 6;
+        e.set_tool(Tool::Smooth);
+        assert_eq!(e.brush.radius, 6, "a chosen size is not overridden");
+
+        // The drawing tools are untouched — a single voxel is what they are for.
+        e.brush.radius = 0;
+        e.set_tool(Tool::Build);
+        assert_eq!(e.brush.radius, 0);
     }
 
     /// A sculpt tool needs to see material behind a cell as well as air in
