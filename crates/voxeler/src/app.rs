@@ -71,7 +71,7 @@ pub struct App {
     ui_held: u64,
     /// The last swatch clicked and when, for the double-click that opens the
     /// colour editor.
-    last_swatch: Option<(u8, Instant)>,
+    last_click: Option<(Clicked, Instant)>,
     shown_title: String,
     /// Tool calls waiting to be run against `editor`, when `--mcp` is on.
     ///
@@ -131,7 +131,7 @@ pub fn run(editor: Editor, mcp_port: Option<u16>) -> Result<(), String> {
         grabbed: None,
         ui_input: Input::default(),
         ui_held: 0,
-        last_swatch: None,
+        last_click: None,
         shown_title: String::new(),
         bridge,
         viewer: None,
@@ -320,13 +320,13 @@ impl App {
                 // different meaning you have to aim for.
                 self.editor.color = index;
                 let now = Instant::now();
-                if is_double_click(self.last_swatch, index, now) {
+                if is_double_click(self.last_click, Clicked::Swatch(index), now) {
                     // Cleared, so a third click starts a new pair rather than
                     // reopening the dialog that is already open.
-                    self.last_swatch = None;
+                    self.last_click = None;
                     self.editor.open_color_dialog();
                 } else {
-                    self.last_swatch = Some((index, now));
+                    self.last_click = Some((Clicked::Swatch(index), now));
                     self.editor
                         .set_status(format!("colour {index} — click again to edit it"));
                 }
@@ -337,16 +337,32 @@ impl App {
                     // because "stop showing the arm" and "stop listing the
                     // arm's layers" are different intentions and a panel that
                     // guessed between them would be wrong half the time.
+                    // An object row folds or hides; neither pairs, so a
+                    // quick two of them starts nothing.
                     hud::PanelRow::Object { index, .. } if hit.on_eye => {
+                        self.last_click = None;
                         self.editor.toggle_object_visible(index);
                     }
                     hud::PanelRow::Object { index, .. } => {
+                        self.last_click = None;
                         self.editor.toggle_collapsed(index);
                     }
                     hud::PanelRow::Layer { index, .. } => {
                         self.editor.select_layer(index);
                         if hit.on_eye {
+                            // Two toggles is not a gesture. The switch never
+                            // pairs, so a quick on-off opens no prompt.
+                            self.last_click = None;
                             self.editor.toggle_layer_visible();
+                        } else {
+                            let now = Instant::now();
+                            let on = Clicked::LayerName(index);
+                            if is_double_click(self.last_click, on, now) {
+                                self.last_click = None;
+                                self.editor.begin_rename();
+                            } else {
+                                self.last_click = Some((on, now));
+                            }
                         }
                     }
                 }
@@ -911,13 +927,26 @@ fn blit(dst: &mut [u32], dst_w: u32, dst_h: u32, src: &Framebuffer, scale: u32) 
 /// double just picks the colour twice.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// Whether a click on `index` completes a double-click on the same swatch.
+/// What a click landed on, for pairing it with the next one.
+///
+/// One value covering every panel rather than a tracker each, so clicking a
+/// swatch and then a layer row cannot pair into a double — they are different
+/// things, and "the same thing twice" is what a double-click means.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Clicked {
+    Swatch(u8),
+    /// A layer row, on its name rather than its switch — double-clicking the
+    /// switch is two toggles and means nothing else.
+    LayerName(usize),
+}
+
+/// Whether this click completes a double-click on the same thing.
 ///
 /// A function rather than a branch inside the event handler so it can be
 /// tested, the same reason `is_click`'s dead zone is one: the window cannot be
 /// driven from a test, and the part worth checking is the rule.
-fn is_double_click(previous: Option<(u8, Instant)>, index: u8, now: Instant) -> bool {
-    previous.is_some_and(|(before, at)| before == index && now.duration_since(at) < DOUBLE_CLICK)
+fn is_double_click(previous: Option<(Clicked, Instant)>, now_on: Clicked, now: Instant) -> bool {
+    previous.is_some_and(|(before, at)| before == now_on && now.duration_since(at) < DOUBLE_CLICK)
 }
 
 /// How far the pointer may travel between press and release and still be a
@@ -968,7 +997,7 @@ pub fn attach(session: &crate::mcp::session::Session) -> Result<(), String> {
         grabbed: None,
         ui_input: Input::default(),
         ui_held: 0,
-        last_swatch: None,
+        last_click: None,
         shown_title: String::new(),
         bridge: None,
         viewer: Some(viewer),
@@ -997,30 +1026,45 @@ mod tests {
     /// The window cannot be driven from a test, so the decision is a function
     /// and this is what checks it — the same shape `is_click`'s dead zone has.
     #[test]
-    fn a_double_click_is_two_clicks_on_one_swatch_in_time() {
+    fn a_double_click_is_two_clicks_on_one_thing_in_time() {
         let t0 = Instant::now();
         let soon = t0 + Duration::from_millis(150);
         let late = t0 + DOUBLE_CLICK + Duration::from_millis(1);
+        let swatch = Clicked::Swatch(4);
+        let row = Clicked::LayerName(4);
 
+        assert!(is_double_click(Some((swatch, t0)), swatch, soon), "quickly");
         assert!(
-            is_double_click(Some((4, t0)), 4, soon),
-            "same swatch, quickly"
-        );
-        assert!(
-            !is_double_click(Some((4, t0)), 5, soon),
+            !is_double_click(Some((swatch, t0)), Clicked::Swatch(5), soon),
             "a different swatch is a new first click"
         );
         assert!(
-            !is_double_click(Some((4, t0)), 4, late),
+            !is_double_click(Some((swatch, t0)), swatch, late),
             "too slow is two separate clicks"
         );
         assert!(
-            !is_double_click(None, 4, soon),
+            !is_double_click(None, swatch, soon),
             "nothing to pair with is a first click"
         );
         // Exactly at the limit is not inside it, so the boundary has one
         // answer rather than depending on the clock's resolution.
-        assert!(!is_double_click(Some((4, t0)), 4, t0 + DOUBLE_CLICK));
+        assert!(!is_double_click(
+            Some((swatch, t0)),
+            swatch,
+            t0 + DOUBLE_CLICK
+        ));
+
+        // A row pairs the same way, and never with a swatch — they are
+        // different things even at the same number.
+        assert!(is_double_click(Some((row, t0)), row, soon));
+        assert!(
+            !is_double_click(Some((swatch, t0)), row, soon),
+            "a swatch then a row is two first clicks"
+        );
+        assert!(
+            !is_double_click(Some((row, t0)), Clicked::LayerName(5), soon),
+            "and a different row is a new first click"
+        );
     }
 
     /// A press emits a move or two of its own, and near the horizon one pixel

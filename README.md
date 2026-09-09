@@ -422,7 +422,8 @@ and not only in the file:
 ```
 
 On an object row the switch hides that part and anywhere else folds it shut.
-On a layer row the switch toggles the layer and anywhere else selects it.
+On a layer row the switch toggles the layer and anywhere else selects it —
+**double-click the name to rename it**, the same gesture that opens a colour.
 
 The number on a layer row is its place in the **stack** — who covers whom — and
 it is what `K` and `J` move. That is deliberately not the same as its place in
