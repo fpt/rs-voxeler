@@ -118,6 +118,18 @@ radius and it covers a patch the size you asked for, and you can drag it:
 So resizing the brush no longer snaps you back to the voxel span — under a
 flood, the radius is the thing that makes the flood workable by hand.
 
+## How it looks
+
+Faces are lit by direction *and* by shape. Each corner of each face is shaded by
+how enclosed it is — the standard voxel ambient occlusion, computed when the
+surface is extracted and interpolated across the face by the rasterizer. It
+costs one byte per face and it is the difference between a model that reads as a
+solid object and one that reads as a pile of tinted rectangles: creases darken,
+stair-stepped curves gain depth, and where two shapes meet you can see that they
+meet.
+
+`Light::occlusion` tunes it, and 0 turns it off.
+
 ## Sculpting
 
 Two of the tools do not paint a colour onto a reach — they decide, cell by cell,

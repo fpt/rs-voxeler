@@ -23,6 +23,29 @@ pub struct Light {
     pub direction: Vec3,
     pub ambient: f32,
     pub diffuse: f32,
+    /// How much a fully enclosed corner darkens, 0..=1.
+    ///
+    /// Ambient occlusion is the cheapest thing that makes a voxel model read as
+    /// a solid object rather than a set of tinted rectangles, and it is the one
+    /// shading term here that depends on the *shape* rather than on the face's
+    /// direction. At 0 every face is one colour again.
+    pub occlusion: f32,
+}
+
+impl Light {
+    /// How bright each of a face's four corners is, from how enclosed it is.
+    ///
+    /// Four levels because a corner has three neighbours, so `occlusion` is the
+    /// whole of the tuning: 0 turns it off and leaves every face one colour,
+    /// which is what the renderer did before and what a caller wanting the old
+    /// picture asks for.
+    ///
+    /// The steps are even. Voxel surfaces are mostly right angles, so most
+    /// corners land on 2 or 3, and an uneven ramp shows up as a visible break
+    /// along every convex edge in the model.
+    pub fn corner_shades(&self, levels: [u8; 4]) -> [f32; 4] {
+        levels.map(|l| 1.0 - self.occlusion * (3 - l.min(3)) as f32 / 3.0)
+    }
 }
 
 impl Default for Light {
@@ -34,6 +57,10 @@ impl Default for Light {
             direction: crate::math::vec3(-0.45, -1.0, -0.35).normalized(),
             ambient: 0.42,
             diffuse: 0.58,
+            // Enough that an inside corner reads as one, well short of the
+            // sooty look that comes of pushing it — the darkest corner keeps
+            // just over half its colour.
+            occlusion: 0.45,
         }
     }
 }
@@ -88,7 +115,8 @@ pub fn draw_mesh(
             .to_u32();
         let c = quad.corners();
         let world = [c[0] + offset, c[1] + offset, c[2] + offset, c[3] + offset];
-        fill_polygon(fb, scene, &world, color, 0.0);
+        let shade = scene.light.corner_shades(quad.ao_levels());
+        fill_polygon_shaded(fb, scene, &world, &shade, color, 0.0);
     }
 }
 
@@ -98,15 +126,35 @@ pub fn draw_mesh(
 /// value to lay something (a highlight, a wireframe) on top of coplanar
 /// geometry without it fighting for the pixel.
 pub fn fill_polygon(fb: &mut Framebuffer, scene: &Scene, poly: &[Vec3], color: u32, bias: f32) {
+    fill_polygon_shaded(fb, scene, poly, &[1.0; 8], color, bias);
+}
+
+/// The same, with a brightness per corner interpolated across the face.
+///
+/// Separate from the flat path rather than replacing it: the grid, the gizmos
+/// and the volume box are one colour by nature, and making them pay for a
+/// per-pixel multiply to say "times one" would be a cost for nothing. The mesh
+/// is the only thing that varies corner to corner, and it is the only caller.
+pub fn fill_polygon_shaded(
+    fb: &mut Framebuffer,
+    scene: &Scene,
+    poly: &[Vec3],
+    corner_shade: &[f32],
+    color: u32,
+    bias: f32,
+) {
     let mut clip = [Vec4::default(); 8];
     let n = to_clip_space(&scene.view_proj, poly, &mut clip);
-    let Some(n) = clip_near(&mut clip, n) else {
+    let mut shade = [1.0f32; 8];
+    let carried = n.min(corner_shade.len());
+    shade[..carried].copy_from_slice(&corner_shade[..carried]);
+    let Some(n) = clip_near(&mut clip, &mut shade, n) else {
         return;
     };
 
     let mut screen = [Vertex::default(); 8];
     for i in 0..n {
-        screen[i] = project(fb, clip[i], bias);
+        screen[i] = project(fb, clip[i], bias, shade[i]);
     }
     // Fan from the first vertex: valid because near-plane clipping of a convex
     // polygon leaves it convex.
@@ -124,7 +172,11 @@ pub fn draw_line(fb: &mut Framebuffer, scene: &Scene, a: Vec3, b: Vec3, color: u
     if !clip_segment_near(&mut clip) {
         return;
     }
-    let (p, q) = (project(fb, clip[0], bias), project(fb, clip[1], bias));
+    // A line is one colour; the shade is carried for the mesh alone.
+    let (p, q) = (
+        project(fb, clip[0], bias, 1.0),
+        project(fb, clip[1], bias, 1.0),
+    );
 
     // Step along whichever axis is longer, so the line has no gaps.
     let steps = (q.x - p.x).abs().max((q.y - p.y).abs()).ceil().max(1.0);
@@ -168,6 +220,9 @@ struct Vertex {
     x: f32,
     y: f32,
     z: f32,
+    /// How lit this corner is, 0..=1. Flat geometry passes 1 everywhere and
+    /// pays nothing for it; only the mesh varies it.
+    shade: f32,
 }
 
 fn to_clip_space(vp: &Mat4, poly: &[Vec3], out: &mut [Vec4; 8]) -> usize {
@@ -184,27 +239,34 @@ fn to_clip_space(vp: &Mat4, poly: &[Vec3], out: &mut [Vec4; 8]) -> usize {
 /// has a negative `w`, and dividing by it mirrors the vertex to the wrong side
 /// of the screen — a triangle that should be partly visible instead draws as a
 /// wild wedge across the whole window.
-fn clip_near(poly: &mut [Vec4; 8], n: usize) -> Option<usize> {
+fn clip_near(poly: &mut [Vec4; 8], shade: &mut [f32; 8], n: usize) -> Option<usize> {
     let dist = |v: Vec4| v.z + v.w;
     if (0..n).all(|i| dist(poly[i]) >= 0.0) {
         return (n >= 3).then_some(n);
     }
     let mut out = [Vec4::default(); 8];
+    let mut lit = [1.0f32; 8];
     let mut m = 0;
     for i in 0..n {
         let (cur, next) = (poly[i], poly[(i + 1) % n]);
         let (dc, dn) = (dist(cur), dist(next));
         if dc >= 0.0 && m < 8 {
             out[m] = cur;
+            lit[m] = shade[i];
             m += 1;
         }
         // Sign change: the edge crosses the plane, so emit the crossing point.
         if (dc >= 0.0) != (dn >= 0.0) && m < 8 {
-            out[m] = cur.lerp(next, dc / (dc - dn));
+            let t = dc / (dc - dn);
+            out[m] = cur.lerp(next, t);
+            // The shade rides the same parameter, or a quad crossing the near
+            // plane gets a corner's brightness at a point that is not a corner.
+            lit[m] = shade[i] + (shade[(i + 1) % n] - shade[i]) * t;
             m += 1;
         }
     }
     *poly = out;
+    *shade = lit;
     (m >= 3).then_some(m)
 }
 
@@ -224,14 +286,25 @@ fn clip_segment_near(seg: &mut [Vec4; 2]) -> bool {
     true
 }
 
-fn project(fb: &Framebuffer, v: Vec4, bias: f32) -> Vertex {
+fn project(fb: &Framebuffer, v: Vec4, bias: f32, shade: f32) -> Vertex {
     let inv_w = 1.0 / v.w;
     Vertex {
         x: (v.x * inv_w * 0.5 + 0.5) * fb.width() as f32,
         // Y flips: ndc grows upward, rows grow downward.
         y: (0.5 - v.y * inv_w * 0.5) * fb.height() as f32,
         z: v.z * inv_w - bias,
+        shade,
     }
+}
+
+/// Scale a packed RGB by a factor, saturating at full brightness.
+#[inline]
+fn scale_u32(color: u32, s: f32) -> u32 {
+    let ch = |shift: u32| {
+        let v = (((color >> shift) & 0xFF) as f32 * s).clamp(0.0, 255.0) as u32;
+        v << shift
+    };
+    ch(16) | ch(8) | ch(0)
 }
 
 #[inline]
@@ -240,6 +313,18 @@ fn edge(a: Vertex, b: Vertex, x: f32, y: f32) -> f32 {
 }
 
 fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u32) {
+    // Nothing to interpolate is the common case — every overlay, and every
+    // face whose corners are equally open — so it keeps the loop it always had
+    // and the per-pixel work with it. The colour is still scaled once, because
+    // a uniformly darkened face is a real answer: four corners equally
+    // enclosed is the back of a niche.
+    let flat = a.shade == b.shade && b.shade == c.shade;
+    let flat_color = scale_u32(color, a.shade);
+    let base = [
+        ((color >> 16) & 0xFF) as f32,
+        ((color >> 8) & 0xFF) as f32,
+        (color & 0xFF) as f32,
+    ];
     let area = edge(a, b, c.x, c.y);
     if area.abs() < 1e-6 {
         return; // degenerate, or exactly edge-on
@@ -264,7 +349,16 @@ fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u
             if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                 continue;
             }
-            fb.test_and_set(px, py, w0 * a.z + w1 * b.z + w2 * c.z, color);
+            let lit = if flat {
+                flat_color
+            } else {
+                // The same barycentrics the depth already uses, which is what
+                // makes this exact rather than merely close.
+                let s = w0 * a.shade + w1 * b.shade + w2 * c.shade;
+                let (r, g, bl) = (base[0] * s, base[1] * s, base[2] * s);
+                ((r as u32) << 16) | ((g as u32) << 8) | bl as u32
+            };
+            fb.test_and_set(px, py, w0 * a.z + w1 * b.z + w2 * c.z, lit);
         }
     }
 }
@@ -272,6 +366,74 @@ fn fill_triangle(fb: &mut Framebuffer, a: Vertex, b: Vertex, c: Vertex, color: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ambient occlusion has to reach the pixels, and only darken.
+    ///
+    /// Checked against the same scene rendered with `occlusion` at zero, which
+    /// is the picture this renderer drew before: a rendering test that passes
+    /// either way is worse than none, and "it looks nicer" is not an assertion.
+    #[test]
+    fn occlusion_darkens_creases_and_leaves_open_faces_alone() {
+        use crate::mesh::{extract, ExtractOptions};
+        use voxel_core::{Palette, VoxelModel};
+
+        // A floor with a wall standing on it: the floor row against the wall is
+        // occluded, the rest of the floor is not.
+        let mut m = VoxelModel::new(24, 24, 24);
+        for x in 2..22 {
+            for z in 2..22 {
+                m.set(x, 2, z, 100);
+            }
+        }
+        for y in 3..10 {
+            for z in 2..22 {
+                m.set(2, y, z, 100);
+            }
+        }
+        let mesh = extract(&m, ExtractOptions::default());
+        let pal = Palette::default();
+
+        let render = |occlusion: f32| {
+            let cam = crate::camera::OrbitCamera {
+                target: Vec3::ZERO,
+                distance: 40.0,
+                yaw: 0.7,
+                pitch: 0.6,
+                ..Default::default()
+            };
+            let mut fb = Framebuffer::new(192, 192);
+            fb.clear(0);
+            let scene = Scene {
+                view_proj: cam.view_projection(1.0),
+                eye: cam.eye(),
+                light: Light {
+                    occlusion,
+                    ..Light::default()
+                },
+            };
+            draw_mesh(&mut fb, &scene, &mesh, &pal, Vec3::splat(-12.0));
+            fb.color().to_vec()
+        };
+
+        let flat = render(0.0);
+        let lit = render(0.45);
+        let changed: Vec<usize> = (0..flat.len()).filter(|i| flat[*i] != lit[*i]).collect();
+        assert!(
+            !changed.is_empty(),
+            "occlusion changed nothing — it is not reaching the pixels"
+        );
+        // Every change is a darkening. A brighter pixel would mean the levels
+        // are inverted, which is the easy way to get this backwards.
+        for i in changed {
+            let luma = |c: u32| (c >> 16 & 0xFF) + (c >> 8 & 0xFF) + (c & 0xFF);
+            assert!(
+                luma(lit[i]) < luma(flat[i]),
+                "occlusion brightened a pixel: {:06x} -> {:06x}",
+                flat[i],
+                lit[i]
+            );
+        }
+    }
     use crate::math::vec3;
     use crate::mesh::{extract, ExtractOptions};
     use voxel_core::VoxelModel;
