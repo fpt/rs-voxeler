@@ -3,7 +3,13 @@
 //! Each server writes one small JSON file into the user's cache directory,
 //! naming the loopback port its attach listener accepts on. Discovery prefers a
 //! session rooted where you are — you run `voxeler attach` from the project you
-//! are working in — and falls back to the only live one.
+//! are working in — then one rooted at the default place, then the only live
+//! one.
+//!
+//! The middle step is what makes a bare `voxeler attach` find a server a desktop
+//! client started: that server was given no directory either, so its root is the
+//! default one, and neither process had to agree about a working directory to
+//! find the other.
 //!
 //! Liveness is decided by **connecting**, not by a pid check: a pid can be
 //! reused and a crashed server leaves its file behind, so the socket is the only
@@ -155,17 +161,35 @@ pub enum Discovery {
 
 /// Find the server to attach to.
 pub fn discover(root: Option<&Path>) -> Discovery {
-    discover_in(&session_dir(), root, |s| s.is_live())
+    discover_in(&session_dir(), root, &preferred_roots(), |s| s.is_live())
 }
 
-/// As [`discover`], over an explicit session directory and liveness test.
+/// Where to look when nobody named a root: the directory you are standing in,
+/// then the place `voxeler mcp` roots itself with no argument.
 ///
-/// `root`, when given, picks a specific server. Otherwise prefer one rooted at
-/// the current directory — the overwhelmingly common case — and fall back to the
+/// Passed in rather than read inside [`discover_in`], so a test can say which
+/// roots it means without a process-wide environment to set.
+fn preferred_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd);
+    }
+    if let Ok(default) = super::Roots::default_dir() {
+        out.push(default);
+    }
+    out
+}
+
+/// As [`discover`], over an explicit session directory, preference list and
+/// liveness test.
+///
+/// `root`, when given, picks a specific server and nothing else will do.
+/// Otherwise the preferred roots are tried in order, and failing all of them the
 /// only live session if there is exactly one.
 pub fn discover_in(
     dir: &Path,
     root: Option<&Path>,
+    preferred: &[PathBuf],
     is_live: impl Fn(&Session) -> bool,
 ) -> Discovery {
     let mut live = Vec::new();
@@ -180,11 +204,13 @@ pub fn discover_in(
         }
     }
 
-    let wanted = root
-        .map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf()))
-        .or_else(|| std::env::current_dir().ok());
-    if let Some(wanted) = &wanted {
-        if let Some(s) = live.iter().find(|s| Path::new(&s.root) == wanted) {
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let wanted: Vec<PathBuf> = match root {
+        Some(r) => vec![canonical(r)],
+        None => preferred.iter().map(|p| canonical(p)).collect(),
+    };
+    for want in &wanted {
+        if let Some(s) = live.iter().find(|s| Path::new(&s.root) == want) {
             return Discovery::Found(s.clone());
         }
     }
@@ -254,7 +280,7 @@ mod tests {
         Session::publish_in(&dir, &temp("stale-b"), 2).unwrap();
 
         assert!(matches!(
-            discover_in(&dir, None, |_| false),
+            discover_in(&dir, None, &[], |_| false),
             Discovery::None
         ));
         assert!(Session::list_in(&dir).is_empty(), "both files were swept");
@@ -265,8 +291,35 @@ mod tests {
         let dir = temp("single");
         let root = temp("single-root");
         Session::publish_in(&dir, &root, 7777).unwrap();
-        match discover_in(&dir, None, |_| true) {
+        match discover_in(&dir, None, &[], |_| true) {
             Discovery::Found(s) => assert_eq!(s.port, 7777),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The step that makes a bare `voxeler attach` find a server a desktop
+    /// client started: that server was given no directory either, so it is
+    /// rooted at the default place, and the two processes never had to agree
+    /// about a working directory.
+    #[test]
+    fn a_session_at_a_preferred_root_wins_over_another_live_one() {
+        let dir = temp("preferred");
+        let here = temp("preferred-here");
+        let default = temp("preferred-default");
+        let other = temp("preferred-other");
+        Session::publish_in(&dir, &other, 1).unwrap();
+        Session::publish_in(&dir, &default, 2).unwrap();
+
+        // Two live sessions would be ambiguous; the default place decides.
+        let preferred = vec![here.clone(), default.clone()];
+        match discover_in(&dir, None, &preferred, |_| true) {
+            Discovery::Found(s) => assert_eq!(s.port, 2),
+            other => panic!("{other:?}"),
+        }
+        // And in order: a session where you are standing beats the default.
+        Session::publish_in(&dir, &here, 3).unwrap();
+        match discover_in(&dir, None, &preferred, |_| true) {
+            Discovery::Found(s) => assert_eq!(s.port, 3),
             other => panic!("{other:?}"),
         }
     }
@@ -279,11 +332,11 @@ mod tests {
         Session::publish_in(&dir, &a, 1).unwrap();
         Session::publish_in(&dir, &b, 2).unwrap();
 
-        match discover_in(&dir, None, |_| true) {
+        match discover_in(&dir, None, &[], |_| true) {
             Discovery::Ambiguous(v) => assert_eq!(v.len(), 2),
             other => panic!("{other:?}"),
         }
-        match discover_in(&dir, Some(&b), |_| true) {
+        match discover_in(&dir, Some(&b), &[], |_| true) {
             Discovery::Found(s) => assert_eq!(s.port, 2),
             other => panic!("{other:?}"),
         }
@@ -297,7 +350,7 @@ mod tests {
         Session::publish_in(&dir, &temp("wrong-root-a"), 1).unwrap();
         let elsewhere = temp("wrong-root-b");
         assert!(matches!(
-            discover_in(&dir, Some(&elsewhere), |_| true),
+            discover_in(&dir, Some(&elsewhere), &[], |_| true),
             Discovery::None
         ));
     }

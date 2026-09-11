@@ -620,6 +620,25 @@ is a boundary rather than a convenience. Four rules, all load-bearing:
   first, on the reasoning that a relative path under a known root is unambiguous.
   It is not: a desktop MCP client spawns its servers with whatever working
   directory the *app* had. Reported from use.
+- **The roots never come from the working directory.** `Roots::choose` takes an
+  argument, then `VOXELER_ROOT`, then one default place — `~/Documents/voxeler`,
+  created if it is not there — and that is what lets `voxeler mcp` take no
+  arguments at all. A `VOXELER_ROOT` entry must be **absolute**: the variable is
+  read wherever the client started the server, so a relative one names a place
+  that moves with the launcher, and `.` is this very fallback arriving by another
+  door. Confinement held either way — the roots are canonicalised and nothing
+  reaches outside them — but the predictability is the point, so it is refused
+  where it cannot have been meant. An argument may still be relative, because
+  someone typed it standing in the directory it resolves against.
+  A home with no `Documents` falls back to `data_dir`, which is
+  `XDG_DATA_HOME` on Linux and `LOCALAPPDATA` on Windows: the shape `session_dir`
+  already used, because one platform's convention on the other is not an error
+  but a directory the user will never think to look in. The working directory is the same thing the paragraph above
+  refuses to trust, and a root taken from it moves depending on how the client
+  was launched. A fixed default is only a worse answer than that if it is a
+  secret, so it is printed at startup and named in the `initialize` instructions.
+  Nothing implicit can now be the filesystem root; an explicit `voxeler mcp /`
+  still means what it says.
 - **`..` is refused lexically**, before anything touches the filesystem, and
   *every* `..` rather than only the escaping ones. `a/../b` is harmless and
   `../b` is not, and telling them apart after the fact is exactly the reasoning
@@ -635,9 +654,33 @@ is a boundary rather than a convenience. Four rules, all load-bearing:
 
 Listeners bind `127.0.0.1`, never `0.0.0.0`. Under `--mcp` the roots are empty
 and **all** the file tools are refused, `save_model` included: you opened that
-document yourself, and an agent there has no business writing it. `voxeler mcp`
-with no argument refuses to root at the filesystem root, which is what a desktop
-client's working directory often is.
+document yourself, and an agent there has no business writing it.
+
+### The refusals are written for the caller that will make the mistake
+
+A boundary that only says "no" is a boundary an agent argues with. Each of these
+names the path to pass instead, because the caller cannot see the directory it
+was given:
+
+- **A path that repeats its own root.** A root that *is* `.../voxeler` makes
+  `voxeler/robot.vxm` resolve to `.../voxeler/voxeler/robot.vxm`: inside the
+  root, so every check above passes, and a save there succeeds two levels down
+  where nobody looks. The absolute spelling repeats the whole root
+  (`/a/models/a/models/x.vxm`), so the test is one loop over how much of the root
+  came back rather than a rule per spelling — and it is guarded on the path not
+  existing, since a real `voxeler/` inside a root named `voxeler` is somebody's
+  own directory.
+- **A leading `~`.** Only a shell expands it. Left alone it is an ordinary
+  directory name and the file lands at `<root>/~/...` forever.
+- **A directory that is not there.** `Roots::writable` is the write path, and it
+  is the guardrail under every other mistake about *where* a file goes: a write
+  creates the file it names, so without this check a typo in `parts/` succeeds.
+  Making a directory stays a person's job, which is also the only way to tell an
+  agent "no, put it there".
+- **An extension that is not `.vxm` or `.vox`.** A bare name gains `.vxm` —
+  `document_path` does this *before* resolving, so the path reported back is the
+  path that was written — and the same family of rule as `screenshot`'s required
+  `.png`.
 
 ### `voxeler attach` sends the model, not the picture
 
@@ -661,6 +704,14 @@ killed server leaves its session file behind. That means every discovery leaves 
 connection that says nothing, so `protocol::read_hello` returns `Ok(None)` for a
 peer that hangs up before speaking — treating it as an error made the server log
 a failure every time anyone ran `voxeler attach`.
+
+Discovery with nothing named prefers a session rooted where you are standing,
+then one rooted at the **default place**, then the only live one. The middle step
+is what makes a bare `voxeler attach` find a server a desktop client started:
+that server was given no directory either, so its root is the default one, and
+neither process had to agree about a working directory to find the other. The
+preference list is a parameter of `discover_in` rather than read inside it, so a
+test can say which roots it means without a process-wide environment to set.
 
 ## Decisions that measurement reversed
 

@@ -4,15 +4,36 @@ A voxel model editor and software renderer in Rust, a rewrite of the ideas in
 the Python `voxeler`.
 
 It is a tool for **making models** — by hand at the window, or by an agent over
-MCP — and the renderer under it exists to show you what you are making. It is
-not a game engine and is not becoming one.
+MCP — and the renderer under it exists to show you what you are making.
 
 ```bash
-cd crates && cargo build --release
-./crates/target/release/voxeler models/robot.vxm
+make install                              # builds, then puts voxeler on your PATH
+voxeler models/robot.vxm                  # the window
+claude mcp add voxeler -- voxeler mcp     # and an agent that can build in it
 ```
 
 ![the editor](docs/editor.png)
+
+## Installing
+
+```bash
+make install                    # builds --release, installs to ~/bin/voxeler
+PREFIX=/usr/local make install  # or somewhere on everyone's PATH
+```
+
+`make install` needs `$PREFIX/bin` on your `PATH` — `~/bin` is not on it by
+default everywhere, and the MCP registrations below run `voxeler` by name. To
+skip installing, build in place and use the binary where it lands:
+
+```bash
+make release                              # or: cd crates && cargo build --release
+./crates/target/release/voxeler models/robot.vxm
+```
+
+On Windows, build with cargo — the Makefile's `install` target is `install(1)` —
+and put `crates\target\release\voxeler.exe` somewhere on `PATH`, or name it in
+full wherever these instructions say `voxeler`. The default model directory is
+`%USERPROFILE%\Documents\voxeler`.
 
 ## What exists
 
@@ -35,6 +56,7 @@ cd crates && cargo build --release
 ```bash
 voxeler [FILE] [--size N] [--mcp [PORT]]
 voxeler mcp [DIR...]              serve an agent over stdio, headless
+                                  no DIR: $VOXELER_ROOT, else ~/Documents/voxeler
 voxeler attach [DIR]              open a window onto a running `voxeler mcp`
 voxeler FILE --thumbnail out.png [--width N] [--height N]
 ```
@@ -281,32 +303,96 @@ discovery.
 Two transports, because they answer different questions.
 
 **`voxeler mcp` — stdio, headless.** The agent starts it, so "is the server
-running?" never comes up. Name the directories its `open`/`save` tools may
-reach; they are the only part of the filesystem it can see:
+running?" never comes up. It needs no arguments, so registering it is one line:
+
+```bash
+claude mcp add voxeler -- voxeler mcp   # Claude Code
+codex mcp add voxeler -- voxeler mcp    # Codex
+```
+
+Or, for a client configured by file:
+
+```json
+{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp"] } } }
+```
+
+Either way it reads and writes `~/Documents/voxeler`, and creates it the first
+time. The `open`/`save` tools see no other part of the filesystem. `voxeler` has
+to be findable by name — see [Installing](#installing) — or give the absolute
+path to the binary instead.
+
+**The working directory is never used, which is why there is a default at all.**
+A desktop MCP client spawns its servers with whatever directory the *app*
+happened to have, so a root taken from it moves depending on how the client was
+launched, and neither you nor the agent can say where a bare file name lands. A
+fixed place is only a worse answer than that if it is a secret, so it is printed
+at startup and named in the server's `initialize` instructions.
+
+To put the models somewhere else, name the directories. An argument is the
+plainest way:
+
+```bash
+claude mcp add voxeler -- voxeler mcp /path/to/models
+codex mcp add voxeler -- voxeler mcp /path/to/models /path/to/voxels
+```
+
+`VOXELER_ROOT` says the same thing where a client's config can pass an
+environment but not an argument — several directories separated the way a `PATH`
+is, with `:` on macOS and Linux and `;` on Windows:
+
+```bash
+claude mcp add voxeler -e VOXELER_ROOT=/path/to/models -- voxeler mcp
+codex mcp add voxeler --env VOXELER_ROOT=/path/to/models:/path/to/voxels -- voxeler mcp
+```
+
+Or, by file:
 
 ```json
 { "mcpServers": { "voxeler": { "command": "voxeler",
                                "args": ["mcp", "/path/to/models", "/path/to/voxels"] } } }
 ```
 
-Replace those paths with existing absolute directories. JSON arguments are passed
-directly to the process: `~` and environment variables are not shell-expanded.
+```json
+{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp"],
+                               "env": { "VOXELER_ROOT": "/path/to/models" } } } }
+```
 
-**Name them.** A desktop MCP client spawns its servers with whatever working
-directory the *app* happened to have, so without an argument neither you nor the
-agent can say where a bare file name lands. (If that working directory turns out
-to be the filesystem root, the server refuses to start rather than quietly
-handing an agent every file on the machine.)
+**Write the paths out in full, and make sure they exist.** They reach the server
+however you spell them: JSON is passed straight to the process, and `~` after an
+`=` is not expanded by every shell either. A `VOXELER_ROOT` entry has to be
+absolute — the variable is read wherever the client happened to start the server,
+so a relative one names a different place depending on how that happened, and `.`
+names it outright. Every mistake here is a server that says why rather than one
+quietly rooted somewhere else:
 
-The directories are reported back in the server's `initialize` instructions, so
-the agent is told where it may write before it tries. Paths given to the tools
-may be **absolute inside any of them**, or relative to the first.
+```console
+$ VOXELER_ROOT='~/models' voxeler mcp
+voxeler: VOXELER_ROOT: ~/models is not a directory
+
+$ VOXELER_ROOT=models voxeler mcp
+voxeler: VOXELER_ROOT: models is a relative path, and this server never resolves
+one against its working directory — it is read wherever the client happened to
+start it. Name the directory in full
+```
+
+An *argument* may be relative — `voxeler mcp models/` is a person at a prompt,
+standing in the directory it resolves against, and the startup line prints the
+absolute answer back.
+
+Paths given to the tools may be **absolute inside any of the directories**, or
+relative to the first. Four mistakes are refused by name rather than written
+somewhere nobody will look: a path that repeats the directory it is already in
+(`voxeler/robot.vxm` under `~/Documents/voxeler`), a leading `~`, a subdirectory
+that does not exist — these tools create none — and an extension that is not
+`.vxm` or `.vox`. A name with no extension gains `.vxm`, and every save reports
+the path it actually wrote.
 
 **`voxeler attach` — a window onto that session.** The stdio server is headless,
 so this is how a person joins and watches the model being built:
 
 ```bash
-voxeler attach                # the session rooted here, or the only one running
+voxeler attach                # the session rooted here, then the default place,
+                              # then the only one running
 voxeler attach ~/models       # a particular one
 ```
 

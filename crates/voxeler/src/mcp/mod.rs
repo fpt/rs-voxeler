@@ -35,7 +35,7 @@ mod tools;
 mod wire;
 
 pub use stdio::serve_stdio;
-pub use tools::Roots;
+pub use tools::{RootSource, Roots, ROOT_VAR};
 
 use std::io::{BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
