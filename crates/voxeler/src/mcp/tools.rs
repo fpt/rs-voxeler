@@ -68,7 +68,9 @@ mod inspection_tests;
 ///
 /// [`choose`](Roots::choose) takes the roots from an argument, then
 /// `VOXELER_ROOT`, then one default place — and never from the working
-/// directory. That is the whole reason the default exists: a desktop MCP client
+/// directory. A `VOXELER_ROOT` entry must be absolute for that reason
+/// ([`env_dirs`]); an argument may be relative, because a person typed it
+/// somewhere. That is the whole reason the default exists: a desktop MCP client
 /// spawns its servers with whatever directory the *app* had, so a root taken
 /// from it moves depending on how the client was launched, and neither the user
 /// nor the agent can say where a bare name lands. A fixed default is a worse
@@ -132,7 +134,7 @@ impl Roots {
             return Ok((Roots::new(dirs), RootSource::Argument));
         }
         if let Some(value) = var.filter(|v| !v.is_empty()) {
-            let dirs = existing_dirs(std::env::split_paths(&value), ROOT_VAR)?;
+            let dirs = env_dirs(&value)?;
             if dirs.is_empty() {
                 return Err(format!("{ROOT_VAR} is set but names no directory"));
             }
@@ -421,6 +423,48 @@ impl Roots {
         }
         path.display().to_string()
     }
+}
+
+/// The directories `VOXELER_ROOT` names, each of which must be **absolute**.
+///
+/// A relative entry can only mean "relative to the working directory", which is
+/// the one thing the whole of `choose` exists to avoid: the variable is read in a
+/// process whose directory nobody chose, so `models` there names a different
+/// place depending on how the client was launched, and `.` names that directory
+/// outright. Confinement still held either way — the roots are canonicalised and
+/// nothing reaches outside them — but a root that moves with the launcher is the
+/// unpredictability this change was made to remove, so it is refused where it
+/// cannot have been meant.
+///
+/// An **argument** stays relative-friendly. `voxeler mcp models/` is a person at
+/// a prompt, standing in the directory it resolves against, and the startup line
+/// prints the absolute answer back.
+///
+/// An empty entry is named rather than passed on. In `PATH` convention it *means*
+/// the working directory, and `split_paths` hands back an empty path that
+/// [`existing_dirs`] would report as `"" is not a directory` — which reads as a
+/// fault in the tool rather than as the stray separator it is.
+fn env_dirs(value: &std::ffi::OsStr) -> Result<Vec<PathBuf>, String> {
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let mut dirs = Vec::new();
+    for dir in std::env::split_paths(value) {
+        if dir.as_os_str().is_empty() {
+            return Err(format!(
+                "{ROOT_VAR} has an empty entry — a stray {separator:?}. Name each directory \
+                 in full, separated by {separator:?}"
+            ));
+        }
+        if !dir.is_absolute() {
+            return Err(format!(
+                "{ROOT_VAR}: {} is a relative path, and this server never resolves one \
+                 against its working directory — it is read wherever the client happened to \
+                 start it. Name the directory in full",
+                dir.display()
+            ));
+        }
+        dirs.push(dir);
+    }
+    existing_dirs(dirs, ROOT_VAR)
 }
 
 /// Every given directory, or the first one that is not.
@@ -4557,6 +4601,47 @@ mod tests {
         let dir = Roots::default_dir().expect("a home directory in a test environment");
         assert!(dir.is_absolute(), "{}", dir.display());
         assert_eq!(dir.file_name().unwrap(), "voxeler");
+    }
+
+    /// The variable is read in a process whose directory nobody chose, so a
+    /// relative entry there names a different place depending on how the client
+    /// was launched — and `.` names that directory outright, which is the
+    /// fallback this change removed arriving by another door. An argument is the
+    /// case where a person typed it somewhere, and stays relative-friendly.
+    #[test]
+    fn a_relative_root_is_refused_from_the_variable_and_allowed_as_an_argument() {
+        let dir = temp_root("relative");
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+
+        for bad in [".", "models", &name] {
+            let err = Roots::choose_from(&[], Some(bad.into()))
+                .expect_err("a relative entry names the working directory");
+            assert!(err.contains("relative"), "{bad:?}: {err}");
+        }
+        // A stray separator is the other way an empty entry arrives, and `PATH`
+        // convention makes it *mean* the working directory.
+        let with_empty = format!("{}{}", if cfg!(windows) { ";" } else { ":" }, dir.display());
+        let err = Roots::choose_from(&[], Some(with_empty.into())).unwrap_err();
+        assert!(err.contains("empty entry"), "{err}");
+        // And the absolute form is accepted, which is the whole of the ask.
+        assert!(Roots::choose_from(&[], Some(dir.display().to_string().into())).is_ok());
+
+        // An argument may be relative: the person typing it is standing in the
+        // directory it resolves against, and startup prints the absolute answer.
+        // `src` rather than the temp root, so this reads the working directory
+        // without setting one — cargo runs a test in its crate, and a test that
+        // moved the process would race every other test in this binary.
+        let (roots, source) = Roots::choose_from(&["src".to_string()], None)
+            .expect("a relative argument resolves against where it was typed");
+        assert_eq!(source, RootSource::Argument);
+        assert_eq!(
+            roots.primary().unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .join("src")
+                .canonicalize()
+                .unwrap()
+        );
     }
 
     /// The fallback for a home with no `Documents`, and the one place in this

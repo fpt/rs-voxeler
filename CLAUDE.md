@@ -778,7 +778,11 @@ content nobody vetted, so this is a boundary rather than a convenience.
 
 **The roots never come from the working directory, which is why `voxeler mcp`
 needs no arguments.** `Roots::choose` takes an argument, then `VOXELER_ROOT`
-(several directories, split the way a `PATH` is), then one default place —
+(several directories, split the way a `PATH` is, each of which must be
+**absolute** — the variable is read wherever the client started the server, so a
+relative entry moves with the launcher and `.` is the removed fallback arriving by
+another door; an argument may be relative, because a person typed it somewhere),
+then one default place —
 `~/Documents/voxeler`, created if absent, and `data_dir` for a home with no
 `Documents`: `XDG_DATA_HOME` on Linux, `LOCALAPPDATA` on Windows, which is the
 shape `session_dir` already had. One platform's convention reached for on the

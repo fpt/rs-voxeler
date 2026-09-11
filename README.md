@@ -359,14 +359,25 @@ Or, by file:
 
 **Write the paths out in full, and make sure they exist.** They reach the server
 however you spell them: JSON is passed straight to the process, and `~` after an
-`=` is not expanded by every shell either. Nothing that is not a directory is
-taken for one, so the mistake is a server that says why rather than one quietly
-rooted somewhere else:
+`=` is not expanded by every shell either. A `VOXELER_ROOT` entry has to be
+absolute — the variable is read wherever the client happened to start the server,
+so a relative one names a different place depending on how that happened, and `.`
+names it outright. Every mistake here is a server that says why rather than one
+quietly rooted somewhere else:
 
 ```console
 $ VOXELER_ROOT='~/models' voxeler mcp
 voxeler: VOXELER_ROOT: ~/models is not a directory
+
+$ VOXELER_ROOT=models voxeler mcp
+voxeler: VOXELER_ROOT: models is a relative path, and this server never resolves
+one against its working directory — it is read wherever the client happened to
+start it. Name the directory in full
 ```
+
+An *argument* may be relative — `voxeler mcp models/` is a person at a prompt,
+standing in the directory it resolves against, and the startup line prints the
+absolute answer back.
 
 Paths given to the tools may be **absolute inside any of the directories**, or
 relative to the first. Four mistakes are refused by name rather than written
