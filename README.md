@@ -323,18 +323,45 @@ launched, and neither you nor the agent can say where a bare file name lands. A
 fixed place is only a worse answer than that if it is a secret, so it is printed
 at startup and named in the server's `initialize` instructions.
 
-To put the models somewhere else, name the directories — an argument
-(`claude mcp add voxeler -- voxeler mcp /path/to/models`), or `VOXELER_ROOT`,
-which is the same thing said where a client's config can only pass an
-environment:
+To put the models somewhere else, name the directories. An argument is the
+plainest way:
+
+```bash
+claude mcp add voxeler -- voxeler mcp /path/to/models
+codex mcp add voxeler -- voxeler mcp /path/to/models /path/to/voxels
+```
+
+`VOXELER_ROOT` says the same thing where a client's config can pass an
+environment but not an argument — several directories separated by `:`, the way a
+`PATH` is:
+
+```bash
+claude mcp add voxeler -e VOXELER_ROOT=/path/to/models -- voxeler mcp
+codex mcp add voxeler --env VOXELER_ROOT=/path/to/models:/path/to/voxels -- voxeler mcp
+```
+
+Or, by file:
 
 ```json
 { "mcpServers": { "voxeler": { "command": "voxeler",
                                "args": ["mcp", "/path/to/models", "/path/to/voxels"] } } }
 ```
 
-Replace those paths with existing absolute directories. JSON arguments are passed
-directly to the process: `~` and environment variables are not shell-expanded.
+```json
+{ "mcpServers": { "voxeler": { "command": "voxeler", "args": ["mcp"],
+                               "env": { "VOXELER_ROOT": "/path/to/models" } } } }
+```
+
+**Write the paths out in full, and make sure they exist.** They reach the server
+however you spell them: JSON is passed straight to the process, and `~` after an
+`=` is not expanded by every shell either. Nothing that is not a directory is
+taken for one, so the mistake is a server that says why rather than one quietly
+rooted somewhere else:
+
+```console
+$ VOXELER_ROOT='~/models' voxeler mcp
+voxeler: VOXELER_ROOT: ~/models is not a directory
+```
 
 Paths given to the tools may be **absolute inside any of the directories**, or
 relative to the first. Four mistakes are refused by name rather than written
