@@ -278,6 +278,9 @@ impl App {
                 self.editor
                     .set_palette_color(*index, voxel_core::Rgb8::new(rgb[0], rgb[1], rgb[2]));
             }
+            // Nothing to apply while it is open: a save happens once, when the
+            // dialog closes, which is `Editor::close_dialog`'s business.
+            Dialog::Save { .. } => {}
         }
         match outcome {
             Outcome::Open => self.editor.dialog = Some(dialog),
@@ -290,9 +293,13 @@ impl App {
                 self.editor.close_dialog(false);
             }
         }
-        // Edges are consumed by the frame that saw them.
+        // Edges are consumed by the frame that saw them — the typed text no
+        // less than the click, or a letter would be pushed again on every
+        // redraw until the next key arrived.
         self.ui_input.pressed = false;
         self.ui_input.released = false;
+        self.ui_input.typed.clear();
+        self.ui_input.backspace = false;
     }
 
     fn on_mouse_down(&mut self, button: MouseButton) {
@@ -494,6 +501,32 @@ impl App {
     /// `event.text` rather than the physical key: a name is what the user's
     /// layout produces, and reconstructing that from key codes would be a
     /// keyboard-layout table this editor has no business owning.
+    /// Keys, while a dialog is open.
+    ///
+    /// Modal, the way a rename is: the whole keyboard belongs to the dialog,
+    /// or typing a file name would fire build, erase and pick on the way
+    /// through. Text arrives as `event.text` for the reason it does in a
+    /// rename — a name is what the user's layout produces — and is gathered
+    /// into `ui_input` rather than dispatched, because an immediate-mode
+    /// widget reads its input while it lays itself out, which happens in the
+    /// redraw.
+    fn on_dialog_key(&mut self, event: &winit::event::KeyEvent) {
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Escape) => return self.editor.close_dialog(false),
+            PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
+                return self.editor.confirm_dialog()
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => {
+                self.ui_input.backspace = true;
+                return;
+            }
+            _ => {}
+        }
+        if let Some(text) = &event.text {
+            self.ui_input.typed.push_str(text);
+        }
+    }
+
     fn on_rename_key(&mut self, event: &winit::event::KeyEvent) {
         match event.physical_key {
             PhysicalKey::Code(KeyCode::Escape) => return self.editor.cancel_rename(),
@@ -611,23 +644,15 @@ impl App {
         if self.editor.viewing {
             return self.on_viewer_key(code, event_loop);
         }
-        // Modal, the way a rename is: while a dialog is open the whole
-        // keyboard belongs to it, or typing at it would fire build, erase and
-        // pick on the way through.
-        if self.editor.dialog.is_some() {
-            match code {
-                KeyCode::Escape => self.editor.close_dialog(false),
-                KeyCode::Enter | KeyCode::NumpadEnter => self.editor.close_dialog(true),
-                _ => {}
-            }
-            return;
-        }
         if self.ctrl() {
             match code {
                 KeyCode::KeyZ if self.modifiers.shift_key() => self.editor.redo(),
                 KeyCode::KeyZ => self.editor.undo(),
                 KeyCode::KeyY => self.editor.redo(),
-                KeyCode::KeyS => self.editor.save(),
+                // Save-as asks where; a plain save asks only when there is
+                // nowhere yet. See `Editor::request_save`.
+                KeyCode::KeyS if self.modifiers.shift_key() => self.editor.open_save_dialog(),
+                KeyCode::KeyS => self.editor.request_save(),
                 // Three formats on one key, because they are one intention.
                 // `.vox` keeps the binding it had; the two that keep the parts
                 // are a shift and an alt away rather than on letters the
@@ -832,6 +857,13 @@ impl ApplicationHandler<Wake> for App {
                 // the way through.
                 if self.editor.renaming().is_some() {
                     self.on_rename_key(&event);
+                    self.request_redraw();
+                    return;
+                }
+                // A dialog is modal too, and takes text as well as keys — so
+                // it is routed here rather than by physical code alone.
+                if self.editor.dialog.is_some() {
+                    self.on_dialog_key(&event);
                     self.request_redraw();
                     return;
                 }

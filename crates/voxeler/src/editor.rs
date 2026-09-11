@@ -2304,20 +2304,42 @@ impl Editor {
         self.status = format!("editing colour {}", self.color);
     }
 
-    /// Put back what a cancelled dialog changed, and close it.
+    /// Close the dialog, keeping what it did or putting it back.
+    ///
+    /// Each dialog's *doing* happens here rather than at the window layer, for
+    /// the reason the dialog itself is a field on `Editor`: laying out a
+    /// column of rows is the window's business, and writing a file is not.
     pub fn close_dialog(&mut self, keep: bool) {
-        if !keep {
-            if let Some((index, was)) = self.dialog_undo {
+        let dialog = self.dialog.take();
+        if let Some((index, was)) = self.dialog_undo.take() {
+            if !keep {
                 self.set_palette_color(index, was);
             }
         }
-        self.status = match (&self.dialog, keep) {
-            (Some(_), true) => "colour set".into(),
-            (Some(_), false) => "unchanged".into(),
-            _ => std::mem::take(&mut self.status),
+        self.status = match (dialog, keep) {
+            (Some(crate::ui::Dialog::Color { .. }), true) => "colour set".into(),
+            (Some(crate::ui::Dialog::Color { .. }), false) => "unchanged".into(),
+            (Some(crate::ui::Dialog::Save { name, .. }), true) => {
+                self.commit_save(&name);
+                return;
+            }
+            (Some(crate::ui::Dialog::Save { .. }), false) => "not saved".into(),
+            (None, _) => std::mem::take(&mut self.status),
         };
-        self.dialog = None;
-        self.dialog_undo = None;
+    }
+
+    /// Enter, at an open dialog: close it keeping what it did — unless it has
+    /// nothing to act on yet, which it says rather than closing on nothing.
+    ///
+    /// [`crate::ui::Dialog::can_confirm`] is the same predicate the confirming
+    /// button asks, so the key and the button cannot come to differ about
+    /// whether the dialog is finished.
+    pub fn confirm_dialog(&mut self) {
+        match &self.dialog {
+            Some(d) if !d.can_confirm() => self.status = "name the file first".into(),
+            Some(_) => self.close_dialog(true),
+            None => {}
+        }
     }
 
     /// Show or hide the active layer.
@@ -2663,12 +2685,87 @@ impl Editor {
 
     // -- files -----------------------------------------------------------
 
+    /// Write the document where it already lives.
     pub fn save(&mut self) {
         let path = self.path.clone();
         self.save_as(&path);
     }
 
-    pub fn save_as(&mut self, path: &Path) {
+    /// `ctrl+S`: overwrite, or ask for a name.
+    ///
+    /// A save that overwrites needs no dialog — the file on disk *is* the
+    /// answer to "where", and asking it again on every press is a keystroke in
+    /// the way of the work. A document with no file yet has no answer, so it
+    /// asks; and that is the whole rule, read off the filesystem rather than
+    /// from a `named` flag that would have to be set in four places and would
+    /// still be wrong the moment the file was moved out from under it.
+    pub fn request_save(&mut self) {
+        if self.path.exists() {
+            self.save();
+        } else {
+            self.open_save_dialog();
+        }
+    }
+
+    /// `ctrl+shift+S`: ask where to write, whatever the document already has.
+    pub fn open_save_dialog(&mut self) {
+        self.dialog = Some(crate::ui::Dialog::Save {
+            name: self
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            dir: self.save_dir().display().to_string(),
+        });
+        self.status = "save as".into();
+    }
+
+    /// What a relative name in the save dialog is resolved against: where the
+    /// working file lives, or the working directory when it has no parent of
+    /// its own.
+    ///
+    /// One function rather than one answer for the dialog's label and another
+    /// for the write, because a dialog that named a directory it did not save
+    /// into would be worse than one that named none.
+    fn save_dir(&self) -> PathBuf {
+        match self.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+
+    /// Take the name the save dialog was holding and write the document there.
+    ///
+    /// The document *becomes* that file, which is what save-as means — so the
+    /// working path moves before the write, and `save_as` clears the dirty
+    /// flag because the path it was handed is now the working one. A failed
+    /// write puts the old path back: the document still lives where it did,
+    /// and leaving it pointing at a file that was never created would make the
+    /// next `ctrl+S` a silent save-as.
+    fn commit_save(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status = "not saved: no name".into();
+            return;
+        }
+        let mut path = PathBuf::from(name);
+        if path.is_relative() {
+            path = self.save_dir().join(path);
+        }
+        // `format::save` writes native for anything it does not recognise, so
+        // a bare name would work — and would leave a document nothing else
+        // lists as a model. The extension is part of the name.
+        if path.extension().is_none() {
+            path.set_extension("vxm");
+        }
+        let was = std::mem::replace(&mut self.path, path.clone());
+        if !self.save_as(&path) {
+            self.path = was;
+        }
+    }
+
+    /// Write the model to `path`, returning whether it landed.
+    pub fn save_as(&mut self, path: &Path) -> bool {
         match format::save(path, &self.model) {
             Ok(()) => {
                 // Only a save to the *working* path clears the dirty flag; an
@@ -2677,8 +2774,12 @@ impl Editor {
                     self.dirty = false;
                 }
                 self.status = format!("saved {}", path.display());
+                true
             }
-            Err(e) => self.status = format!("save failed: {e}"),
+            Err(e) => {
+                self.status = format!("save failed: {e}");
+                false
+            }
         }
     }
 
@@ -2696,11 +2797,11 @@ impl Editor {
     pub fn export_as(&mut self, extension: &str) {
         let path = self.path.with_extension(extension);
         let dirty = self.dirty;
-        self.save_as(&path);
+        let wrote = self.save_as(&path);
         // `save_as` is the document's own save and clears the flag. An export
         // has not written the document, so it goes back.
         self.dirty = dirty;
-        if !self.status.starts_with("saved") {
+        if !wrote {
             return;
         }
         let layers = self.model.layer_count();
@@ -3754,6 +3855,133 @@ mod tests {
         assert_eq!(m.filled_count(), 1, "a new model gets one voxel to click");
         assert_eq!(m.get(16, 16, 16), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole of the rule the user asked for: a save that has a file to
+    /// overwrite just writes it, and one that has none asks.
+    #[test]
+    fn a_save_asks_for_a_name_only_when_there_is_nothing_to_overwrite() {
+        let dir = std::env::temp_dir().join("voxeler-save-as-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut e = editor_with_floor();
+        e.path = dir.join("m.vxm");
+        e.dirty = true;
+        e.request_save();
+        assert!(
+            matches!(e.dialog, Some(crate::ui::Dialog::Save { .. })),
+            "no file yet, so it asks: {:?}",
+            e.dialog
+        );
+        assert!(
+            !e.path.exists(),
+            "and nothing was written behind the dialog"
+        );
+
+        // Confirming writes it, and the document becomes that file.
+        e.close_dialog(true);
+        assert!(e.dialog.is_none());
+        assert!(e.path.exists(), "{}", e.status);
+        assert!(!e.is_dirty());
+        assert_eq!(e.path, dir.join("m.vxm"));
+
+        // Now there is something to overwrite, so the next one does not ask.
+        e.dirty = true;
+        e.request_save();
+        assert!(e.dialog.is_none(), "an overwrite needs no dialog");
+        assert!(!e.is_dirty());
+
+        // Save-as asks whatever the document already has, and prefills it.
+        e.open_save_dialog();
+        match &e.dialog {
+            Some(crate::ui::Dialog::Save { name, dir: d }) => {
+                assert_eq!(name, "m.vxm", "prefilled with the name it has");
+                assert_eq!(d, &dir.display().to_string());
+            }
+            other => panic!("expected a save dialog, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bare name lands beside the working file, and gains the extension that
+    /// makes it a model rather than a file the lister walks past.
+    #[test]
+    fn a_typed_name_resolves_beside_the_working_file_and_gains_vxm() {
+        let dir = std::env::temp_dir().join("voxeler-save-name-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut e = editor_with_floor();
+        e.path = dir.join("m.vxm");
+        e.dirty = true;
+        e.open_save_dialog();
+        e.dialog = Some(crate::ui::Dialog::Save {
+            name: "robot".into(),
+            dir: dir.display().to_string(),
+        });
+        e.close_dialog(true);
+        assert_eq!(e.path, dir.join("robot.vxm"));
+        assert!(dir.join("robot.vxm").exists(), "{}", e.status);
+        assert!(!e.is_dirty(), "the document is that file now");
+
+        // An absolute path goes where it says, and keeps the extension it was
+        // given.
+        let elsewhere = dir.join("sub");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        e.dialog = Some(crate::ui::Dialog::Save {
+            name: elsewhere.join("arm.vxm").display().to_string(),
+            dir: dir.display().to_string(),
+        });
+        e.close_dialog(true);
+        assert_eq!(e.path, elsewhere.join("arm.vxm"));
+        assert!(elsewhere.join("arm.vxm").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancelling writes nothing, and a write that fails leaves the document
+    /// where it lived — or the next `ctrl+S` would be a silent save-as into a
+    /// file that was never created.
+    #[test]
+    fn a_cancelled_or_failed_save_leaves_the_working_path_alone() {
+        let dir = std::env::temp_dir().join("voxeler-save-fail-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut e = editor_with_floor();
+        e.path = dir.join("m.vxm");
+        e.dirty = true;
+
+        e.open_save_dialog();
+        e.close_dialog(false);
+        assert!(e.dialog.is_none());
+        assert!(!dir.join("m.vxm").exists(), "cancel wrote nothing");
+        assert!(e.is_dirty());
+
+        // A directory that is not there: the write fails and the path stays.
+        e.dialog = Some(crate::ui::Dialog::Save {
+            name: dir.join("no/such/dir/m.vxm").display().to_string(),
+            dir: dir.display().to_string(),
+        });
+        e.close_dialog(true);
+        assert_eq!(e.path, dir.join("m.vxm"), "{}", e.status);
+        assert!(e.is_dirty(), "nothing was saved");
+        assert!(e.status.starts_with("save failed"), "{}", e.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Enter on an empty field says so rather than closing on nothing — the
+    /// same answer the SAVE button gives, because both ask `can_confirm`.
+    #[test]
+    fn an_empty_name_cannot_be_confirmed() {
+        let mut e = editor_with_floor();
+        e.dialog = Some(crate::ui::Dialog::Save {
+            name: "   ".into(),
+            dir: ".".into(),
+        });
+        e.confirm_dialog();
+        assert!(e.dialog.is_some(), "still open");
+        assert_eq!(e.status, "name the file first");
     }
 
     #[test]

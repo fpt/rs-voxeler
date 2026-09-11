@@ -91,11 +91,28 @@ pub struct Input {
     pub down: bool,
     pub pressed: bool,
     pub released: bool,
+    /// What was typed since the last frame, from `event.text` rather than from
+    /// key codes — the rule `Editor::rename` already set: a name is what the
+    /// user's layout produces, and reconstructing that would be a
+    /// keyboard-layout table this editor has no business owning.
+    pub typed: String,
+    /// Backspace, which arrives as a key rather than as text.
+    pub backspace: bool,
 }
 
 const TEXT_SCALE: u32 = 2;
 const ROW_H: u32 = 20;
 const PAD: u32 = 8;
+
+/// How long a name a text field will take.
+///
+/// A filename, not a paragraph: past this the field is scrolling text nobody
+/// can check before pressing SAVE, and every filesystem here stops long before
+/// it anyway.
+const FIELD_MAX: usize = 96;
+
+/// The width of a text field's caret.
+const CARET_W: u32 = 2;
 
 const BG: u32 = 0x1B1F29;
 const FRAME: u32 = 0x39404F;
@@ -299,6 +316,96 @@ impl Ui {
         moved
     }
 
+    /// A line of dim text: what a field is for, or where it will land.
+    ///
+    /// Elided at the *front* when it does not fit, because what a label here
+    /// says is usually a path, and the end of a path is the part that tells
+    /// you where you are. A dialog is sized by its content and a directory is
+    /// not content anyone can size for, so one of them has to give.
+    pub fn label(&mut self, text: &str) {
+        let r = self.row();
+        self.commands.push(Command::Text {
+            x: r.x,
+            y: r.y + 4,
+            text: elide_front(text, r.w),
+            color: DIM,
+            scale: TEXT_SCALE,
+        });
+    }
+
+    /// A line of text being typed, returning whether it changed this frame.
+    ///
+    /// There is no focus. A dialog has one field and it takes whatever was
+    /// typed; a second would need a focus id to say which of them the keys
+    /// belong to, and no dialog has asked for one — the same answer the layout
+    /// stack gives a flexbox.
+    ///
+    /// The characters are filtered here rather than at the window layer, the
+    /// rule [`crate::editor::Editor::rename_push`] set, so every platform's
+    /// idea of what arrives with a key press meets the same test. Printable
+    /// ASCII only: the overlay font has nothing else, and a name the field
+    /// cannot draw is a name you cannot check before pressing SAVE.
+    pub fn text_field(&mut self, value: &mut String) -> bool {
+        let r = self.row();
+        let mut changed = false;
+        if self.input.backspace {
+            changed = value.pop().is_some();
+        }
+        for c in self.input.typed.chars() {
+            if c.is_ascii_graphic() || c == ' ' {
+                if value.chars().count() >= FIELD_MAX {
+                    break;
+                }
+                value.push(c);
+                changed = true;
+            }
+        }
+
+        let box_r = Rect {
+            y: r.y + 2,
+            h: ROW_H - 4,
+            ..r
+        };
+        self.commands.push(Command::Fill {
+            rect: box_r,
+            color: TRACK,
+        });
+        self.commands.push(Command::Stroke {
+            rect: box_r,
+            color: ACCENT,
+        });
+        // A name longer than the box shows its *tail*, because the end is
+        // where the caret is and where what you just typed went.
+        let room = box_r.w.saturating_sub(PAD * 2 + CARET_W);
+        let mut shown = value.as_str();
+        while text_width(shown, TEXT_SCALE) > room {
+            let Some((next, _)) = shown.char_indices().nth(1) else {
+                break;
+            };
+            shown = &shown[next..];
+        }
+        let x = box_r.x + PAD as i32 / 2;
+        self.commands.push(Command::Text {
+            x,
+            y: box_r.y + 3,
+            text: shown.to_string(),
+            color: TEXT,
+            scale: TEXT_SCALE,
+        });
+        // The caret says the keyboard is here — which, with no focus ring to
+        // move, is the only thing that does.
+        self.commands.push(Command::Fill {
+            rect: Rect {
+                x: x + text_width(shown, TEXT_SCALE) as i32 + 1,
+                y: box_r.y + 2,
+                w: CARET_W,
+                h: box_r.h - 4,
+            },
+            color: ACCENT,
+        });
+        changed
+    }
+
     /// A block of colour, for showing what the sliders add up to.
     pub fn swatch(&mut self, color: u32) {
         let r = self.row();
@@ -354,6 +461,14 @@ pub enum Dialog {
     /// the model shows the colour while you choose it, which is the whole point
     /// of a picker.
     Color { index: u8, rgb: [u8; 3] },
+    /// Choosing where the document goes.
+    ///
+    /// Opened when a save has no file to overwrite, and by save-as whatever
+    /// the document already has. `name` is what the field holds — a bare file
+    /// name, or a path — and `dir` is what a relative one is resolved against,
+    /// carried here only so the dialog can say where it will land. The
+    /// resolving itself stays in [`crate::editor::Editor`], with the writing.
+    Save { name: String, dir: String },
 }
 
 /// What a dialog asked the editor to do.
@@ -368,12 +483,28 @@ pub enum Outcome {
 }
 
 impl Dialog {
+    /// Whether confirming would have something to act on.
+    ///
+    /// One predicate rather than a test inside the button and another beside
+    /// the Enter key: those are the same question, and two answers to it is
+    /// how the mouse and the keyboard come to disagree.
+    pub fn can_confirm(&self) -> bool {
+        match self {
+            Dialog::Color { .. } => true,
+            Dialog::Save { name, .. } => !name.trim().is_empty(),
+        }
+    }
+
     /// Lay the dialog out and read the input, returning what it wants.
     ///
     /// Takes the colour by `&mut` rather than reaching for the editor, so this
     /// module stays a *layout* and the applying stays where the undo history
     /// is.
     pub fn run(&mut self, ui: &mut Ui, screen: Rect) -> Outcome {
+        // Asked once, before the match takes the dialog apart, so the button
+        // below and `can_confirm`'s other caller — the Enter key — cannot come
+        // to different answers.
+        let ready = self.can_confirm();
         match self {
             Dialog::Color { index, rgb } => {
                 let slot = *index;
@@ -383,7 +514,7 @@ impl Dialog {
                 moved |= ui.slider("G", &mut rgb[1], 255);
                 moved |= ui.slider("B", &mut rgb[2], 255);
                 ui.swatch(((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32);
-                let ok = ui.button("OK");
+                let ok = ui.button("OK") && ready;
                 let cancel = ui.button("CANCEL");
                 ui.end();
                 let _ = moved;
@@ -395,8 +526,56 @@ impl Dialog {
                     Outcome::Open
                 }
             }
+            Dialog::Save { name, dir } => {
+                ui.dialog("SAVE AS", screen, 480, 4);
+                // Where a relative name lands, or why SAVE is doing nothing.
+                // A field with an empty name and an inert button would
+                // otherwise be a click that changed nothing and did not say
+                // why.
+                ui.label(if name.trim().is_empty() {
+                    "NAME THE FILE"
+                } else {
+                    dir
+                });
+                ui.text_field(name);
+                let ok = ui.button("SAVE") && ready;
+                let cancel = ui.button("CANCEL");
+                ui.end();
+                if ok {
+                    Outcome::Done
+                } else if cancel {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Open
+                }
+            }
         }
     }
+}
+
+/// As much of the *end* of `s` as fits in `width` pixels, marked with an
+/// ellipsis when something was dropped.
+///
+/// Measured against the font rather than counted in characters: a row is a
+/// number of pixels wide, and a character count that matched it at one text
+/// scale would overflow at the next.
+fn elide_front(s: &str, width: u32) -> String {
+    if text_width(s, TEXT_SCALE) <= width {
+        return s.to_string();
+    }
+    // Three dots rather than an ellipsis: the overlay font is 0x20..0x60 and
+    // draws anything outside it as nothing at all, so "…" would elide the
+    // mark that says something was elided.
+    const MARK: &str = "...";
+    let room = width.saturating_sub(text_width(MARK, TEXT_SCALE) + ADVANCE * TEXT_SCALE);
+    let mut shown = s;
+    while !shown.is_empty() && text_width(shown, TEXT_SCALE) > room {
+        let Some((next, _)) = shown.char_indices().nth(1) else {
+            break;
+        };
+        shown = &shown[next..];
+    }
+    format!("{MARK}{shown}")
 }
 
 #[cfg(test)]
@@ -417,8 +596,8 @@ mod tests {
         };
         let mut ui = Ui::new(input, held);
         let outcome = d.run(&mut ui, SCREEN);
-        match d {
-            Dialog::Color { rgb: after, .. } => *rgb = after,
+        if let Dialog::Color { rgb: after, .. } = d {
+            *rgb = after;
         }
         (ui, outcome)
     }
@@ -552,6 +731,155 @@ mod tests {
         }
         // And the frame is over it rather than under.
         assert!(matches!(ui.commands()[1], Command::Fill { .. }));
+    }
+
+    /// Lay out the save dialog once, the way `run` does, and hand back what
+    /// the field holds afterwards.
+    fn save(input: Input, held: u64, name: &mut String) -> (Ui, Outcome) {
+        let mut d = Dialog::Save {
+            name: name.clone(),
+            dir: "/tmp/models".into(),
+        };
+        let mut ui = Ui::new(input, held);
+        let outcome = d.run(&mut ui, SCREEN);
+        if let Dialog::Save { name: after, .. } = d {
+            *name = after;
+        }
+        (ui, outcome)
+    }
+
+    fn typed(text: &str) -> Input {
+        Input {
+            typed: text.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The field takes what the platform says was typed, and backspace, which
+    /// arrives as a key rather than as text.
+    #[test]
+    fn a_text_field_takes_typed_characters_and_backspace() {
+        let mut name = String::new();
+        save(typed("rob"), 0, &mut name);
+        assert_eq!(name, "rob");
+        save(typed("ot"), 0, &mut name);
+        assert_eq!(name, "robot");
+        save(
+            Input {
+                backspace: true,
+                ..Default::default()
+            },
+            0,
+            &mut name,
+        );
+        assert_eq!(name, "robo");
+
+        // The keys a dialog answers to are not characters, whatever the
+        // platform hands over with them, and neither is anything the 5x7 font
+        // cannot draw.
+        save(typed("\u{1b}\r\u{8}\u{3042}"), 0, &mut name);
+        assert_eq!(name, "robo", "control characters and non-ASCII are dropped");
+
+        // And it stops rather than growing without limit.
+        let long = "x".repeat(FIELD_MAX * 2);
+        save(typed(&long), 0, &mut name);
+        assert_eq!(name.chars().count(), FIELD_MAX);
+    }
+
+    /// One predicate behind the button and the Enter key: SAVE must not fire
+    /// on a name there is nothing of.
+    #[test]
+    fn save_does_not_fire_on_an_empty_name() {
+        let mut name = "  ".to_string();
+        let d = Dialog::Save {
+            name: name.clone(),
+            dir: ".".into(),
+        };
+        assert!(!d.can_confirm());
+
+        let btn = text_at(&save(Input::default(), 0, &mut name).0, "SAVE").expect("SAVE is drawn");
+        let over = (btn.0 as f32 + 4.0, btn.1 as f32 + 2.0);
+        let (ui, _) = save(
+            Input {
+                mouse: over,
+                down: true,
+                pressed: true,
+                ..Default::default()
+            },
+            0,
+            &mut name,
+        );
+        let (_, outcome) = save(
+            Input {
+                mouse: over,
+                released: true,
+                ..Default::default()
+            },
+            ui.held(),
+            &mut name,
+        );
+        assert_eq!(outcome, Outcome::Open, "an empty name is not a save");
+
+        // And the dialog says why, in place of the directory it would name.
+        assert!(
+            text_at(&save(Input::default(), 0, &mut name).0, "NAME THE FILE").is_some(),
+            "a click that changed nothing says why"
+        );
+
+        // With a name, the same click is a save.
+        let mut name = "robot.vxm".to_string();
+        let (ui, _) = save(
+            Input {
+                mouse: over,
+                down: true,
+                pressed: true,
+                ..Default::default()
+            },
+            0,
+            &mut name,
+        );
+        let (_, outcome) = save(
+            Input {
+                mouse: over,
+                released: true,
+                ..Default::default()
+            },
+            ui.held(),
+            &mut name,
+        );
+        assert_eq!(outcome, Outcome::Done);
+    }
+
+    /// A deep directory is elided at the front, because the end is the part
+    /// that says where you are — and it is measured, so it fits the row it is
+    /// drawn in rather than a character count that only matched at one scale.
+    #[test]
+    fn a_long_directory_keeps_its_tail_and_fits_its_row() {
+        assert_eq!(elide_front("/tmp/models", 400), "/tmp/models");
+        let long = elide_front("/a/very/long/way/down/to/the/models/dir", 120);
+        assert!(text_width(&long, TEXT_SCALE) <= 120, "{long}");
+        assert!(long.starts_with("...") && long.ends_with("s/dir"), "{long}");
+
+        // And the row the save dialog actually draws it in holds it.
+        let deep = "/Users/someone/Documents/scratch/rs-voxeler/models/characters";
+        let mut name = "robot.vxm".to_string();
+        let mut d = Dialog::Save {
+            name: name.clone(),
+            dir: deep.into(),
+        };
+        let mut ui = Ui::new(Input::default(), 0);
+        d.run(&mut ui, SCREEN);
+        name.clear();
+        let row = ui
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                Command::Text { text, .. } if text.ends_with("characters") => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the directory is drawn");
+        assert!(row.starts_with("..."), "{row}");
+        assert!(text_width(&row, TEXT_SCALE) <= 480 - PAD * 2, "{row}");
     }
 
     /// Cancel is a distinct answer from OK, or the dialog has one button.

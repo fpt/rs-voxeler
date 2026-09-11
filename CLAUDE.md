@@ -533,6 +533,29 @@ because the two misreadings do not cost the same — a double read as two single
 leaves you looking at a dialog you did not open, where two singles read as a
 double just picks the colour twice.
 
+**A save asks only when it is not an overwrite.** `ctrl+S` writes the working
+file when there is one, and opens the save dialog when there is not;
+`ctrl+shift+S` always opens it. The test is `Path::exists` at the moment the key
+is pressed rather than a `named` flag on the document — a flag would have to be
+set by the command line, by save-as, by open and by an agent's `save_model`, and
+would still be wrong the moment the file was moved out from under it. Confirming
+moves the *working path* before the write, which is what save-as means; a failed
+write puts the old path back, or the next `ctrl+S` would be a silent save-as
+into a file that was never created. A relative name resolves against the
+directory the dialog names, a name with no extension gains `.vxm`, and an empty
+one cannot be confirmed — `Dialog::can_confirm` is one predicate behind both the
+button and the Enter key, because those are the same question and two answers to
+it is how the mouse and the keyboard come to disagree.
+
+`Ui::text_field` has no focus. A dialog has one field and it takes whatever was
+typed; a second would need a focus id, which is the flexbox answer again. Its
+characters come from `event.text` rather than from key codes — the rule
+`Editor::rename` set — and are filtered to printable ASCII in the widget, so
+every platform's idea of what arrives with a key press meets one test. The
+overlay font is 0x20..0x60, so a name is *displayed* upper-cased while the value
+keeps the case it was typed in; that is why the elision mark is `...` rather
+than `…`, which would draw as nothing.
+
 The colour picker is the first one because it is the smallest thing worth
 having: three sliders, a swatch, and `set_palette_color` already undoable
 underneath. It applies as the sliders move — a picker you cannot see the result
