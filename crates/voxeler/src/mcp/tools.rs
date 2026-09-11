@@ -63,8 +63,38 @@ mod inspection_tests;
 /// than followed and re-checked. A link that points inside the root today can
 /// be repointed outside between the check and the write, and nothing about a
 /// voxel model needs to be reached through one.
+///
+/// # The working directory is not one of them
+///
+/// [`choose`](Roots::choose) takes the roots from an argument, then
+/// `VOXELER_ROOT`, then one default place — and never from the working
+/// directory. That is the whole reason the default exists: a desktop MCP client
+/// spawns its servers with whatever directory the *app* had, so a root taken
+/// from it moves depending on how the client was launched, and neither the user
+/// nor the agent can say where a bare name lands. A fixed default is a worse
+/// guess than nothing only if it is a secret, so it is printed at startup and
+/// named in the `initialize` instructions.
 #[derive(Clone, Debug, Default)]
 pub struct Roots(Vec<PathBuf>);
+
+/// Where a server's roots came from, so the startup line can say which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootSource {
+    /// Named on the command line. Explicit always wins.
+    Argument,
+    /// `VOXELER_ROOT` — the same thing said where a desktop client's config can
+    /// say it, since those pass an environment as readily as an argument.
+    Environment,
+    /// The default place, created if it was not there.
+    Default,
+}
+
+/// The environment variable that names the roots, as an argument would.
+pub const ROOT_VAR: &str = "VOXELER_ROOT";
+
+/// The directory the default place is named. Under `~/Documents`, where a
+/// person keeps things they mean to find again.
+const DEFAULT_DIR: &str = "voxeler";
 
 impl Roots {
     /// Every directory the file tools may reach. The first is where a relative
@@ -75,6 +105,76 @@ impl Roots {
                 .map(|d| d.canonicalize().unwrap_or(d))
                 .collect(),
         )
+    }
+
+    /// The roots a `voxeler mcp` server should use: an argument, else
+    /// `VOXELER_ROOT`, else one default directory which is created if it is not
+    /// there.
+    ///
+    /// The working directory is not consulted at any step — see the type's
+    /// documentation. The default is therefore the same place however the
+    /// server was started, which is what makes "no arguments" a usable
+    /// configuration rather than a guess.
+    pub fn choose(args: &[String]) -> Result<(Roots, RootSource), String> {
+        Self::choose_from(args, std::env::var_os(ROOT_VAR))
+    }
+
+    /// [`choose`](Roots::choose) with the environment handed to it.
+    ///
+    /// Split out so a test can say what `VOXELER_ROOT` holds: the variable is
+    /// process-wide, and tests that set one race every other test in the binary.
+    fn choose_from(
+        args: &[String],
+        var: Option<std::ffi::OsString>,
+    ) -> Result<(Roots, RootSource), String> {
+        if !args.is_empty() {
+            let dirs = existing_dirs(args.iter().map(PathBuf::from), "argument")?;
+            return Ok((Roots::new(dirs), RootSource::Argument));
+        }
+        if let Some(value) = var.filter(|v| !v.is_empty()) {
+            let dirs = existing_dirs(std::env::split_paths(&value), ROOT_VAR)?;
+            if dirs.is_empty() {
+                return Err(format!("{ROOT_VAR} is set but names no directory"));
+            }
+            return Ok((Roots::new(dirs), RootSource::Environment));
+        }
+        let dir = Self::default_dir()?;
+        // Created rather than reported missing: the default only works as a
+        // default if it is there on a machine that has never run this before.
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "cannot create {}: {e} — name a directory instead, `voxeler mcp DIR`, \
+                 or set {ROOT_VAR}",
+                dir.display()
+            )
+        })?;
+        Ok((Roots::new([dir]), RootSource::Default))
+    }
+
+    /// The default place, whether or not it exists yet.
+    ///
+    /// `~/Documents/voxeler` where there is a `Documents` — a model is a
+    /// document, and a person looking for one looks there. Without it (a Linux
+    /// account that never made one) the XDG directory for a program's own data,
+    /// which is the answer that platform gives.
+    ///
+    /// `voxeler attach` asks for this too, so a window can find a server that
+    /// was given no directory either.
+    pub fn default_dir() -> Result<PathBuf, String> {
+        let home = home_dir().ok_or_else(|| {
+            format!(
+                "no home directory to put a default model directory in — name one, \
+                 `voxeler mcp DIR`, or set {ROOT_VAR}"
+            )
+        })?;
+        let documents = home.join("Documents");
+        if documents.is_dir() {
+            return Ok(documents.join(DEFAULT_DIR));
+        }
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(data).join(DEFAULT_DIR));
+        }
+        Ok(home.join(".local").join("share").join(DEFAULT_DIR))
     }
 
     /// No filesystem at all — what the SSE transport uses.
@@ -119,10 +219,24 @@ impl Roots {
                     access to the filesystem: the user opens and saves."
                 .into();
         }
+        // One root is the ordinary case, and it has no "relative to the first"
+        // to explain: there is one place, and a name lands in it. Saying more
+        // than that invites an agent to reason about a choice it does not have.
+        if let [only] = &self.0[..] {
+            return format!(
+                "Voxel models are read and written in {}. A name like \"robot.vxm\" lands \
+                 there; \"parts/arm.vxm\" needs parts/ to exist already, as these tools do \
+                 not create directories. The `path` and `absolute` fields tools return can \
+                 be passed straight back in. `..`, `~` and symlinks are refused. Call \
+                 list_models to see what is there, describe_model for the model being edited.",
+                only.display()
+            );
+        }
         format!(
             "Voxel models are read and written under these directories:\n{}\n\nPaths may be \
-             absolute inside one of them, or relative to the first. Symlinks are not followed. \
-             Call list_models to see what is there, describe_model for the model being edited.",
+             absolute inside one of them, or relative to the first. Directories are not \
+             created, and `..`, `~` and symlinks are refused. Call list_models to see what is \
+             there, describe_model for the model being edited.",
             self.0
                 .iter()
                 .map(|d| format!("  {}", d.display()))
@@ -141,6 +255,18 @@ impl Roots {
             );
         }
         let path = Path::new(given);
+        // A shell expands `~`; nothing in this process does. Left alone it is an
+        // ordinary directory name and lands at `<root>/~/...`, which is a path
+        // that will never be looked in again.
+        if let Some(Component::Normal(first)) = path.components().next() {
+            if first.to_string_lossy().starts_with('~') {
+                return Err(format!(
+                    "{given:?} starts with `~`, which only a shell expands. Name the file \
+                     under {} instead, or pass back the `absolute` path list_models gave you",
+                    self.display()
+                ));
+            }
+        }
         for part in path.components() {
             match part {
                 Component::Normal(_) | Component::CurDir | Component::RootDir => {}
@@ -169,8 +295,75 @@ impl Roots {
                 self.display()
             ));
         }
+        self.reject_doubled_root(given, &full)?;
         self.reject_symlinks(given, &full)?;
         Ok(full)
+    }
+
+    /// Resolve a path that is about to be **written**, which additionally means
+    /// its directory has to be there already.
+    ///
+    /// The file tools do not create directories, and this is the one place that
+    /// is enforced. It is the guardrail under every other mistake about where a
+    /// file goes: a doubled root, a subdirectory that was imagined, a typo in
+    /// `parts/`. Any of them would otherwise *succeed* — a write creates the
+    /// file it names — and leave the model somewhere nobody will look for it.
+    /// Making a directory stays a person's job, which is also the only way an
+    /// agent can be told "no, put it there".
+    pub fn writable(&self, given: &str) -> Result<PathBuf, String> {
+        let full = self.resolve(given)?;
+        match full.parent() {
+            Some(parent) if !parent.is_dir() => Err(format!(
+                "{given:?} would go in {}, which does not exist. These tools do not create \
+                 directories — write into {}, or ask the user to make it",
+                parent.display(),
+                self.display()
+            )),
+            _ => Ok(full),
+        }
+    }
+
+    /// Refuse a path that names the directory it is already in.
+    ///
+    /// A root that *is* `.../models` makes `models/robot.vxm` resolve to
+    /// `.../models/models/robot.vxm`: inside the root, so every other check
+    /// passes, and a save there succeeds into a directory nobody will look in.
+    /// The same mistake spelled absolutely repeats the whole root
+    /// (`/a/models/a/models/x.vxm`), so the test is one loop over how much of
+    /// the root came back rather than a rule per spelling.
+    ///
+    /// Guarded on the path not existing, because a real `models/` inside a root
+    /// named `models` is somebody's own directory, and refusing that would be
+    /// inventing a rule about their filenames. The refusal names the path to
+    /// pass instead: an agent that got here cannot see the root it was given.
+    fn reject_doubled_root(&self, given: &str, full: &Path) -> Result<(), String> {
+        if full.exists() {
+            return Ok(());
+        }
+        let Some(base) = self.0.iter().find(|r| full.starts_with(r)) else {
+            return Ok(());
+        };
+        let Ok(rest) = full.strip_prefix(base) else {
+            return Ok(());
+        };
+        let root_parts: Vec<Component> = base.components().collect();
+        let rest_parts: Vec<Component> = rest.components().collect();
+        // Longest repeat first, so the suggestion strips all of it rather than
+        // half. At least one component has to survive: it is the file name.
+        let most = root_parts.len().min(rest_parts.len().saturating_sub(1));
+        for take in (1..=most).rev() {
+            if rest_parts[..take] != root_parts[root_parts.len() - take..] {
+                continue;
+            }
+            let stripped: PathBuf = rest_parts[take..].iter().collect();
+            return Err(format!(
+                "{given:?} repeats the directory it is already in, and would land in {}. \
+                 Pass {:?} instead",
+                full.display(),
+                stripped.display().to_string()
+            ));
+        }
+        Ok(())
     }
 
     /// Whether a path is inside one of the roots, following symlinks as far as
@@ -207,8 +400,8 @@ impl Roots {
                     ));
                 }
                 Ok(_) => {}
-                // The file being saved does not exist yet, and neither do the
-                // directories a caller may be about to make.
+                // The file being saved does not exist yet, which is every
+                // save. Its directory does — `writable` is what checks that.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(format!("cannot inspect {given:?}: {e}")),
             }
@@ -227,6 +420,65 @@ impl Roots {
         }
         path.display().to_string()
     }
+}
+
+/// Every given directory, or the first one that is not.
+///
+/// Named with where it came from, because "not a directory" is a different
+/// mistake in a config file than it is on a command line.
+fn existing_dirs(
+    given: impl IntoIterator<Item = PathBuf>,
+    source: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for dir in given {
+        if !dir.is_dir() {
+            return Err(format!("{source}: {} is not a directory", dir.display()));
+        }
+        out.push(dir);
+    }
+    Ok(out)
+}
+
+/// The user's home directory, or nothing. `HOME` everywhere but Windows, which
+/// spells it differently and has no `HOME` to fall back on.
+fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The document formats a path may name: ours, and MagicaVoxel's.
+const DOCUMENT_EXTENSIONS: [&str; 2] = ["vxm", "vox"];
+
+/// A document path with an extension: a bare name gains `.vxm`, and anything
+/// else is refused.
+///
+/// The same family of rule as `screenshot`'s required `.png`. An agent that
+/// wrote "robot" meant the document format, and one that wrote "robot.txt" has
+/// made a mistake worth hearing now rather than finding later as a file nothing
+/// will open. Applied before [`Roots::resolve`], so the path that is reported
+/// back is the path that was written.
+fn document_path(given: &str) -> Result<String, String> {
+    let path = Path::new(given);
+    let Some(ext) = path.extension() else {
+        return Ok(format!("{given}.vxm"));
+    };
+    let ext = ext.to_string_lossy().to_lowercase();
+    if DOCUMENT_EXTENSIONS.contains(&ext.as_str()) {
+        return Ok(given.to_string());
+    }
+    if voxel_core::format::is_export_only(path) {
+        return Err(format!(
+            "{given:?} names an export format; export_model writes those, and a document \
+             is .vxm (ours) or .vox (MagicaVoxel's)"
+        ));
+    }
+    Err(format!(
+        "{given:?} ends in {ext:?}; a model is .vxm (ours) or .vox (MagicaVoxel's). Leave \
+         the extension off and .vxm is added"
+    ))
 }
 
 /// The canonical form of a path that may not exist yet: canonicalise the
@@ -320,6 +572,16 @@ pub fn list() -> Vec<ToolInfo> {
     let object = json!({
         "description": "An object, by its index (0 is the scene root) or by its name.",
         "type": ["integer", "string"]
+    });
+    // One fragment for all three document tools: where a name lands is a
+    // property of the server, not of the operation, and three wordings of it
+    // are three chances to disagree.
+    let model_path = json!({
+        "type": "string",
+        "description": "A name in the server's model directory, e.g. \"robot.vxm\", or an \
+         absolute path inside it. No extension means .vxm; .vox is MagicaVoxel's format. A \
+         subdirectory must already exist — these tools create none. The `path` and `absolute` \
+         fields other tools return can be passed straight back."
     });
 
     let mut tools = vec![
@@ -454,11 +716,7 @@ pub fn list() -> Vec<ToolInfo> {
                  file that does not exist is an error — use new_model to start one.",
             input_schema: json!({
                 "type": "object",
-                "properties": {"path": {
-                    "type": "string",
-                    "description": "Relative to the root, e.g. \"robot.vxm\". A .vox extension \
-                     reads MagicaVoxel's format; anything else reads .vxm."
-                }},
+                "properties": {"path": model_path.clone()},
                 "required": ["path"],
             }),
         },
@@ -471,7 +729,7 @@ pub fn list() -> Vec<ToolInfo> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Absolute inside one of the server's directories, or relative to the first."},
+                    "path": model_path.clone(),
                     "size": {"type": "integer", "minimum": 1, "maximum": 256,
                              "description": "Edge length of the cubic volume. Default 32."},
                 },
@@ -504,7 +762,7 @@ pub fn list() -> Vec<ToolInfo> {
                  put layers and so flattens them; .vxm keeps the whole stack.",
             input_schema: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "Absolute inside one of the server's directories, or relative to the first."}},
+                "properties": {"path": model_path},
             }),
         },
         ToolInfo {
@@ -1770,7 +2028,7 @@ fn dispatch(
             )))
         }
         "open_model" => {
-            let given = path_arg(args)?;
+            let given = document_path(&path_arg(args)?)?;
             let path = root.resolve(&given)?;
             if !path.exists() {
                 return Err(format!("{given:?} does not exist; new_model starts one"));
@@ -1783,8 +2041,11 @@ fn dispatch(
             )))
         }
         "new_model" => {
-            let given = path_arg(args)?;
-            let path = root.resolve(&given)?;
+            // Nothing is written yet, but this is where `save_model` will write,
+            // and a directory that does not exist is better heard now than after
+            // the model has been built.
+            let given = document_path(&path_arg(args)?)?;
+            let path = root.writable(&given)?;
             let size = match args.get("size") {
                 None | Some(Value::Null) => crate::editor::DEFAULT_SIZE,
                 Some(v) => {
@@ -1803,7 +2064,7 @@ fn dispatch(
         }
         "export_model" => {
             let given = path_arg(args)?;
-            let path = root.resolve(&given)?;
+            let path = root.writable(&given)?;
             let known = ["3mf", "obj", "vox"];
             let ext = path
                 .extension()
@@ -1844,7 +2105,7 @@ fn dispatch(
         }
         "save_model" => {
             let path = match args.get("path").and_then(Value::as_str) {
-                Some(given) => root.resolve(given)?,
+                Some(given) => root.writable(&document_path(given)?)?,
                 // Back where it came from. Still gated on there being a root:
                 // without one the editor's path is the *user's* file, and
                 // saving over it while they work is not an agent's call to
@@ -1975,7 +2236,7 @@ fn screenshot(editor: &mut Editor, root: &Roots, args: &Value) -> Result<CallRes
     let path = match args.get("path") {
         None => None,
         Some(_) => {
-            let p = root.resolve(&path_arg(args)?)?;
+            let p = root.writable(&path_arg(args)?)?;
             if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
                 return Err("screenshot output path must end in .png".into());
             }
@@ -4152,6 +4413,126 @@ mod tests {
         assert!(root.resolve("link/nope.vxm").is_err());
     }
 
+    /// The mistake the default root makes likely: a root that *is* `.../models`
+    /// and a path that says `models/` again. Inside the root, so every other
+    /// check passes, and a save would land two levels down where nobody looks.
+    #[test]
+    fn a_path_that_repeats_the_root_is_refused_and_names_the_one_to_pass() {
+        let dir = temp_root("doubled").join("models");
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Roots::new([dir.clone()]);
+        let real = dir.canonicalize().unwrap();
+
+        let err = root.resolve("models/robot.vxm").unwrap_err();
+        assert!(err.contains("robot.vxm"), "names the path to pass: {err}");
+        // The same mistake spelled absolutely repeats the whole root.
+        let doubled = real.join("models").join("robot.vxm");
+        assert!(root.resolve(doubled.to_str().unwrap()).is_err());
+        // And the ordinary path is untouched.
+        assert_eq!(root.resolve("robot.vxm").unwrap(), real.join("robot.vxm"));
+    }
+
+    /// Guarded on existence, because a real `models/` inside a root named
+    /// `models` is somebody's own directory, and refusing it would be inventing
+    /// a rule about their filenames.
+    #[test]
+    fn a_directory_that_really_is_named_after_the_root_still_works() {
+        let dir = temp_root("doubled-real").join("models");
+        std::fs::create_dir_all(dir.join("models")).unwrap();
+        let inner = dir.canonicalize().unwrap().join("models").join("robot.vxm");
+        std::fs::write(&inner, b"VXM5").unwrap();
+        assert_eq!(
+            Roots::new([dir]).resolve("models/robot.vxm").unwrap(),
+            inner
+        );
+    }
+
+    /// A shell expands `~`; nothing here does. Left alone it is an ordinary
+    /// directory name, and the file lands at `<root>/~/...` forever.
+    #[test]
+    fn a_leading_tilde_is_refused_rather_than_taken_as_a_directory_name() {
+        let root = Roots::new([temp_root("tilde")]);
+        for bad in ["~/robot.vxm", "~", "~fred/robot.vxm"] {
+            let err = root.resolve(bad).unwrap_err();
+            assert!(err.contains('~'), "{bad:?}: {err}");
+        }
+    }
+
+    /// The file tools create no directories, so a path into one that is not
+    /// there is refused rather than written — which is what makes every other
+    /// mistake about *where* a file goes stop at a message instead of
+    /// succeeding somewhere nobody looks.
+    #[test]
+    fn a_write_into_a_directory_that_does_not_exist_is_refused() {
+        let dir = temp_root("no-such-dir");
+        let root = Roots::new([dir.clone()]);
+
+        assert!(root.resolve("parts/arm.vxm").is_ok(), "reading resolves");
+        let err = root.writable("parts/arm.vxm").unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+
+        std::fs::create_dir(dir.join("parts")).unwrap();
+        assert!(root.writable("parts/arm.vxm").is_ok(), "once it is there");
+        assert!(root.writable("arm.vxm").is_ok(), "the root itself is there");
+    }
+
+    /// The same family of rule as `screenshot`'s required `.png`: a bare name
+    /// means the document format, and a foreign extension is a mistake worth
+    /// hearing now rather than as a file nothing will open later.
+    #[test]
+    fn a_bare_name_gains_vxm_and_a_foreign_extension_is_refused() {
+        assert_eq!(document_path("robot").unwrap(), "robot.vxm");
+        assert_eq!(document_path("parts/arm").unwrap(), "parts/arm.vxm");
+        assert_eq!(document_path("robot.vxm").unwrap(), "robot.vxm");
+        assert_eq!(document_path("robot.VOX").unwrap(), "robot.VOX");
+        // An export format names the tool that writes it.
+        assert!(document_path("robot.3mf").unwrap_err().contains("export"));
+        assert!(document_path("robot.txt").is_err());
+    }
+
+    /// The whole point of the default: nothing is taken from the working
+    /// directory, so the answer is the same however the server was started.
+    #[test]
+    fn roots_come_from_an_argument_then_the_variable_then_the_default_place() {
+        let arg = temp_root("choose-arg");
+        let env = temp_root("choose-env");
+
+        let (roots, source) = Roots::choose_from(
+            &[arg.display().to_string()],
+            Some(env.display().to_string().into()),
+        )
+        .unwrap();
+        assert_eq!(source, RootSource::Argument, "explicit always wins");
+        assert_eq!(roots.primary().unwrap(), arg.canonicalize().unwrap());
+
+        let (roots, source) =
+            Roots::choose_from(&[], Some(env.display().to_string().into())).unwrap();
+        assert_eq!(source, RootSource::Environment);
+        assert_eq!(roots.primary().unwrap(), env.canonicalize().unwrap());
+
+        // An empty variable is unset, not a root of "".
+        let (_, source) = Roots::choose_from(&[], Some(String::new().into())).unwrap();
+        assert_eq!(source, RootSource::Default);
+
+        // A directory that is not there is named, with where it was named.
+        let missing = env.join("gone").display().to_string();
+        assert!(Roots::choose_from(std::slice::from_ref(&missing), None)
+            .unwrap_err()
+            .contains("argument"));
+        assert!(Roots::choose_from(&[], Some(missing.into()))
+            .unwrap_err()
+            .contains(ROOT_VAR));
+    }
+
+    /// It has to be somewhere a person would look, and it has to be absolute:
+    /// the whole reason it exists is that a relative answer moves.
+    #[test]
+    fn the_default_place_is_an_absolute_directory_named_after_the_editor() {
+        let dir = Roots::default_dir().expect("a home directory in a test environment");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_eq!(dir.file_name().unwrap(), "voxeler");
+    }
+
     /// What the agent is told at `initialize`, since it cannot see the
     /// server's working directory.
     #[test]
@@ -4329,6 +4710,31 @@ mod tests {
         assert_eq!(e.model().size(), [16, 16, 16]);
         assert_eq!(e.model().get(1, 1, 1), 4);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End to end, because the rule is only worth anything where a write
+    /// happens: the extension is added, the written path is what comes back,
+    /// and a subdirectory that was imagined stops the save rather than
+    /// succeeding into a place nobody will look.
+    #[test]
+    fn a_save_names_the_file_it_actually_wrote_and_refuses_a_missing_directory() {
+        let dir = temp_root("save-path");
+        let root = Roots::new([dir.clone()]);
+        let mut e = editor();
+        run_in(&mut e, &root, "new_model", json!({"path": "robot"}));
+
+        let saved = run_in(&mut e, &root, "save_model", json!({"path": "robot"}));
+        assert_eq!(saved.is_error, None);
+        assert_eq!(json_of(&saved)["path"], "robot.vxm");
+        assert!(dir.join("robot.vxm").exists());
+
+        let missing = run_in(&mut e, &root, "save_model", json!({"path": "parts/arm"}));
+        assert_eq!(missing.is_error, Some(true));
+        assert!(!dir.join("parts").exists(), "and made no directory");
+
+        let foreign = run_in(&mut e, &root, "save_model", json!({"path": "robot.txt"}));
+        assert_eq!(foreign.is_error, Some(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

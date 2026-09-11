@@ -776,6 +776,34 @@ log a failure every time anyone ran `voxeler attach`.
 was given, and refuses to leave them. An MCP server is driven by a model reading
 content nobody vetted, so this is a boundary rather than a convenience.
 
+**The roots never come from the working directory, which is why `voxeler mcp`
+needs no arguments.** `Roots::choose` takes an argument, then `VOXELER_ROOT`,
+then one default place — `~/Documents/voxeler`, created if absent; the XDG data
+directory on a Linux account with no `Documents`. The working directory is the
+same thing absolute paths exist to work around: a desktop client spawns its
+servers with whatever directory the *app* had, so a root taken from it moves with
+how the client was launched. A fixed default is only worse than that if it is a
+secret, so it is printed at startup and named in the `initialize` instructions.
+
+**The refusals name the path to pass instead**, because the caller cannot see the
+directory it was given:
+
+- **A path that repeats its own root.** A root that *is* `.../voxeler` makes
+  `voxeler/robot.vxm` land at `.../voxeler/voxeler/robot.vxm` — inside the root,
+  so every other check passes, and the save succeeds where nobody looks. The
+  absolute spelling repeats the whole root, so one loop over how much of the root
+  came back covers both, guarded on the path not existing: a real `voxeler/`
+  inside a root named `voxeler` is somebody's own directory.
+- **A leading `~`.** Only a shell expands it; left alone the file lands at
+  `<root>/~/...` forever.
+- **A directory that is not there.** `Roots::writable` is the write path and the
+  guardrail under every other mistake about where a file goes — a write creates
+  the file it names, so without it a typo in `parts/` succeeds. Making a
+  directory stays a person's job, which is also the only way to tell an agent
+  "no, put it there".
+- **An extension that is not `.vxm` or `.vox`.** A bare name gains `.vxm`, in
+  `document_path` *before* resolving, so the reported path is the written one.
+
 **Absolute paths are accepted, and that is the point.** They were refused at
 first, on the reasoning that a relative path under a known root is unambiguous.
 It is not: a desktop MCP client spawns its servers with whatever working
@@ -783,14 +811,16 @@ directory the *app* had, so neither the user nor the agent can say where a bare
 file name lands. Reported from use. Three things follow:
 
 - The roots are named in the `initialize` **instructions**, so the agent is told
-  where it may write before it tries rather than after a refused save.
+  where it may write before it tries rather than after a refused save. With one
+  root — the ordinary case now — that text has no "relative to the first" to
+  explain: there is one place and a name lands in it, and saying more invites an
+  agent to reason about a choice it does not have.
 - A relative path resolves against the *first* root; an absolute one may be in
   any of them. Returned file paths follow that same rule, so a saved path can
   be passed back without accidentally selecting a same-named file in another
   root. `list_models` also includes each file's absolute path.
-- `voxeler mcp` with no argument refuses to root at the filesystem root, which
-  is what a desktop client's working directory often is. Explicit is still
-  allowed — `voxeler mcp /` means what it says.
+- Nothing implicit can be the filesystem root any more, since nothing implicit
+  is a working directory. Explicit still means what it says — `voxeler mcp /`.
 
 Two rules on the check itself, and both are load-bearing:
 
@@ -1375,6 +1405,7 @@ cd crates && cargo fmt --check   # CI gates this; `cargo fmt` fixes it
 
 ```bash
 ./crates/target/release/voxeler models/robot.vxm --mcp   # sse on 127.0.0.1:8730
+./crates/target/release/voxeler mcp                     # stdio, headless, default root
 ./crates/target/release/voxeler mcp models/             # stdio, headless
 ./crates/target/release/voxeler attach models/          # a window onto that
 ```
@@ -1472,7 +1503,8 @@ rs-voxeler/
   trimmed after a large erase — `allocated_cells()` is the number to look at.
 - **`voxeler attach` says nothing is running when a server is.** The session
   file is keyed by *canonical* root, and discovery prefers one rooted at the
-  current directory. Name the root explicitly, or check `VOXELER_SESSION_DIR`
+  current directory, then the default place, then the only live session. Name
+  the root explicitly, or check `VOXELER_SESSION_DIR`
   and the cache directory agree between the two processes.
 - **The attached window opens and never updates.** The client polls; the wake
   proxy is what makes the event loop look. Without it `ControlFlow::Wait` sits

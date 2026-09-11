@@ -15,9 +15,10 @@
 //!
 //! Two transports serve an AI agent, because they answer different questions:
 //!
-//! - `voxeler mcp [DIR]` is a **stdio** server, headless, rooted at `DIR`. The
-//!   agent starts it, so "is it running?" never comes up — and `voxeler attach`
-//!   opens a window onto it whenever a person wants to look.
+//! - `voxeler mcp [DIR...]` is a **stdio** server, headless, rooted at `DIR` —
+//!   or, with no argument, at `VOXELER_ROOT` or one default directory. The agent
+//!   starts it, so "is it running?" never comes up — and `voxeler attach` opens
+//!   a window onto it whenever a person wants to look.
 //! - `voxeler FILE --mcp [PORT]` serves **SSE** from a window that is already
 //!   open, for when you were editing first and want an agent to join you.
 
@@ -99,46 +100,39 @@ fn run() -> Result<(), String> {
     }
 }
 
-/// `voxeler mcp [DIR]` — the headless stdio server.
+/// `voxeler mcp [DIR...]` — the headless stdio server.
 ///
 /// The model starts empty and unnamed: an agent's first move is `new_model` or
 /// `open_model`, and inventing a file for it to overwrite would be a worse
 /// default than no file at all.
+///
+/// The directories are `mcp::Roots::choose`'s answer — an argument, then
+/// `VOXELER_ROOT`, then one default place, and never the working directory.
+/// Where they came from is printed, because a default nobody is told about is
+/// indistinguishable from a guess.
 fn serve_mcp(args: &[String]) -> Result<(), String> {
     if args.first().is_some_and(|a| a == "-h" || a == "--help") {
         println!("{USAGE}");
         return Ok(());
     }
 
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for arg in args {
-        let dir = PathBuf::from(arg);
-        if !dir.is_dir() {
-            return Err(format!("{} is not a directory", dir.display()));
-        }
-        dirs.push(dir);
-    }
-    if dirs.is_empty() {
-        let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
-        // A desktop MCP client spawns its servers with whatever working
-        // directory the app happened to have, which is often the filesystem
-        // root. Falling back to that would quietly hand an agent every file on
-        // the machine, so the implicit case refuses it — while an explicit
-        // `voxeler mcp /` still means what it says.
-        if cwd.parent().is_none() {
-            return Err(
-                "no directory given and the working directory is the filesystem root — \
-                 name the directory your models live in, e.g. `voxeler mcp ~/models`"
-                    .into(),
-            );
-        }
-        dirs.push(cwd);
-    }
-    let root = mcp::Roots::new(dirs);
+    let (root, source) = mcp::Roots::choose(args)?;
     let primary = root
         .primary()
         .expect("at least one directory")
         .to_path_buf();
+    eprintln!(
+        "voxeler mcp: models in {}{}",
+        root.display(),
+        match source {
+            mcp::RootSource::Argument => String::new(),
+            mcp::RootSource::Environment => format!(" (from {})", mcp::ROOT_VAR),
+            mcp::RootSource::Default => format!(
+                " (the default place — name a directory or set {} to change it)",
+                mcp::ROOT_VAR
+            ),
+        }
+    );
 
     let editor = editor::Editor::new(
         editor::new_model(DEFAULT_SIZE),
@@ -249,15 +243,18 @@ OPTIONS:
     --mcp [PORT]        also serve the editor to an AI agent over MCP/SSE on
                         127.0.0.1:PORT (default: 8730). The window still opens
 
-`voxeler mcp` takes the directories its file tools may read and write. Name them
-when a desktop MCP client starts the server for you, or its working directory --
-and so where a bare file name lands -- is anyone's guess. Paths given to the
-tools may be absolute inside those directories, or relative to the first.
-
     --thumbnail OUT     render one view to OUT.png and exit, no window
     --width N           thumbnail width  (default: 512)
     --height N          thumbnail height (default: 512)
     -h, --help          print this
+
+`voxeler mcp` takes the directories its file tools may read and write, and needs
+no argument: with none it uses $VOXELER_ROOT, and failing that ~/Documents/voxeler,
+which it creates. The working directory is never used -- a desktop MCP client
+spawns its servers with whatever directory the app had, so a root taken from it
+moves depending on how the client was launched. The directories in use are printed
+at startup and named in the server's MCP instructions. Paths given to the tools
+may be absolute inside them, or relative to the first; no directory is created.
 ";
 
 struct Args {

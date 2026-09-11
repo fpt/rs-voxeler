@@ -124,7 +124,7 @@ pub(super) fn render(
     options.light.ambient = intensity("ambient", 0.7)?;
     options.light.diffuse = intensity("diffuse", 0.3)?;
     let path = if args.get("path").is_some() {
-        let p = root.resolve(&path_arg(args)?)?;
+        let p = root.writable(&path_arg(args)?)?;
         if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
             return Err("preview output must end in .png".into());
         }

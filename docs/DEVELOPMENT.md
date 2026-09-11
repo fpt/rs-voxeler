@@ -23,7 +23,13 @@ make fmt            # fix the formatting
 make fmt-check      # ask whether it needs fixing
 make run            # debug build on models/robot.vxm
 make thumb          # render one frame to /tmp/voxeler.png
+make install        # release build, then install to ~/bin (PREFIX=/usr/local to move it)
 ```
+
+`make install` is what puts `voxeler` on a `PATH`, which is what
+`claude mcp add voxeler -- voxeler mcp` needs to find it. Nothing else in the
+repository depends on it — every command here runs the binary where cargo left
+it.
 
 **The tree is rustfmt-clean, and CI checks it.** It was not for a long time, on
 the reasoning that reformatting is a decision to take on purpose rather than
@@ -43,6 +49,7 @@ past them to whoever wrote the line.
 ./crates/target/release/voxeler models/robot.vxm
 ./crates/target/release/voxeler models/robot.vxm --thumbnail shot.png
 ./crates/target/release/voxeler models/robot.vxm --mcp     # SSE on 127.0.0.1:8730
+./crates/target/release/voxeler mcp                        # stdio, headless, default root
 ./crates/target/release/voxeler mcp models/                # stdio, headless
 ./crates/target/release/voxeler attach models/             # a window onto that
 ```

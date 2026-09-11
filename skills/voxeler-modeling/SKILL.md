@@ -20,8 +20,11 @@ connected to the work.
   editing. Read scene size, active layer, existing layers and `unsaved` state.
   Tool schemas from the running server take precedence over examples here.
 - Read the allowed directories from the server's initialization instructions
-  or `list_models.roots`. Absolute paths may name files inside any of them;
-  relative paths resolve against the first directory only.
+  or `list_models.roots`. There is usually exactly one, and a bare name lands in
+  it. Absolute paths may name files inside any of them; relative paths resolve
+  against the first directory only. Never prefix a path with the root's own
+  basename or with `~` — both are refused, and the refusal names the path to
+  pass instead.
 - For existing assets, use `list_models` and prefer each file's `absolute`
   field, especially when different directories contain the same basename. It
   searches all allowed directories recursively by default; `directory` and
@@ -155,9 +158,13 @@ Save `.vxm` to preserve layers. `.vox` is a flattened export. `new_model` alone
 writes nothing, and a preview is not a model save. Use absolute paths inside an
 allowed directory or paths relative to the first directory; for example,
 `models/character.vxm` refers to `models/` beneath that first directory. Parent
-directories must already exist. Returned save/preview `path` fields are reusable:
-relative to the first directory, absolute otherwise. File tools reject paths
-outside the allowed directories, `..` and symlink components. The windowed SSE
+directories must already exist — these tools create none, so a missing one is a
+refusal, not a directory. A path with no extension gains `.vxm`, and any
+extension other than `.vxm` or `.vox` is refused; the reported `path` is the one
+actually written. Returned save/preview `path` fields are reusable: relative to
+the first directory, absolute otherwise. File tools reject paths outside the
+allowed directories, `..`, a leading `~`, a path that repeats the directory it is
+already in, and symlink components. The windowed SSE
 server has no file access: return screenshots there and explain when the user
 must save the document themselves.
 
