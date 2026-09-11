@@ -4,8 +4,7 @@ A voxel model editor and software renderer in Rust, a rewrite of the ideas in
 the Python `voxeler`.
 
 It is a tool for **making models** — by hand at the window, or by an agent over
-MCP — and the renderer under it exists to show you what you are making. It is
-not a game engine and is not becoming one.
+MCP — and the renderer under it exists to show you what you are making.
 
 ```bash
 make install                              # builds, then puts voxeler on your PATH
