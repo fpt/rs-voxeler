@@ -777,9 +777,13 @@ was given, and refuses to leave them. An MCP server is driven by a model reading
 content nobody vetted, so this is a boundary rather than a convenience.
 
 **The roots never come from the working directory, which is why `voxeler mcp`
-needs no arguments.** `Roots::choose` takes an argument, then `VOXELER_ROOT`,
-then one default place — `~/Documents/voxeler`, created if absent; the XDG data
-directory on a Linux account with no `Documents`. The working directory is the
+needs no arguments.** `Roots::choose` takes an argument, then `VOXELER_ROOT`
+(several directories, split the way a `PATH` is), then one default place —
+`~/Documents/voxeler`, created if absent, and `data_dir` for a home with no
+`Documents`: `XDG_DATA_HOME` on Linux, `LOCALAPPDATA` on Windows, which is the
+shape `session_dir` already had. One platform's convention reached for on the
+other is not an error — it is a directory the user will never find, with their
+model in it. The working directory is the
 same thing absolute paths exist to work around: a desktop client spawns its
 servers with whatever directory the *app* had, so a root taken from it moves with
 how the client was launched. A fixed default is only worse than that if it is a

@@ -623,7 +623,10 @@ is a boundary rather than a convenience. Four rules, all load-bearing:
 - **The roots never come from the working directory.** `Roots::choose` takes an
   argument, then `VOXELER_ROOT`, then one default place — `~/Documents/voxeler`,
   created if it is not there — and that is what lets `voxeler mcp` take no
-  arguments at all. The working directory is the same thing the paragraph above
+  arguments at all. A home with no `Documents` falls back to `data_dir`, which is
+  `XDG_DATA_HOME` on Linux and `LOCALAPPDATA` on Windows: the shape `session_dir`
+  already used, because one platform's convention on the other is not an error
+  but a directory the user will never think to look in. The working directory is the same thing the paragraph above
   refuses to trust, and a root taken from it moves depending on how the client
   was launched. A fixed default is only a worse answer than that if it is a
   secret, so it is printed at startup and named in the `initialize` instructions.

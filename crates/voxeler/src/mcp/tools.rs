@@ -154,9 +154,13 @@ impl Roots {
     /// The default place, whether or not it exists yet.
     ///
     /// `~/Documents/voxeler` where there is a `Documents` — a model is a
-    /// document, and a person looking for one looks there. Without it (a Linux
-    /// account that never made one) the XDG directory for a program's own data,
-    /// which is the answer that platform gives.
+    /// document, and a person looking for one looks there. That is the answer on
+    /// every platform this builds for, Windows included, where it is
+    /// `%USERPROFILE%\Documents`.
+    ///
+    /// Without one — a Linux account that never made it, or a Windows account
+    /// whose Documents has been moved somewhere this cannot see — it falls back
+    /// to [`data_dir`], which is where that platform puts a program's own data.
     ///
     /// `voxeler attach` asks for this too, so a window can find a server that
     /// was given no directory either.
@@ -171,10 +175,7 @@ impl Roots {
         if documents.is_dir() {
             return Ok(documents.join(DEFAULT_DIR));
         }
-        if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-            return Ok(PathBuf::from(data).join(DEFAULT_DIR));
-        }
-        Ok(home.join(".local").join("share").join(DEFAULT_DIR))
+        Ok(data_dir(&home))
     }
 
     /// No filesystem at all — what the SSE transport uses.
@@ -447,6 +448,31 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os(var)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+/// Where this platform puts a program's own data, for a home with no
+/// `Documents` in it.
+///
+/// The same shape [`session::session_dir`](super::session::session_dir) uses,
+/// and for the same reason: `~/.local/share` means nothing on Windows, where a
+/// program's data goes under `LOCALAPPDATA`. One platform's convention reached
+/// for on the other is a directory the user will never find, and neither an
+/// error nor a missing file to go looking for.
+fn data_dir(home: &Path) -> PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            // What LOCALAPPDATA names when it is set, so it is the right guess
+            // when it is not.
+            .unwrap_or_else(|| home.join("AppData").join("Local"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"))
+    };
+    base.join(DEFAULT_DIR)
 }
 
 /// The document formats a path may name: ours, and MagicaVoxel's.
@@ -4531,6 +4557,29 @@ mod tests {
         let dir = Roots::default_dir().expect("a home directory in a test environment");
         assert!(dir.is_absolute(), "{}", dir.display());
         assert_eq!(dir.file_name().unwrap(), "voxeler");
+    }
+
+    /// The fallback for a home with no `Documents`, and the one place in this
+    /// file with a platform in it. Checked on whichever platform the test runs
+    /// on, because the failure is not an error — it is a directory the user will
+    /// never think to look in, with the model they saved sitting in it.
+    #[test]
+    fn a_home_with_no_documents_falls_back_to_this_platforms_data_directory() {
+        let home = PathBuf::from(if cfg!(windows) {
+            r"C:\Users\test"
+        } else {
+            "/home/test"
+        });
+        let dir = data_dir(&home);
+        assert_eq!(dir.file_name().unwrap(), "voxeler");
+        // Never the other platform's convention, which is the mistake worth a
+        // test: both spellings are legal path components everywhere.
+        let text = dir.display().to_string();
+        if cfg!(windows) {
+            assert!(!text.contains(".local"), "{text}");
+        } else {
+            assert!(!text.contains("AppData"), "{text}");
+        }
     }
 
     /// What the agent is told at `initialize`, since it cannot see the

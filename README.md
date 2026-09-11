@@ -30,6 +30,11 @@ make release                              # or: cd crates && cargo build --relea
 ./crates/target/release/voxeler models/robot.vxm
 ```
 
+On Windows, build with cargo — the Makefile's `install` target is `install(1)` —
+and put `crates\target\release\voxeler.exe` somewhere on `PATH`, or name it in
+full wherever these instructions say `voxeler`. The default model directory is
+`%USERPROFILE%\Documents\voxeler`.
+
 ## What exists
 
 | crate | what it is |
@@ -332,8 +337,8 @@ codex mcp add voxeler -- voxeler mcp /path/to/models /path/to/voxels
 ```
 
 `VOXELER_ROOT` says the same thing where a client's config can pass an
-environment but not an argument — several directories separated by `:`, the way a
-`PATH` is:
+environment but not an argument — several directories separated the way a `PATH`
+is, with `:` on macOS and Linux and `;` on Windows:
 
 ```bash
 claude mcp add voxeler -e VOXELER_ROOT=/path/to/models -- voxeler mcp
