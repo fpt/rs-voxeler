@@ -756,9 +756,12 @@ Four rules:
   Without it the whole point — front, side and top as one undo step — would not
   work, and would fail by silently refusing rather than by cutting wrongly.
   Only material widens it: an erase elsewhere puts nothing there to cut.
-- **It erases, and takes no colour.** A colour is refused rather than ignored,
-  because "carve, in red" has no meaning and a silently dropped argument is how
-  an agent comes to believe something happened.
+- **It erases, and takes no colour.** A colour on a carve *operation* is refused
+  rather than ignored, because "carve, in red" has no meaning and a silently
+  dropped argument is how an agent comes to believe something happened. A batch's
+  top-level colour is a different thing — a default for the operations that read
+  one — and a carve simply does not read it. Refusing that would refuse the
+  three-view call itself, whose extrude needs a colour and whose carves do not.
 
 ### The check that catches a flat model is not a picture
 

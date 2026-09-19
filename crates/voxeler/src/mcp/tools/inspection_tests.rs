@@ -498,3 +498,35 @@ fn profile_names_the_axis_a_shape_was_extruded_along() {
     assert_eq!(j["axes"][2]["constant"], false);
     assert!(j["findings"].as_array().unwrap().is_empty(), "{j}");
 }
+
+#[test]
+fn a_batch_colour_is_a_default_a_carve_has_no_use_for() {
+    let mut e = editor();
+    // The three-view call: one top-level colour, read by the extrude that
+    // needs one and not by the carves that only ever erase. Refusing it here
+    // would refuse the whole shape of the thing carve_prism exists for.
+    run(
+        &mut e,
+        "apply_edits",
+        json!({"color": 7, "edits": [
+            {"op": "prism", "axis": "z", "vertices": [[2,2],[6,2],[6,6],[2,6]], "start": 0, "end": 9},
+            {"op": "carve_prism", "axis": "x", "vertices": [[2,2],[6,2],[6,5],[2,5]]}
+        ]}),
+    );
+    assert_eq!(e.model().get(2, 2, 2), 7);
+    assert_eq!(e.model().get(2, 2, 9), 0, "carved, not painted 7");
+    assert_eq!(e.model().filled_count(), 5 * 5 * 4);
+    // A colour on the carve itself is a statement about that operation, and
+    // there it is refused rather than dropped.
+    assert_eq!(
+        call(
+            &mut e,
+            "apply_edits",
+            &json!({"edits": [
+                {"op": "carve_prism", "axis": "x", "vertices": [[2,2],[6,2],[6,5],[2,5]], "color": 7}
+            ]})
+        )
+        .is_error,
+        Some(true)
+    );
+}
