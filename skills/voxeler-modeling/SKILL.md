@@ -1,6 +1,6 @@
 ---
 name: voxeler-modeling
-description: Create, edit, and inspect layered voxel models with the rs-voxeler MCP tools, including modeling from reference images and exporting previews. Use for voxel asset work in voxeler, not for changes to the editor's source code.
+description: Create, edit, and inspect layered voxel models with the rs-voxeler MCP tools, including modeling from one or several reference views and exporting previews. Use for voxel asset work in voxeler, not for changes to the editor's source code.
 ---
 
 # Voxel modeling with rs-voxeler
@@ -51,6 +51,47 @@ belongs on the larger-Z surface. `yaw: 90` views from +X. For a centered model,
 mirror X with `size-1-x`; in a 128-wide scene the symmetry plane is `x=63.5`.
 Apply symmetry to the intended parts, preserving asymmetric accessories shown
 in the reference or requested by the user.
+
+### Start from the views you were given, all of them
+
+**Several views of one subject are a procedure, not encouragement.** Read a
+polygon off each view and let the tools intersect them:
+
+1. `put_prism axis="z"` with the **front** outline as `[x,y]`, spanning the
+   whole depth the part should ever occupy. This is a slab, and on its own it is
+   the flat pixel-art result — it is step one, never the answer.
+2. `carve_prism axis="x"` with the **side** outline as `[y,z]`. This cuts the
+   depth the front view could not say anything about.
+3. `carve_prism axis="y"` with the **top** outline as `[x,z]`, when a top or
+   bottom view exists.
+
+What is left is the intersection of the outlines, which is exactly what the
+views jointly describe. Put all three in one `apply_edits` call: each carve sees
+what the earlier operations in the same batch put down, and the whole thing is
+one undo step. Two views are enough — front and side is the common pair, and
+carving one of them already gives real depth.
+
+```json
+{"layer": "BODY", "color": 5, "edits": [
+  {"op": "prism", "axis": "z", "vertices": [[9,8],[23,8],[25,16],[23,25],[9,25],[7,16]], "start": 4, "end": 27},
+  {"op": "carve_prism", "axis": "x", "vertices": [[8,6],[25,6],[27,16],[25,27],[8,27]]},
+  {"op": "carve_prism", "axis": "y", "vertices": [[9,6],[23,6],[25,16],[23,27],[9,27],[7,16]]}
+]}
+```
+
+A carve cuts only the layer it names and leaves lower layers alone, so carve one
+part at a time and give each part its own layer. Omitted `start`/`end` cut
+through the whole of the part; give them as a pair to cut only a band of it.
+An empty layer is refused, because there is nothing there to cut.
+
+Only then add detail. Round the hull with ellipsoids and capsules, and place
+features on the surface it now actually has.
+
+**With only a single view, depth is yours to invent, and you must.** A head is
+about as deep as it is wide; a limb has a roughly circular section; a torso is
+deeper than it is thick at the shoulders and narrower at the waist. Build it
+from ellipsoids and capsules whose third radius you chose deliberately, and
+check it with `check_profile`.
 
 Use ellipsoids for rounded heads/bodies and capsules for limbs. Match depth as
 well as the front silhouette. Place eyes, markings and a mouth on the actual
@@ -103,10 +144,11 @@ sticking out at its sides.
   it before a scheme change rather than assuming an index, and use
   `replace_color` to move a part to another slot — `set_palette_color` changes
   what the slot means everywhere, which is a different edit.
-- `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid`, `line`, `tapered_line` and `prism`
-  operations. Top-level `layer`/`color` supply defaults; individual operations
-  override them. Explicit layer arguments do not change the active selection.
-  Basic tools such as `put_rect`, `paint` and `fill` use the active layer.
+- `apply_edits` accepts ordered `voxel`, `rect`, `ellipsoid`, `line`,
+  `tapered_line`, `prism` and `carve_prism` operations. Top-level `layer`/`color`
+  supply defaults; individual operations override them. Explicit layer arguments
+  do not change the active selection. Basic tools such as `put_rect`, `paint`
+  and `fill` use the active layer.
 - Prefer one batch for a coherent part or adjustment. It is one undo step
   across layers, validates before writing and applies overlaps in order. Counts
   describe write attempts, so `targeted` can exceed the unique voxel count.
@@ -144,9 +186,18 @@ before changing it. `set_color` changes only the selected drawing index.
 
 ## Inspect, refine and deliver
 
-Inspect a front screenshot for silhouette and facial placement, then an oblique
-or side view for thickness, attachments and floating details. Compare what is
-visible with the reference; voxel counts alone cannot verify resemblance.
+**Look from the side or the top first.** A front view confirms the silhouette,
+which is the one thing a flat extrusion already gets right, so it cannot tell
+you whether the model has any depth; inspect the views the model was *not* built
+from, then the front last. Compare what is visible with the reference; voxel
+counts alone cannot verify resemblance.
+
+Run `check_profile` on each substantial part before delivering. It reports how
+much the cross-section changes from slice to slice along each axis, and names an
+axis whose section never changes — which is what an extrusion is. A part it
+flags is fixed by carving the remaining views with `carve_prism`, or by
+rebuilding it; a column, a wheel or a plate is legitimately constant along one
+axis, so read the finding before acting on it.
 
 `screenshot` accepts `view` presets (`front`, `back`, `left`, `right`, `top`,
 `three_quarter`), optional angle overrides and dimensions from 64 to 1024.
@@ -180,6 +231,8 @@ Use `put_tapered_line` for branches and pointed antennas: its `radius_from` and
 makes a tip. Use `put_prism` for polygonal armour plates: `axis` is extrusion,
 vertices are [y,z] for X, [x,z] for Y, [x,y] for Z; `start`/`end` are inclusive.
 Concave polygons are supported, but holes and crossing edges are not.
+`carve_prism` reads a polygon exactly the same way and removes what falls
+outside it, which is how the views above intersect.
 
 For visual QA, `screenshot_views` makes a labelled multi-view sheet;
 `preview_model` focuses on a part without changing the live camera or visibility.

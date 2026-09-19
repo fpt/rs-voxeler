@@ -416,11 +416,13 @@ whoever connects.
 | `describe_model` | size, voxel count, bounds, the layer stack, active layer, colour |
 | `put_voxel` | one voxel; colour 0 erases |
 | `put_rect` | a solid axis-aligned box, corners inclusive |
-| `apply_edits` | ordered voxel/box/ellipsoid/line/tapered-line/prism edits across layers, one undo step |
+| `apply_edits` | ordered voxel/box/ellipsoid/line/tapered-line/prism/carve edits across layers, one undo step |
 | `put_ellipsoid`, `put_line` | ellipsoid or rounded thick line, optionally on a named layer |
 | `put_tapered_line` | a cone, tapered branch or flat-ended cylinder along any direction |
 | `put_prism` | extrude a simple polygon into armour, with inclusive boundaries |
+| `carve_prism` | cut away everything outside a polygon, so three views intersect into a shape |
 | `check_symmetry`, `check_components` | scoped, read-only mirror and connectivity findings |
+| `check_profile` | how much the cross-section changes per axis; names an extruded one |
 | `preview_model`, `screenshot_views` | focused preview and labelled multi-view sheet |
 | `compare_saved_model` | compare native saved content without reopening |
 | `paint` | recolour the voxels in a box, creating none |
@@ -818,9 +820,15 @@ and directories.
 or half-integer coordinates. It reports mismatched pairs and bounded samples.
 `check_components` reports connected components by size, bounds and owning
 layers; `connectivity:6` requires face contact, while 26 includes corners.
-Neither tool treats its findings as automatic defects.
+`check_profile` slices the scope along each axis and reports how much
+neighbouring slices differ, plus the longest run of identical ones — a
+cross-section that never changes is an extrusion, which is what a model built
+from one view of a multi-view reference looks like. None of these treats its
+findings as automatic defects: a column, a wheel and a plate are legitimately
+constant along one axis.
 
-Both accept one of `layer`, `object` (with descendants), or `selection:true`.
+All three accept one of `layer`, `object` (with descendants), or
+`selection:true`.
 The default scope is the visible composite; `include_hidden:true` composites
 hidden layers too. Optional inclusive `from`/`to` clips the inspected region.
 The limit is 2,097,152 inspected source voxels; narrow the scope if refused.
@@ -855,7 +863,27 @@ repeated vertices and out-of-scene coordinates are refused. Example:
 {"axis":"z","vertices":[[40,60],[87,60],[76,48],[51,48]],"start":80,"end":84,"color":1}
 ```
 
-The existing batch candidate budget and all-or-nothing, one-undo semantics apply.
+`carve_prism` is the inverse: it erases everything the polygon does *not* cover,
+on the layer it names and no other. `axis` and `vertices` read exactly as above;
+`start`/`end` are optional and given as a pair, and omitted they cut through the
+part's whole extent along that axis. An empty target layer is refused, and a
+colour is refused because a carve only ever erases.
+
+Together they turn a three-view reference into the shape it describes — extrude
+the front, then cut the side and the top away — which is what stops a model
+coming out as a flat silhouette with a depth:
+
+```json
+{"color":5,"edits":[
+  {"op":"prism","axis":"z","vertices":[[6,4],[26,4],[16,28]],"start":4,"end":27},
+  {"op":"carve_prism","axis":"x","vertices":[[4,6],[4,26],[28,16]]},
+  {"op":"carve_prism","axis":"y","vertices":[[16,6],[26,16],[16,26],[6,16]]}
+]}
+```
+
+A carve in a batch sees what earlier operations in the same batch put down, so
+all three are one undo step. The existing batch candidate budget and
+all-or-nothing, one-undo semantics apply.
 
 ## Roadmap
 

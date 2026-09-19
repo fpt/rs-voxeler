@@ -26,7 +26,9 @@ temporary editor, never toggle the working model's visibility or slice.
 Saved-file comparisons canonicalize copies and retain undo. Document replacement
 changes `document_id` and clears selection/clipboard; ordinary edits do not.
 `session_id` distinguishes process restarts. `put_prism` includes polygon
-boundaries and uses the same prevalidated one-undo batch path as other shapes.
+boundaries and uses the same prevalidated one-undo batch path as other shapes;
+`carve_prism` is its inverse and `check_profile` is what notices when neither
+was used.
 
 ```text
 voxeler  (the window, an MCP server over stdio or SSE, and `attach`)
@@ -719,6 +721,64 @@ constantly while working, and undo would spend its first few presses turning
 layers back on instead of undoing the edit you wanted back. It still dirties the
 document, because which layers you had hidden is part of the model.
 
+### Three views are an intersection, not three extrusions
+
+Given a front, a side and a top view of the same thing, an agent would build the
+front one and push it through space — a flat drawing with a depth, which is the
+single most common way a model comes out wrong. The reason is that the vocabulary
+only pointed one way: `rect` and `prism` are extrusions by construction, and the
+only primitives that were truly three-dimensional were `ellipsoid` and `line`.
+Told to "match the depth too", an agent reached for the nearest tool it had,
+which was an extrusion.
+
+`carve_prism` is the missing half. `put_prism` keeps what is inside a polygon;
+`carve_prism` erases what is outside one. Extrude the front, carve the side,
+carve the top, and what is left is the intersection of the three silhouettes —
+the visual hull, which is the whole of what a three-view reference says. The
+agent's work is to read three polygons, which is exactly the work `put_prism`
+already asked of it.
+
+Four rules:
+
+- **One `Section` answers for both.** The polygon parse, the validation and the
+  point-in-polygon test are one type used by both operations. Two copies would
+  be two chances for a boundary voxel to be inside for the extrude and outside
+  for the carve, which would leave a shell of stray cells along every edge.
+- **A carve measures material, not the scene.** Its region is the target
+  layer's own occupied box, so a cut costs the part rather than the volume, and
+  `start`/`end` are optional — a silhouette read off a side view cuts through
+  the whole of the thing it was drawn from. Given, they must be given as a pair.
+- **Inside a batch it also measures the batch.** Every operation is expanded
+  before anything is written, so a carve following an extrude in the same call
+  would measure the layer as it was *before* — which on a new part is empty.
+  `apply` therefore carries the bounding box of what each layer has been
+  promised so far, and a carve's region is that box unioned with the layer's.
+  Without it the whole point — front, side and top as one undo step — would not
+  work, and would fail by silently refusing rather than by cutting wrongly.
+  Only material widens it: an erase elsewhere puts nothing there to cut.
+- **It erases, and takes no colour.** A colour is refused rather than ignored,
+  because "carve, in red" has no meaning and a silently dropped argument is how
+  an agent comes to believe something happened.
+
+### The check that catches a flat model is not a picture
+
+A front screenshot confirms the silhouette, which is the one thing an extrusion
+already gets right. Depth only shows from another angle, and perspective reads
+it poorly. `check_profile` answers it in numbers instead: slice the cells along
+each axis and measure the Jaccard distance between neighbouring slices.
+
+What it reports is **sameness, not curvature**. Curvature on a voxel grid is
+mostly noise, and "mean curvature 0.02" is not something an agent can act on. A
+run of identical cross-sections is: it names the axis a shape was extruded
+along, and naming the axis says what to do about it. The finding is a sentence
+with the axis and the slice range in it, and the tool's own description says the
+repair is a `carve_prism` of the other views.
+
+A run has to be at least three slices and more than half the axis before it
+counts, so a flat patch on a shaped part says nothing. A column, a wheel and a
+plate are legitimately constant along one axis, so this is an observation like
+`check_symmetry`'s, not a repair instruction.
+
 ### Two transports, one dispatcher
 
 `voxeler mcp` is **stdio** and headless; `voxeler FILE --mcp` is **SSE** from a
@@ -1235,6 +1295,12 @@ from the one that was asked for.
   Only once every argument is valid does `Editor::apply_writes` commit the ordered
   writes through one `History::edit`. Layer/color defaults can be overridden per
   operation; selection is unchanged. Reports count attempts, including overlaps.
+- **A carve is a write of air, not a second kind of edit.** `carve_prism`
+  expands to cells like every other shape and goes through the same
+  `Editor::apply_writes`, so it is one undo step, composes in `apply_edits` with
+  everything else, and reports the same four outcomes. It cuts only the layer it
+  names: lower layers are what a layer is for, and a carve that reached through
+  them would make parts uncombinable.
 - **Tapered ends follow the branch, not world-up.** `put_tapered_line` and the
   batch `tapered_line` operation interpolate `radius_from` to `radius_to` along
   distinct endpoints. End discs are perpendicular to that axis; a zero radius

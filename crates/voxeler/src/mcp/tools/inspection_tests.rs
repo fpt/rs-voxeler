@@ -403,3 +403,98 @@ fn document_identity_survives_edits_but_not_replacement() {
     assert!(e.clipboard.is_none());
     assert_eq!(session_identity(), session);
 }
+
+#[test]
+fn carving_three_views_makes_a_visual_hull_in_one_batch() {
+    let mut e = editor();
+    let j = run(
+        &mut e,
+        "apply_edits",
+        json!({"color": 5, "edits": [
+            // A front view, pushed all the way through z: an extrusion, and
+            // exactly the shape a three-view reference does not describe.
+            {"op": "prism", "axis": "z", "vertices": [[2,2],[6,2],[6,6],[2,6]], "start": 0, "end": 9},
+            // The side and top views cut the depth it never had. Neither
+            // carries a span, so each cuts through the whole of the part —
+            // including the part this same batch has only just decided on.
+            {"op": "carve_prism", "axis": "x", "vertices": [[2,2],[6,2],[6,5],[2,5]]},
+            {"op": "carve_prism", "axis": "y", "vertices": [[3,2],[6,2],[6,5],[3,5]]}
+        ]}),
+    );
+    assert_eq!(j["operations"], 3);
+    assert_eq!(e.undo_depth(), 1, "three views are one undo step");
+    assert_eq!(e.model().filled_count(), 4 * 5 * 4);
+    assert_eq!(e.model().get(3, 2, 2), 5);
+    assert_eq!(e.model().get(2, 2, 2), 0, "cut by the top view");
+    assert_eq!(e.model().get(3, 2, 1), 0, "cut by the side view");
+    e.undo();
+    assert_eq!(e.model().filled_count(), 0);
+}
+
+#[test]
+fn carving_needs_material_a_paired_span_and_no_colour() {
+    let mut e = editor();
+    let outline = json!([[2, 2], [6, 2], [6, 6], [2, 6]]);
+    // An empty layer has nothing to cut, and saying so is the whole point:
+    // silently removing nothing reads as a tool that does not work.
+    assert_eq!(
+        call(
+            &mut e,
+            "carve_prism",
+            &json!({"axis":"z","vertices":outline})
+        )
+        .is_error,
+        Some(true)
+    );
+    run(
+        &mut e,
+        "put_prism",
+        json!({"axis":"z","vertices":outline,"start":0,"end":9,"color":3}),
+    );
+    let before = e.model().filled_count();
+    for bad in [
+        json!({"axis":"z","vertices":outline,"color":3}),
+        json!({"axis":"z","vertices":outline,"start":1}),
+    ] {
+        assert_eq!(call(&mut e, "carve_prism", &bad).is_error, Some(true));
+    }
+    assert_eq!(e.model().filled_count(), before);
+    run(
+        &mut e,
+        "carve_prism",
+        json!({"axis":"x","vertices":[[2,2],[6,2],[6,3],[2,3]],"start":0,"end":4}),
+    );
+    assert_eq!(e.model().get(2, 2, 4), 0);
+    assert_eq!(e.model().get(5, 2, 4), 3, "outside the span, untouched");
+    assert_eq!(e.model().filled_count(), before - 3 * 5 * 8);
+}
+
+#[test]
+fn profile_names_the_axis_a_shape_was_extruded_along() {
+    let mut e = editor();
+    run(
+        &mut e,
+        "put_prism",
+        json!({"axis":"z","vertices":[[2,1],[13,1],[7.5,10]],"start":0,"end":9,"color":6}),
+    );
+    let j = run(&mut e, "check_profile", json!({}));
+    assert_eq!(j["axes"][2]["axis"], "z");
+    assert_eq!(j["axes"][2]["constant"], true);
+    assert_eq!(j["axes"][2]["max_change"], 0.0);
+    assert_eq!(j["axes"][2]["longest_identical_run"]["slices"], 10);
+    assert_eq!(
+        j["axes"][0]["constant"], false,
+        "a triangle changes along x"
+    );
+    assert_eq!(j["findings"].as_array().unwrap().len(), 1);
+    // Carving a second view gives the depth the extrusion never had, and the
+    // same check then has nothing to say.
+    run(
+        &mut e,
+        "carve_prism",
+        json!({"axis":"x","vertices":[[1,1],[10,1],[1,8]]}),
+    );
+    let j = run(&mut e, "check_profile", json!({}));
+    assert_eq!(j["axes"][2]["constant"], false);
+    assert!(j["findings"].as_array().unwrap().is_empty(), "{j}");
+}

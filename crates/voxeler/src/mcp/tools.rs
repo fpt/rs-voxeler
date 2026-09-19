@@ -1399,14 +1399,15 @@ fn dispatch(
 ) -> Result<CallResult, String> {
     match name {
         "describe_model" => Ok(CallResult::text(describe(editor))),
-        "check_symmetry" | "check_components" => checking::check(editor, name, args),
+        "check_symmetry" | "check_components" | "check_profile" => {
+            checking::check(editor, name, args)
+        }
         "compare_saved_model" => checking::compare_saved(editor, root, args),
         "preview_model" | "screenshot_views" => {
             preview::render(editor, root, args, name == "screenshot_views")
         }
-        "apply_edits" | "put_ellipsoid" | "put_line" | "put_tapered_line" | "put_prism" => {
-            modeling::apply(editor, name, args)
-        }
+        "apply_edits" | "put_ellipsoid" | "put_line" | "put_tapered_line" | "put_prism"
+        | "carve_prism" => modeling::apply(editor, name, args),
         "set_palette_color" => {
             let index = channel(args, "index")?;
             if index == 0 {
