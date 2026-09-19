@@ -57,6 +57,21 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
             input_schema: json!({"type": "object", "properties": components}),
         },
         ToolInfo {
+            name: "check_profile",
+            description:
+                "Read-only cross-section report: how much the shape changes from one slice to \
+                 the next along each axis. Same scopes as check_symmetry. Per axis it gives the \
+                 slice count, the mean and largest change between neighbouring slices, and the \
+                 longest run of identical ones. A cross-section that does not change IS an \
+                 extrusion — a drawing pushed through space — so this is the check that catches \
+                 a model built from one view of a multi-view reference. Rebuild a flagged axis \
+                 with varying sections, or carve the other views with carve_prism. Geometry \
+                 only; colour is ignored. A column, a wheel and a plate are legitimately \
+                 constant along one axis, so a finding is an observation, not a defect. At most \
+                 2097152 inspected source voxels; narrow the scope if refused.",
+            input_schema: json!({"type": "object", "properties": scope_schema()}),
+        },
+        ToolInfo {
             name: "compare_saved_model",
             description:
                 "Compare the current document with a native .vxm file without opening it, \
@@ -158,6 +173,10 @@ fn limit(args: &Value) -> Result<usize, String> {
 }
 
 pub(super) fn check(editor: &Editor, name: &str, args: &Value) -> Result<CallResult, String> {
+    if name == "check_profile" {
+        let report = profile(&collect(editor, args)?);
+        return Ok(CallResult::text(format!("{name}\n{report}")));
+    }
     let limit = limit(args)?;
     let cells = collect(editor, args)?;
     let report = if name == "check_symmetry" {
@@ -284,6 +303,109 @@ pub(super) fn check(editor: &Editor, name: &str, args: &Value) -> Result<CallRes
         })
     };
     Ok(CallResult::text(format!("{name}\n{report}")))
+}
+
+/// Slice the cells along each axis and measure how much neighbouring slices
+/// differ. The number that matters is not curvature — on a voxel grid that is
+/// mostly noise, and an agent cannot act on it — but sameness: a run of
+/// identical sections names the axis a shape was extruded along, and naming it
+/// says what to do about it.
+fn profile(cells: &Cells) -> Value {
+    let Some((lo, hi)) = bounds(cells) else {
+        return json!({
+            "voxels": 0, "empty": true, "axes": [], "findings": [],
+            "note": "nothing in scope; check layer/object/selection or include_hidden",
+        });
+    };
+    let round = |v: f64| (v * 1000.).round() / 1000.;
+    let mut axes = Vec::new();
+    let mut findings = Vec::new();
+    for a in 0..3 {
+        let name = ["x", "y", "z"][a];
+        let (u, v) = [(1, 2), (0, 2), (0, 1)][a];
+        let count = (hi[a] - lo[a] + 1) as usize;
+        let mut slices = vec![Vec::new(); count];
+        for p in cells.keys() {
+            slices[(p[a] - lo[a]) as usize].push([p[u], p[v]]);
+        }
+        for s in &mut slices {
+            s.sort_unstable();
+        }
+        let changes: Vec<f64> = slices
+            .windows(2)
+            .map(|w| {
+                let (mut i, mut j, mut shared) = (0, 0, 0);
+                while i < w[0].len() && j < w[1].len() {
+                    match w[0][i].cmp(&w[1][j]) {
+                        std::cmp::Ordering::Less => i += 1,
+                        std::cmp::Ordering::Greater => j += 1,
+                        std::cmp::Ordering::Equal => {
+                            shared += 1;
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                }
+                let union = w[0].len() + w[1].len() - shared;
+                if union == 0 {
+                    0.
+                } else {
+                    1. - shared as f64 / union as f64
+                }
+            })
+            .collect();
+        // The longest stretch of consecutive slices that are all the same.
+        let (mut best, mut best_start, mut run, mut start) = (1usize, 0usize, 1usize, 0usize);
+        for (i, c) in changes.iter().enumerate() {
+            if *c == 0. {
+                run += 1;
+            } else {
+                run = 1;
+                start = i + 1;
+            }
+            if run > best {
+                best = run;
+                best_start = start;
+            }
+        }
+        let max = changes.iter().copied().fold(0., f64::max);
+        let mean = if changes.is_empty() {
+            0.
+        } else {
+            changes.iter().sum::<f64>() / changes.len() as f64
+        };
+        // Three slices is the shortest run that can mean anything, and a run
+        // has to be most of the axis before it describes the shape rather than
+        // a flat patch on it.
+        let constant = best >= 3 && best * 2 > count;
+        let (from, to) = (
+            lo[a] + best_start as i32,
+            lo[a] + (best_start + best - 1) as i32,
+        );
+        if constant {
+            findings.push(format!(
+                "the cross-section does not change along {name}: {best} of {count} slices, \
+                 {name}={from}..{to}, are identical. That is an extrusion, not a modelled \
+                 depth — carve the other views with carve_prism, or rebuild the part."
+            ));
+        }
+        axes.push(json!({
+            "axis": name,
+            "slices": count,
+            "max_change": round(max),
+            "mean_change": round(mean),
+            "longest_identical_run": {"slices": best, "from": from, "to": to},
+            "constant": constant,
+        }));
+    }
+    json!({
+        "voxels": cells.len(),
+        "bounds": {"min": lo, "max": hi},
+        "axes": axes,
+        "findings": findings,
+        "note": "change is the Jaccard distance between neighbouring slices, 0 identical and \
+         1 disjoint; occupancy only, colour ignored",
+    })
 }
 
 pub(super) fn compare_saved(

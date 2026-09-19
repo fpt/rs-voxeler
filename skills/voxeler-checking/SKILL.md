@@ -1,6 +1,6 @@
 ---
 name: voxeler-checking
-description: Inspect voxel model geometry, symmetry, connections, multi-view appearance and saved native content using rs-voxeler MCP. Use for model QA or verification of a model edit, not source-code review.
+description: Inspect voxel model geometry, symmetry, cross-sections, connections, multi-view appearance and saved native content using rs-voxeler MCP. Use for model QA or verification of a model edit, including checking that a model has real depth rather than an extruded silhouette, not source-code review.
 ---
 
 # Check a model without changing it
@@ -24,9 +24,19 @@ robot warrants a symmetry check; a one-sided accessory does not.
   edge/corner contact. Compare both when a thin diagonal tip seems detached.
   Independent accessories and details can be intentional; a connected model
   also does not prove every attachment looks right.
-- Scope either tool to one `layer`, `object` (including descendants), or current
-  `selection`; optional `from`/`to` clips the scope. Default is the visible
-  composite. `include_hidden:true` composites hidden layers too, not a separate
+- `check_profile`: how much the cross-section changes from slice to slice along
+  each axis, and the longest run of identical slices. A cross-section that does
+  not change **is** an extrusion — a flat drawing pushed through space — so this
+  is the check that catches a model built from one view of a multi-view
+  reference, which no screenshot from that same view can show. Run it on a part
+  (`layer` or `object`), not only on the whole model: one flat part inside a
+  good model is the common case, and the whole-model numbers hide it.
+  A flagged axis is fixed by carving the other views with `carve_prism`, or by
+  rebuilding the part. A column, a wheel, a plate and a wall are legitimately
+  constant along one axis, so read the finding before acting on it.
+- Scope any of these tools to one `layer`, `object` (including descendants), or
+  the current `selection`; optional `from`/`to` clips the scope. Default is the
+  visible composite. `include_hidden:true` composites hidden layers too, not a separate
   check of every overlapping layer. Inspect individual layers when needed.
 - A cropped or one-sided scope can itself cause mirror mismatches. Use a scope
   containing both intended sides and an appropriate plane. Empty scope is not
@@ -40,9 +50,15 @@ Use `screenshot_views` for consistent front/right/back/left/top/oblique views.
 it isolates by default, while `isolate:false` retains visible surroundings.
 Both ignore the working slice and preserve camera, visibility, selection and
 undo. Views are perspective: occlusion is not proof that geometry is absent.
-Inspect the returned image, not just counts. Check attachments in context as
-well as isolated shape when that distinction matters. Keep scope, view and
-lighting comparable for before/after evidence.
+Inspect the returned image, not just counts.
+
+**Check the side or the top first, not the front.** A front view confirms the
+silhouette, which is the one thing a flat extrusion already gets right; depth
+only shows from another angle. When a reference gave several views, check the
+views the model was *not* built from, and pair them with `check_profile`.
+
+Check attachments in context as well as isolated shape when that distinction
+matters. Keep scope, view and lighting comparable for before/after evidence.
 
 ## Saved state and reporting
 

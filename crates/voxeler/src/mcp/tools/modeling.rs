@@ -20,11 +20,24 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
     let prism = json!({"axis":{"type":"string","enum":["x","y","z"]},
         "vertices":{"type":"array","minItems":3,"maxItems":64,"items":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2}},
         "start":{"type":"integer"},"end":{"type":"integer"},"color":color,"layer":layer});
+    let carve_span = json!({"type":"integer","description":"Optional, and only as a pair; defaults to the part's own reach along axis."});
+    let mut carve = prism.clone();
+    {
+        let o = carve.as_object_mut().unwrap();
+        o.remove("color");
+        o.insert("start".into(), carve_span.clone());
+        o.insert("end".into(), carve_span.clone());
+    }
     vec![
         ToolInfo {
             name:"put_prism",
             description:"Extrude a simple polygon into solid armour. axis names the extrusion direction; vertices are [y,z] for x, [x,z] for y, [x,y] for z. start/end are inclusive integer coordinates. 3..64 vertices, either winding, concave allowed; no repeated vertices, self-intersections or holes. Integer voxel centers on polygon edges are included, preserving reflected boundaries. All coordinates must be inside the scene. Colour 0 erases; explicit layer supported; one undo step.",
             input_schema:json!({"type":"object","properties":prism,"required":["axis","vertices","start","end"]}),
+        },
+        ToolInfo {
+            name:"carve_prism",
+            description:"Cut away everything a silhouette does NOT cover, on one layer. The inverse of put_prism, and the second and third steps of building from a three-view reference: extrude the front outline with put_prism axis=z, then carve_prism axis=x with the side outline and axis=y with the top outline. The result is the intersection of the three views, which is the shape the reference actually describes — where a single extrusion is only ever the one view it was drawn from. axis and vertices are read exactly as put_prism: vertices are [y,z] for x, [x,z] for y, [x,y] for z. start/end are optional, and given together; omitted, the cut spans the part's own extent along axis. Only the named layer is cut and lower layers are untouched, so carve one part at a time. Refused when the target layer is empty. One undo step.",
+            input_schema:json!({"type":"object","properties":carve,"required":["axis","vertices"]}),
         },
         ToolInfo {
             name: "put_ellipsoid",
@@ -43,7 +56,7 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "apply_edits",
-            description: "Apply ordered voxel, rect, ellipsoid, line, tapered_line and prism operations as ONE undo step, across explicit layers. tapered_line takes from/to and radius_from/radius_to (0 makes a pointed tip), with flat ends perpendicular to its axis. prism takes axis, vertices, start/end as put_prism. Validates the entire request before writing. Later operations win on overlaps. Reports write attempts (including repeated cells), not unique cells. Top-level layer/color supply defaults; each operation can override them. Selection stays unchanged. At most 262144 operations and 2097152 candidate cells per call; split larger requests.",
+            description: "Apply ordered voxel, rect, ellipsoid, line, tapered_line, prism and carve_prism operations as ONE undo step, across explicit layers. tapered_line takes from/to and radius_from/radius_to (0 makes a pointed tip), with flat ends perpendicular to its axis. prism takes axis, vertices, start/end as put_prism; carve_prism takes axis and vertices and erases what the polygon does not cover, so one call can extrude a front view and carve a side and a top view into a single undo step. A carve only erases, so the top-level colour is simply not one of the defaults it reads; a colour ON a carve operation is refused rather than dropped. Validates the entire request before writing. Later operations win on overlaps. Reports write attempts (including repeated cells), not unique cells. Top-level layer/color supply defaults; each operation can override them. Selection stays unchanged. At most 262144 operations and 2097152 candidate cells per call; split larger requests.",
             input_schema: json!({"type":"object","properties":{
                 "layer":layer, "color":color,
                 "edits":{"type":"array","minItems":1,"maxItems":MAX_OPERATIONS,"items":{
@@ -60,7 +73,8 @@ pub(super) fn schemas() -> Vec<ToolInfo> {
                             "op":{"const":"tapered_line"},"from":triple,"to":triple,
                             "radius_from":taper_radius,"radius_to":taper_radius,"color":color,"layer":layer
                         },"required":["op","from","to","radius_from","radius_to"]},
-                        {"type":"object","properties":{"op":{"const":"prism"},"axis":prism["axis"],"vertices":prism["vertices"],"start":prism["start"],"end":prism["end"],"color":color,"layer":layer},"required":["op","axis","vertices","start","end"]}
+                        {"type":"object","properties":{"op":{"const":"prism"},"axis":prism["axis"],"vertices":prism["vertices"],"start":prism["start"],"end":prism["end"],"color":color,"layer":layer},"required":["op","axis","vertices","start","end"]},
+                        {"type":"object","properties":{"op":{"const":"carve_prism"},"axis":prism["axis"],"vertices":prism["vertices"],"start":carve_span,"end":carve_span,"layer":layer},"required":["op","axis","vertices"]}
                     ]
                 }}
             },"required":["edits"]}),
@@ -111,6 +125,7 @@ pub(super) fn apply(editor: &mut Editor, name: &str, args: &Value) -> Result<Cal
                 "put_line" => "line",
                 "put_tapered_line" => "tapered_line",
                 "put_prism" => "prism",
+                "carve_prism" => "carve_prism",
                 _ => return Err(format!("unknown modeling tool {name:?}")),
             },
             args,
@@ -119,6 +134,11 @@ pub(super) fn apply(editor: &mut Editor, name: &str, args: &Value) -> Result<Cal
     let mut writes = Vec::new();
     let mut remaining = MAX_WRITES;
     let mut layers = std::collections::BTreeSet::new();
+    // What each layer has been given so far in this call. A carve measures the
+    // material it may cut, and inside one batch that material is partly the
+    // batch's own earlier work, which is not in the model yet.
+    let mut pending: std::collections::BTreeMap<usize, ([i32; 3], [i32; 3])> =
+        std::collections::BTreeMap::new();
     for (i, (op, params)) in operations.iter().enumerate() {
         let result = (|| {
             let layer = if params.get("layer").is_some() {
@@ -126,13 +146,33 @@ pub(super) fn apply(editor: &mut Editor, name: &str, args: &Value) -> Result<Cal
             } else {
                 default_layer
             };
-            let color = if params.get("color").is_some() {
+            let carving = *op == "carve_prism";
+            if carving && params.get("color").is_some() {
+                return Err("carve_prism always erases and takes no colour".into());
+            }
+            let color = if carving {
+                0
+            } else if params.get("color").is_some() {
                 color_arg(editor, params)?
             } else {
                 default_color
             };
-            let cells = cells(editor.model(), op, params, &mut remaining)?;
+            let extent = carving
+                .then(|| layer_extent(editor.model(), layer, pending.get(&layer).copied()))
+                .flatten();
+            let cells = cells(editor.model(), op, params, &mut remaining, extent)?;
             layers.insert(layer);
+            if color != 0 {
+                // Only material widens the reach of a later carve; an erase
+                // reaching somewhere else does not put anything there to cut.
+                for p in &cells {
+                    let e = pending.entry(layer).or_insert((*p, *p));
+                    for (i, v) in p.iter().enumerate() {
+                        e.0[i] = e.0[i].min(*v);
+                        e.1[i] = e.1[i].max(*v);
+                    }
+                }
+            }
             writes.extend(cells.into_iter().map(|pos| CellWrite { layer, pos, color }));
             Ok::<_, String>(())
         })();
@@ -203,6 +243,7 @@ fn cells(
     op: &str,
     args: &Value,
     remaining: &mut usize,
+    extent: Option<([i32; 3], [i32; 3])>,
 ) -> Result<Vec<[i32; 3]>, String> {
     match op {
         "voxel" => {
@@ -217,6 +258,7 @@ fn cells(
         }
         "tapered_line" => tapered_line_cells(model, args, remaining),
         "prism" => prism_cells(model, args, remaining),
+        "carve_prism" => carve_cells(model, args, remaining, extent),
         "ellipsoid" | "line" => {
             let size = model.size();
             let (a, b, r) = if op == "ellipsoid" {
@@ -323,26 +365,77 @@ fn tapered_line_cells(
     Ok(out)
 }
 
-fn prism_cells(
-    model: &VoxelModel,
-    args: &Value,
-    remaining: &mut usize,
-) -> Result<Vec<[i32; 3]>, String> {
+fn cross(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+}
+
+fn on(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> bool {
+    cross(a, b, p).abs() <= 1e-9
+        && (0..2).all(|i| p[i] >= a[i].min(b[i]) - 1e-9 && p[i] <= a[i].max(b[i]) + 1e-9)
+}
+
+/// A silhouette read off one view: the polygon, and which two scene axes its
+/// two coordinates name. `put_prism` extrudes what is inside it and
+/// `carve_prism` removes what is outside, so both ask the same question of the
+/// same shape and neither may answer it differently.
+struct Section {
+    axis: usize,
+    u: usize,
+    v: usize,
+    points: Vec<[f64; 2]>,
+}
+
+impl Section {
+    fn contains(&self, a: i32, b: i32) -> bool {
+        let p = [f64::from(a), f64::from(b)];
+        let n = self.points.len();
+        let mut inside = false;
+        for i in 0..n {
+            let (q, r) = (self.points[i], self.points[(i + 1) % n]);
+            // A voxel centre on an edge belongs to the polygon, so a reflected
+            // boundary comes out the same as the one it was reflected from.
+            if on(q, r, p) {
+                return true;
+            }
+            if (q[1] > p[1]) != (r[1] > p[1])
+                && p[0] < (r[0] - q[0]) * (p[1] - q[1]) / (r[1] - q[1]) + q[0]
+            {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    /// The integer voxel centres the polygon can reach, in `u`/`v` order.
+    fn extent(&self) -> ([i32; 2], [i32; 2]) {
+        let mut lo = [0; 2];
+        let mut hi = [0; 2];
+        for c in 0..2 {
+            lo[c] = self
+                .points
+                .iter()
+                .map(|p| p[c])
+                .fold(f64::INFINITY, f64::min)
+                .ceil() as i32;
+            hi[c] = self
+                .points
+                .iter()
+                .map(|p| p[c])
+                .fold(f64::NEG_INFINITY, f64::max)
+                .floor() as i32;
+        }
+        (lo, hi)
+    }
+}
+
+fn section(model: &VoxelModel, args: &Value) -> Result<Section, String> {
     let (axis, u, v) = match args.get("axis").and_then(Value::as_str) {
         Some("x") => (0, 1, 2),
         Some("y") => (1, 0, 2),
         Some("z") => (2, 0, 1),
-        _ => return Err("prism axis must be x, y or z".into()),
+        _ => return Err("axis must be x, y or z".into()),
     };
     let size = model.size();
-    let depth = |key: &str| -> Result<i32, String> {
-        args.get(key)
-            .and_then(Value::as_i64)
-            .filter(|n| *n >= 0 && *n < i64::from(size[axis]))
-            .map(|n| n as i32)
-            .ok_or_else(|| format!("{key} must be an integer inside the scene"))
-    };
-    let (start, end) = (depth("start")?, depth("end")?);
     let points = args
         .get("vertices")
         .and_then(Value::as_array)
@@ -366,13 +459,6 @@ fn prism_cells(
             Ok(p)
         })
         .collect::<Result<_, String>>()?;
-    let cross = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
-        (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
-    };
-    let on = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
-        cross(a, b, p).abs() <= 1e-9
-            && (0..2).all(|i| p[i] >= a[i].min(b[i]) - 1e-9 && p[i] <= a[i].max(b[i]) + 1e-9)
-    };
     let n = points.len();
     for i in 0..n {
         for j in i + 1..n {
@@ -412,50 +498,119 @@ fn prism_cells(
     if area.abs() <= 1e-9 {
         return Err("polygon has zero area".into());
     }
+    Ok(Section { axis, u, v, points })
+}
+
+/// `start`/`end` as scene coordinates on the section's own axis.
+fn span(model: &VoxelModel, args: &Value, axis: usize) -> Result<Option<(i32, i32)>, String> {
+    let size = model.size();
+    let depth = |key: &str| -> Result<Option<i32>, String> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_i64()
+                .filter(|n| *n >= 0 && *n < i64::from(size[axis]))
+                .map(|n| Some(n as i32))
+                .ok_or_else(|| format!("{key} must be an integer inside the scene")),
+        }
+    };
+    match (depth("start")?, depth("end")?) {
+        (Some(a), Some(b)) => Ok(Some((a.min(b), a.max(b)))),
+        (None, None) => Ok(None),
+        _ => Err("start and end must be given together".into()),
+    }
+}
+
+fn prism_cells(
+    model: &VoxelModel,
+    args: &Value,
+    remaining: &mut usize,
+) -> Result<Vec<[i32; 3]>, String> {
+    let s = section(model, args)?;
+    let (start, end) = span(model, args, s.axis)?.ok_or("prism needs start and end")?;
+    let (plo, phi) = s.extent();
     let mut lo = [0; 3];
     let mut hi = [0; 3];
-    lo[axis] = start.min(end);
-    hi[axis] = start.max(end);
-    for (dim, coord) in [(u, 0), (v, 1)] {
-        lo[dim] = points
-            .iter()
-            .map(|p| p[coord])
-            .fold(f64::INFINITY, f64::min)
-            .ceil() as i32;
-        hi[dim] = points
-            .iter()
-            .map(|p| p[coord])
-            .fold(f64::NEG_INFINITY, f64::max)
-            .floor() as i32;
-    }
+    lo[s.axis] = start;
+    hi[s.axis] = end;
+    lo[s.u] = plo[0];
+    hi[s.u] = phi[0];
+    lo[s.v] = plo[1];
+    hi[s.v] = phi[1];
     budget(lo, hi, remaining)?;
     let mut out = Vec::new();
-    for a in lo[u]..=hi[u] {
-        for b in lo[v]..=hi[v] {
-            let p = [f64::from(a), f64::from(b)];
-            let mut inside = false;
-            for i in 0..n {
-                let (q, r) = (points[i], points[(i + 1) % n]);
-                if on(q, r, p) {
-                    inside = true;
-                    break;
-                }
-                if (q[1] > p[1]) != (r[1] > p[1])
-                    && p[0] < (r[0] - q[0]) * (p[1] - q[1]) / (r[1] - q[1]) + q[0]
-                {
-                    inside = !inside;
-                }
+    for a in lo[s.u]..=hi[s.u] {
+        for b in lo[s.v]..=hi[s.v] {
+            if !s.contains(a, b) {
+                continue;
             }
-            if inside {
-                for d in lo[axis]..=hi[axis] {
-                    let mut p = [0; 3];
-                    p[axis] = d;
-                    p[u] = a;
-                    p[v] = b;
-                    out.push(p);
-                }
+            for d in lo[s.axis]..=hi[s.axis] {
+                let mut p = [0; 3];
+                p[s.axis] = d;
+                p[s.u] = a;
+                p[s.v] = b;
+                out.push(p);
             }
         }
     }
     Ok(out)
+}
+
+/// The inverse of a prism: everything the silhouette does *not* cover, inside
+/// the material already on the layer. Three of these against three views are a
+/// visual hull, which is the whole of what a three-view reference says — where
+/// one extrusion is only ever the view it was drawn from.
+fn carve_cells(
+    model: &VoxelModel,
+    args: &Value,
+    remaining: &mut usize,
+    extent: Option<([i32; 3], [i32; 3])>,
+) -> Result<Vec<[i32; 3]>, String> {
+    let s = section(model, args)?;
+    let (mut lo, mut hi) = extent.ok_or(
+        "carve_prism has nothing to cut: the target layer is empty. Extrude one view with \
+         put_prism first, then carve the other two.",
+    )?;
+    // A span the caller did not give is the part's own reach along that axis:
+    // a silhouette read off a side view cuts through the whole of it.
+    if let Some((start, end)) = span(model, args, s.axis)? {
+        lo[s.axis] = lo[s.axis].max(start);
+        hi[s.axis] = hi[s.axis].min(end);
+    }
+    if (0..3).any(|i| lo[i] > hi[i]) {
+        return Ok(Vec::new());
+    }
+    budget(lo, hi, remaining)?;
+    Ok(box_cells(lo, hi)
+        .filter(|p| !s.contains(p[s.u], p[s.v]))
+        .collect())
+}
+
+/// What a carve on `layer` may reach: the cells it holds, widened by whatever
+/// earlier operations in the same batch have already decided to write there.
+/// Without the second half, extruding and carving in one call would measure
+/// the layer as it was before the extrusion — which is empty, on a new part.
+fn layer_extent(
+    model: &VoxelModel,
+    layer: usize,
+    pending: Option<([i32; 3], [i32; 3])>,
+) -> Option<([i32; 3], [i32; 3])> {
+    let occupied = model
+        .layers()
+        .get(layer)
+        .map(|l| l.occupied())
+        .filter(|b| !b.is_empty())
+        .map(|b| {
+            (
+                b.origin.map(i32::from),
+                std::array::from_fn(|i| i32::from(b.origin[i] + b.size[i]) - 1),
+            )
+        });
+    match (occupied, pending) {
+        (Some(a), Some(b)) => Some((
+            std::array::from_fn(|i| a.0[i].min(b.0[i])),
+            std::array::from_fn(|i| a.1[i].max(b.1[i])),
+        )),
+        (a, b) => a.or(b),
+    }
 }
