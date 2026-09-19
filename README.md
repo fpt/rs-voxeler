@@ -12,7 +12,7 @@ voxeler models/robot.vxm                  # the window
 claude mcp add voxeler -- voxeler mcp     # and an agent that can build in it
 ```
 
-![the editor](docs/editor.png)
+![a model built in voxeler](docs/robot.png)
 
 ## Installing
 
